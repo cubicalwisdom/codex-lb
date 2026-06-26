@@ -15,6 +15,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 
 import { AlertMessage } from "@/components/alert-message";
+import { CodexLogo } from "@/components/brand/codex-logo";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -748,7 +749,7 @@ function PageHeader() {
   return (
     <div>
       <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-        <Zap className="h-5 w-5 text-primary" aria-hidden="true" />
+        <CodexLogo size={24} />
         CodexNeo
       </h1>
     </div>

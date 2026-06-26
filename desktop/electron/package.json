@@ -5,7 +5,7 @@
   "private": true,
   "main": "main.cjs",
   "scripts": {
-    "package:win": "electron-packager . \"Codex IB\" --platform=win32 --arch=x64 --asar --overwrite"
+    "package:win": "electron-packager . \"Codex IB\" --platform=win32 --arch=x64 --asar --overwrite --icon=assets/icon.ico"
   },
   "devDependencies": {
     "electron": "^39.2.7",

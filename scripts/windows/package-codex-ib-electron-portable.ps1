@@ -152,9 +152,14 @@ $distRoot = Join-Path $repoRoot "dist"
 $targetRoot = if ($OutputDir) { Resolve-FullPath $OutputDir } else { Join-Path $distRoot "CodexIB-Electron-Portable" }
 $electronOut = Join-Path $distRoot "electron-packager-work"
 $electronSource = Join-Path $repoRoot "desktop\electron"
+$electronIcon = Join-Path $electronSource "assets\icon.ico"
 
 Assert-InsideDirectory -Child $targetRoot -Parent $distRoot
 Assert-InsideDirectory -Child $electronOut -Parent $distRoot
+
+if (-not (Test-Path -LiteralPath $electronIcon)) {
+    throw "Missing Electron icon: $electronIcon"
+}
 
 if (-not $SkipFrontendBuild) {
     $bun = Get-BunPath
@@ -193,7 +198,7 @@ New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
 
 Push-Location $electronSource
 try {
-    npx electron-packager . "Codex IB" --platform=win32 --arch=x64 --asar --overwrite --out "$electronOut"
+    npx electron-packager . "Codex IB" --platform=win32 --arch=x64 --asar --overwrite --icon "$electronIcon" --out "$electronOut"
 }
 finally {
     Pop-Location
