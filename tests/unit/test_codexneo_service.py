@@ -97,6 +97,32 @@ async def test_get_settings_handles_invalid_saved_refresh_interval(tmp_path) -> 
     assert settings.codexgo_auto_refresh_interval_minutes == 30
 
 
+@pytest.mark.asyncio
+async def test_update_settings_persists_codex_home_ui_preferences(tmp_path) -> None:
+    service = CodexNeoService(
+        settings_path=tmp_path / "codexneo-settings.json",
+        codex_home=tmp_path / ".codex",
+        encryptor=_encryptor(),
+    )
+
+    settings = await service.update_settings(
+        codex_home_auto_refresh_enabled=True,
+        codex_home_auto_refresh_interval_seconds=2,
+        codex_home_auto_sync_enabled=True,
+        minimize_to_tray_enabled=True,
+    )
+
+    saved = json.loads((tmp_path / "codexneo-settings.json").read_text(encoding="utf-8"))
+    assert settings.codex_home_auto_refresh_enabled is True
+    assert settings.codex_home_auto_refresh_interval_seconds == 5
+    assert settings.codex_home_auto_sync_enabled is True
+    assert settings.minimize_to_tray_enabled is True
+    assert saved["codex_home_auto_refresh_enabled"] is True
+    assert saved["codex_home_auto_refresh_interval_seconds"] == 5
+    assert saved["codex_home_auto_sync_enabled"] is True
+    assert saved["minimize_to_tray_enabled"] is True
+
+
 def test_normalize_codexgo_provider_base_url_strips_action_suffixes() -> None:
     assert (
         normalize_codexgo_provider_base_url("https://codexgo.eu/api/codex-auth/refresh/")

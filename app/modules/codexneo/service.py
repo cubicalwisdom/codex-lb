@@ -29,6 +29,8 @@ DEFAULT_CODEX_API_BASE_URL = "http://127.0.0.1:2455/v1"
 DEFAULT_CODEXGO_API_BASE_URL = "https://codexgo.eu/api/codex-auth"
 MIN_REFRESH_INTERVAL_MINUTES = 5
 MAX_REFRESH_INTERVAL_MINUTES = 1440
+MIN_CODEX_HOME_REFRESH_INTERVAL_SECONDS = 5
+MAX_CODEX_HOME_REFRESH_INTERVAL_SECONDS = 3600
 CONFIG_BEGIN_MARKER = "# BEGIN CodexNeo provider"
 CONFIG_END_MARKER = "# END CodexNeo provider"
 CONFIG_LEGACY_BEGIN_MARKER = "# BEGIN RC Codex Auth Switcher provider"
@@ -91,6 +93,20 @@ def _safe_refresh_interval(value: Any) -> int:
         return 30
 
 
+def _clamp_codex_home_refresh_interval_seconds(value: int) -> int:
+    return max(
+        MIN_CODEX_HOME_REFRESH_INTERVAL_SECONDS,
+        min(MAX_CODEX_HOME_REFRESH_INTERVAL_SECONDS, int(value)),
+    )
+
+
+def _safe_codex_home_refresh_interval_seconds(value: Any) -> int:
+    try:
+        return _clamp_codex_home_refresh_interval_seconds(int(value))
+    except (TypeError, ValueError):
+        return 30
+
+
 class CodexNeoService:
     def __init__(
         self,
@@ -128,6 +144,10 @@ class CodexNeoService:
         codexgo_auto_refresh_interval_minutes: int | None = None,
         openai_activity_log_enabled: bool | None = None,
         management_activity_log_enabled: bool | None = None,
+        codex_home_auto_refresh_enabled: bool | None = None,
+        codex_home_auto_refresh_interval_seconds: int | None = None,
+        codex_home_auto_sync_enabled: bool | None = None,
+        minimize_to_tray_enabled: bool | None = None,
         buyer_token: str | None = None,
         clear_buyer_token: bool = False,
     ) -> CodexNeoSettingsResponse:
@@ -146,6 +166,16 @@ class CodexNeoService:
             data["openai_activity_log_enabled"] = bool(openai_activity_log_enabled)
         if management_activity_log_enabled is not None:
             data["management_activity_log_enabled"] = bool(management_activity_log_enabled)
+        if codex_home_auto_refresh_enabled is not None:
+            data["codex_home_auto_refresh_enabled"] = bool(codex_home_auto_refresh_enabled)
+        if codex_home_auto_refresh_interval_seconds is not None:
+            data["codex_home_auto_refresh_interval_seconds"] = _clamp_codex_home_refresh_interval_seconds(
+                codex_home_auto_refresh_interval_seconds
+            )
+        if codex_home_auto_sync_enabled is not None:
+            data["codex_home_auto_sync_enabled"] = bool(codex_home_auto_sync_enabled)
+        if minimize_to_tray_enabled is not None:
+            data["minimize_to_tray_enabled"] = bool(minimize_to_tray_enabled)
         if clear_buyer_token:
             data["buyer_token_encrypted"] = None
         elif buyer_token is not None:
@@ -258,6 +288,10 @@ class CodexNeoService:
             "codexgo_auto_refresh_interval_minutes": 30,
             "openai_activity_log_enabled": False,
             "management_activity_log_enabled": False,
+            "codex_home_auto_refresh_enabled": False,
+            "codex_home_auto_refresh_interval_seconds": 30,
+            "codex_home_auto_sync_enabled": False,
+            "minimize_to_tray_enabled": False,
             "codex_home_path": None,
             "buyer_token_encrypted": None,
         }
@@ -276,6 +310,12 @@ class CodexNeoService:
         )
         data["openai_activity_log_enabled"] = bool(data["openai_activity_log_enabled"])
         data["management_activity_log_enabled"] = bool(data["management_activity_log_enabled"])
+        data["codex_home_auto_refresh_enabled"] = bool(data["codex_home_auto_refresh_enabled"])
+        data["codex_home_auto_refresh_interval_seconds"] = _safe_codex_home_refresh_interval_seconds(
+            data["codex_home_auto_refresh_interval_seconds"]
+        )
+        data["codex_home_auto_sync_enabled"] = bool(data["codex_home_auto_sync_enabled"])
+        data["minimize_to_tray_enabled"] = bool(data["minimize_to_tray_enabled"])
         if data.get("buyer_token_encrypted") is not None:
             data["buyer_token_encrypted"] = str(data["buyer_token_encrypted"])
         return data
@@ -288,6 +328,10 @@ class CodexNeoService:
             "codexgo_auto_refresh_interval_minutes": data["codexgo_auto_refresh_interval_minutes"],
             "openai_activity_log_enabled": data["openai_activity_log_enabled"],
             "management_activity_log_enabled": data["management_activity_log_enabled"],
+            "codex_home_auto_refresh_enabled": data["codex_home_auto_refresh_enabled"],
+            "codex_home_auto_refresh_interval_seconds": data["codex_home_auto_refresh_interval_seconds"],
+            "codex_home_auto_sync_enabled": data["codex_home_auto_sync_enabled"],
+            "minimize_to_tray_enabled": data["minimize_to_tray_enabled"],
             "codex_home_path": data.get("codex_home_path"),
             "buyer_token_encrypted": data.get("buyer_token_encrypted"),
         }
@@ -301,6 +345,10 @@ class CodexNeoService:
             codexgo_auto_refresh_interval_minutes=data["codexgo_auto_refresh_interval_minutes"],
             openai_activity_log_enabled=data["openai_activity_log_enabled"],
             management_activity_log_enabled=data["management_activity_log_enabled"],
+            codex_home_auto_refresh_enabled=data["codex_home_auto_refresh_enabled"],
+            codex_home_auto_refresh_interval_seconds=data["codex_home_auto_refresh_interval_seconds"],
+            codex_home_auto_sync_enabled=data["codex_home_auto_sync_enabled"],
+            minimize_to_tray_enabled=data["minimize_to_tray_enabled"],
             buyer_token_saved=bool(data.get("buyer_token_encrypted")),
         )
 

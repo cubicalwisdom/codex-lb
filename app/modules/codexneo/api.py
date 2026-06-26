@@ -145,6 +145,10 @@ async def update_codexneo_settings(
         codexgo_auto_refresh_interval_minutes=payload.codexgo_auto_refresh_interval_minutes,
         openai_activity_log_enabled=payload.openai_activity_log_enabled,
         management_activity_log_enabled=payload.management_activity_log_enabled,
+        codex_home_auto_refresh_enabled=payload.codex_home_auto_refresh_enabled,
+        codex_home_auto_refresh_interval_seconds=payload.codex_home_auto_refresh_interval_seconds,
+        codex_home_auto_sync_enabled=payload.codex_home_auto_sync_enabled,
+        minimize_to_tray_enabled=payload.minimize_to_tray_enabled,
         buyer_token=payload.buyer_token,
         clear_buyer_token=payload.clear_buyer_token,
     )

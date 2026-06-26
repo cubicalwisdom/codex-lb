@@ -10,6 +10,7 @@ import {
   ScrollText,
   ShieldCheck,
   TestTubeDiagonal,
+  Minus,
   Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
@@ -93,9 +94,10 @@ export function CodexNeoPage() {
   const [buyerToken, setBuyerToken] = useState("");
   const [accountsRefreshFeedback, setAccountsRefreshFeedback] = useState<string | null>(null);
   const [accountSort, setAccountSort] = useState<AccountSortState>(null);
-  const [codexHomeAutoRefreshEnabled, setCodexHomeAutoRefreshEnabled] = useState(false);
-  const [codexHomeRefreshSeconds, setCodexHomeRefreshSeconds] = useState(DEFAULT_CODEX_HOME_REFRESH_SECONDS);
-  const [codexHomeAutoSyncEnabled, setCodexHomeAutoSyncEnabled] = useState(false);
+  const [codexHomeAutoRefreshEnabledOverride, setCodexHomeAutoRefreshEnabledOverride] = useState<boolean | null>(null);
+  const [codexHomeRefreshSecondsOverride, setCodexHomeRefreshSecondsOverride] = useState<number | null>(null);
+  const [codexHomeAutoSyncEnabledOverride, setCodexHomeAutoSyncEnabledOverride] = useState<boolean | null>(null);
+  const [minimizeToTrayEnabledOverride, setMinimizeToTrayEnabledOverride] = useState<boolean | null>(null);
   const [autoSyncFeedback, setAutoSyncFeedback] = useState<string | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const importFolderInputRef = useRef<HTMLInputElement | null>(null);
@@ -107,6 +109,16 @@ export function CodexNeoPage() {
   const openaiLogEnabled = openaiLogEnabledOverride ?? settings?.openaiActivityLogEnabled ?? false;
   const managementLogEnabled = managementLogEnabledOverride ?? settings?.managementActivityLogEnabled ?? false;
   const intervalMinutes = intervalMinutesOverride ?? settings?.codexgoAutoRefreshIntervalMinutes ?? DEFAULT_INTERVAL_MINUTES;
+  const electronApi = typeof window === "undefined" ? undefined : window.codexIbElectron;
+  const electronControlsAvailable = Boolean(electronApi?.minimizeToTray);
+  const codexHomeAutoRefreshEnabled =
+    codexHomeAutoRefreshEnabledOverride ?? settings?.codexHomeAutoRefreshEnabled ?? false;
+  const codexHomeRefreshSeconds =
+    codexHomeRefreshSecondsOverride ??
+    settings?.codexHomeAutoRefreshIntervalSeconds ??
+    DEFAULT_CODEX_HOME_REFRESH_SECONDS;
+  const codexHomeAutoSyncEnabled = codexHomeAutoSyncEnabledOverride ?? settings?.codexHomeAutoSyncEnabled ?? false;
+  const minimizeToTrayEnabled = minimizeToTrayEnabledOverride ?? settings?.minimizeToTrayEnabled ?? false;
 
   const busy =
     settingsQuery.isPending ||
@@ -154,6 +166,10 @@ export function CodexNeoPage() {
       codexgoAutoRefreshIntervalMinutes: intervalMinutes,
       openaiActivityLogEnabled: openaiLogEnabled,
       managementActivityLogEnabled: managementLogEnabled,
+      codexHomeAutoRefreshEnabled,
+      codexHomeAutoRefreshIntervalSeconds: clampCodexHomeRefreshSeconds(codexHomeRefreshSeconds),
+      codexHomeAutoSyncEnabled,
+      minimizeToTrayEnabled,
     };
     if (buyerToken.trim()) {
       payload.buyerToken = buyerToken.trim();
@@ -163,9 +179,13 @@ export function CodexNeoPage() {
     autoRefreshEnabled,
     buyerToken,
     codexApiBaseUrl,
+    codexHomeAutoRefreshEnabled,
+    codexHomeAutoSyncEnabled,
+    codexHomeRefreshSeconds,
     codexgoApiBaseUrl,
     intervalMinutes,
     managementLogEnabled,
+    minimizeToTrayEnabled,
     openaiLogEnabled,
   ]);
 
@@ -182,6 +202,33 @@ export function CodexNeoPage() {
       return;
     }
     await refreshAuthMutation.mutateAsync();
+  };
+  useEffect(() => {
+    void electronApi?.setMinimizeToTrayEnabled?.(minimizeToTrayEnabled);
+  }, [electronApi, minimizeToTrayEnabled]);
+  const persistCodexNeoSetting = (payload: CodexNeoSettingsUpdateRequest) => {
+    void updateSettingsMutation.mutateAsync(payload);
+  };
+  const setPersistentCodexHomeAutoRefreshEnabled = (checked: boolean) => {
+    setCodexHomeAutoRefreshEnabledOverride(checked);
+    persistCodexNeoSetting({ codexHomeAutoRefreshEnabled: checked });
+  };
+  const setPersistentCodexHomeAutoSyncEnabled = (checked: boolean) => {
+    setCodexHomeAutoSyncEnabledOverride(checked);
+    persistCodexNeoSetting({ codexHomeAutoSyncEnabled: checked });
+  };
+  const saveCodexHomeRefreshSeconds = () => {
+    const clamped = clampCodexHomeRefreshSeconds(codexHomeRefreshSeconds);
+    setCodexHomeRefreshSecondsOverride(clamped);
+    persistCodexNeoSetting({ codexHomeAutoRefreshIntervalSeconds: clamped });
+  };
+  const setPersistentMinimizeToTrayEnabled = (checked: boolean) => {
+    setMinimizeToTrayEnabledOverride(checked);
+    void electronApi?.setMinimizeToTrayEnabled?.(checked);
+    persistCodexNeoSetting({ minimizeToTrayEnabled: checked });
+  };
+  const minimizeWindow = () => {
+    void electronApi?.minimizeToTray({ toTray: minimizeToTrayEnabled });
   };
   const accountRows = useMemo<AccountTableRow[]>(
     () => (accounts?.accounts ?? []).map((account, index) => ({ account, sourceNumber: index + 1 })),
@@ -521,7 +568,7 @@ export function CodexNeoPage() {
                 id="codex-home-auto-refresh-enabled"
                 checked={codexHomeAutoRefreshEnabled}
                 disabled={controlsDisabled}
-                onCheckedChange={setCodexHomeAutoRefreshEnabled}
+                onCheckedChange={setPersistentCodexHomeAutoRefreshEnabled}
               />
               <Label htmlFor="codex-home-auto-refresh-enabled" className="whitespace-nowrap">
                 Auto refresh Codex Home
@@ -537,8 +584,8 @@ export function CodexNeoPage() {
                 max={MAX_CODEX_HOME_REFRESH_SECONDS}
                 value={codexHomeRefreshSeconds}
                 disabled={controlsDisabled}
-                onBlur={() => setCodexHomeRefreshSeconds((value) => clampCodexHomeRefreshSeconds(value))}
-                onChange={(event) => setCodexHomeRefreshSeconds(Number(event.target.value))}
+                onBlur={saveCodexHomeRefreshSeconds}
+                onChange={(event) => setCodexHomeRefreshSecondsOverride(Number(event.target.value))}
               />
             </div>
             <div className="flex h-10 items-center gap-2">
@@ -546,7 +593,7 @@ export function CodexNeoPage() {
                 id="codex-home-auto-sync-enabled"
                 checked={codexHomeAutoSyncEnabled}
                 disabled={controlsDisabled}
-                onCheckedChange={setCodexHomeAutoSyncEnabled}
+                onCheckedChange={setPersistentCodexHomeAutoSyncEnabled}
               />
               <Label htmlFor="codex-home-auto-sync-enabled" className="whitespace-nowrap">
                 Auto sync Codex IB
@@ -557,6 +604,27 @@ export function CodexNeoPage() {
             </Button>
             <Button type="button" variant="outline" disabled={controlsDisabled} onClick={() => syncAccountsMutation.mutateAsync()}>
               {syncAccountsMutation.isPending ? "Syncing..." : "Sync"}
+            </Button>
+            <div className="flex h-10 items-center gap-2">
+              <Switch
+                id="codexneo-minimize-to-tray-enabled"
+                checked={minimizeToTrayEnabled}
+                disabled={controlsDisabled}
+                onCheckedChange={setPersistentMinimizeToTrayEnabled}
+              />
+              <Label htmlFor="codexneo-minimize-to-tray-enabled" className="whitespace-nowrap">
+                Minimize to tray
+              </Label>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={controlsDisabled || !electronControlsAvailable}
+              onClick={minimizeWindow}
+              title={electronControlsAvailable ? "Minimize Codex IB" : "Available in the Electron app"}
+            >
+              <Minus className="h-4 w-4" aria-hidden="true" />
+              Minimize
             </Button>
           </div>
         </div>

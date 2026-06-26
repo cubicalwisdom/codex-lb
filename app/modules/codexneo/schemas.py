@@ -12,6 +12,10 @@ class CodexNeoSettingsResponse(DashboardModel):
     codexgo_auto_refresh_interval_minutes: int
     openai_activity_log_enabled: bool
     management_activity_log_enabled: bool
+    codex_home_auto_refresh_enabled: bool
+    codex_home_auto_refresh_interval_seconds: int
+    codex_home_auto_sync_enabled: bool
+    minimize_to_tray_enabled: bool
     buyer_token_saved: bool
 
 
@@ -22,6 +26,10 @@ class CodexNeoSettingsUpdateRequest(DashboardModel):
     codexgo_auto_refresh_interval_minutes: int | None = None
     openai_activity_log_enabled: bool | None = None
     management_activity_log_enabled: bool | None = None
+    codex_home_auto_refresh_enabled: bool | None = None
+    codex_home_auto_refresh_interval_seconds: int | None = None
+    codex_home_auto_sync_enabled: bool | None = None
+    minimize_to_tray_enabled: bool | None = None
     buyer_token: str | None = None
     clear_buyer_token: bool = False
 

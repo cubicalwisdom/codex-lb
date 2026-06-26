@@ -47,6 +47,10 @@ function renderCodexNeoPage({
     codexgoAutoRefreshIntervalMinutes: 30,
     openaiActivityLogEnabled: true,
     managementActivityLogEnabled: false,
+    codexHomeAutoRefreshEnabled: false,
+    codexHomeAutoRefreshIntervalSeconds: 30,
+    codexHomeAutoSyncEnabled: false,
+    minimizeToTrayEnabled: false,
     buyerTokenSaved: true,
   };
   const accounts = {
@@ -491,6 +495,45 @@ describe("CodexNeoPage", () => {
 
     expect(accountsRefetch).toHaveBeenCalledTimes(1);
     expect(healthRefetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists Codex home refresh and sync preferences as they change", async () => {
+    const user = userEvent.setup();
+    const { mutations } = renderCodexNeoPage();
+
+    await user.click(screen.getByLabelText("Auto refresh Codex Home"));
+    await user.clear(screen.getByLabelText("Codex Home refresh seconds"));
+    await user.type(screen.getByLabelText("Codex Home refresh seconds"), "45");
+    fireEvent.blur(screen.getByLabelText("Codex Home refresh seconds"));
+    await user.click(screen.getByLabelText("Auto sync Codex IB"));
+
+    expect(mutations.updateSettingsMutation.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ codexHomeAutoRefreshEnabled: true }),
+    );
+    expect(mutations.updateSettingsMutation.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ codexHomeAutoRefreshIntervalSeconds: 45 }),
+    );
+    expect(mutations.updateSettingsMutation.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ codexHomeAutoSyncEnabled: true }),
+    );
+  });
+
+  it("renders a persisted minimize to tray preference and sends an Electron minimize request", async () => {
+    const user = userEvent.setup();
+    const minimizeToTray = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "codexIbElectron", {
+      configurable: true,
+      value: { minimizeToTray },
+    });
+    const { mutations } = renderCodexNeoPage();
+
+    await user.click(screen.getByLabelText("Minimize to tray"));
+    await user.click(screen.getByRole("button", { name: "Minimize" }));
+
+    expect(mutations.updateSettingsMutation.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ minimizeToTrayEnabled: true }),
+    );
+    expect(minimizeToTray).toHaveBeenCalledWith({ toTray: true });
   });
 
   it("runs explicit two-way sync from the Codex Home Accounts toolbar", async () => {

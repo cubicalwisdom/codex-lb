@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, shell } = require("electron");
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell } = require("electron");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -11,6 +11,9 @@ const HEALTH_URL = `${BASE_URL}/health`;
 
 let mainWindow = null;
 let backendProcess = null;
+let tray = null;
+let isQuitting = false;
+let minimizeToTrayEnabled = false;
 
 function sidecarRoot() {
   if (app.isPackaged) {
@@ -28,6 +31,51 @@ function appendLog(root, message) {
   ensureDir(logDir);
   const line = `[${new Date().toISOString()}] ${message}\n`;
   fs.appendFileSync(path.join(logDir, "codex-ib-electron.log"), line, "utf8");
+}
+
+function iconPath() {
+  return path.join(__dirname, "assets", "icon.ico");
+}
+
+function showMainWindow() {
+  if (!mainWindow) {
+    createWindow(sidecarRoot());
+    return;
+  }
+  mainWindow.show();
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.focus();
+}
+
+function ensureTray(root) {
+  if (tray) return tray;
+  tray = new Tray(iconPath());
+  tray.setToolTip("Codex IB");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "Show Codex IB", click: showMainWindow },
+      {
+        label: "Quit",
+        click: () => {
+          isQuitting = true;
+          appendLog(root, "Quit selected from tray.");
+          app.quit();
+        },
+      },
+    ]),
+  );
+  tray.on("click", showMainWindow);
+  appendLog(root, "Tray icon created.");
+  return tray;
+}
+
+function destroyTray(root) {
+  if (!tray) return;
+  tray.destroy();
+  tray = null;
+  appendLog(root, "Tray icon removed.");
 }
 
 async function healthOk() {
@@ -113,6 +161,7 @@ function createWindow(root) {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, "preload.cjs"),
       sandbox: true,
     },
   });
@@ -130,8 +179,43 @@ function createWindow(root) {
     appendLog(root, `Window failed to load ${CODEXNEO_URL}: ${errorCode} ${errorDescription}`);
   });
 
+  mainWindow.on("close", (event) => {
+    if (!minimizeToTrayEnabled || isQuitting) return;
+    event.preventDefault();
+    ensureTray(root);
+    mainWindow.hide();
+    appendLog(root, "Window close hidden to tray because minimize-to-tray is enabled.");
+  });
+
   mainWindow.loadURL(CODEXNEO_URL);
 }
+
+ipcMain.handle("codex-ib:set-minimize-to-tray-enabled", (_event, enabled) => {
+  minimizeToTrayEnabled = Boolean(enabled);
+  if (minimizeToTrayEnabled) {
+    ensureTray(sidecarRoot());
+  } else {
+    destroyTray(sidecarRoot());
+  }
+  appendLog(sidecarRoot(), `Minimize-to-tray preference set to ${minimizeToTrayEnabled}.`);
+  return minimizeToTrayEnabled;
+});
+
+ipcMain.handle("codex-ib:minimize", (_event, options = {}) => {
+  if (!mainWindow) return false;
+  const toTray = Boolean(options.toTray);
+  minimizeToTrayEnabled = toTray;
+  if (toTray) {
+    ensureTray(sidecarRoot());
+    mainWindow.hide();
+    appendLog(sidecarRoot(), "Window minimized to tray.");
+    return true;
+  }
+  destroyTray(sidecarRoot());
+  mainWindow.minimize();
+  appendLog(sidecarRoot(), "Window minimized normally.");
+  return true;
+});
 
 async function boot() {
   const root = sidecarRoot();
@@ -164,6 +248,7 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", () => {
+  isQuitting = true;
   if (backendProcess && !backendProcess.killed) {
     backendProcess.kill();
   }
