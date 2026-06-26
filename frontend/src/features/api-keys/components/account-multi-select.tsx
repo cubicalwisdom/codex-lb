@@ -130,6 +130,7 @@ export function AccountMultiSelect({
     [accounts],
   );
   const [search, setSearch] = useState("");
+  const [open, setOpen] = useState(false);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return selectableAccounts;
@@ -143,6 +144,21 @@ export function AccountMultiSelect({
   }, [search, selectableAccounts]);
 
   const selectedSet = useMemo(() => new Set(value), [value]);
+  const commitExactSearch = useCallback(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return;
+    const exactMatch = selectableAccounts.find(
+      (account) =>
+        account.accountId.toLowerCase() === query ||
+        account.email.toLowerCase() === query ||
+        account.displayName.toLowerCase() === query,
+    );
+    if (!exactMatch) return;
+    if (!selectedSet.has(exactMatch.accountId)) {
+      onChange([...value, exactMatch.accountId]);
+    }
+    setSearch("");
+  }, [onChange, search, selectableAccounts, selectedSet, value]);
   const selectedAccounts = useMemo(
     () =>
       value
@@ -178,7 +194,14 @@ export function AccountMultiSelect({
 
   return (
     <div className="space-y-1.5">
-      <DropdownMenu>
+      <DropdownMenu
+        modal={false}
+        open={open}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) commitExactSearch();
+          setOpen(nextOpen);
+        }}
+      >
         <DropdownMenuTrigger asChild>
           <Button
             type="button"
@@ -200,7 +223,14 @@ export function AccountMultiSelect({
               placeholder="Search accounts..."
               className="h-7 text-xs"
               onClick={(event) => event.stopPropagation()}
-              onKeyDown={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                event.stopPropagation();
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commitExactSearch();
+                  setOpen(false);
+                }
+              }}
             />
           </div>
           <DropdownMenuSeparator />

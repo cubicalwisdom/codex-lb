@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { to: "/reports", label: "Reports" },
   { to: "/accounts", label: "Accounts" },
   { to: "/apis", label: "APIs" },
+  { to: "/codexneo", label: "CodexNeo" },
   { to: "/settings", label: "Settings" },
 ] as const;
 

@@ -46,6 +46,9 @@ from app.modules.accounts import api as accounts_api
 from app.modules.api_keys import api as api_keys_api
 from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
 from app.modules.audit import api as audit_api
+from app.modules.codexneo import api as codexneo_api
+from app.modules.codexneo.activity_middleware import add_codexneo_activity_log_middleware
+from app.modules.codexneo.scheduler import build_codexgo_refresh_scheduler
 from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
@@ -151,12 +154,14 @@ async def lifespan(app: FastAPI):
     sticky_session_cleanup_scheduler = build_sticky_session_cleanup_scheduler()
     quota_planner_scheduler = build_quota_planner_scheduler()
     auth_guardian_scheduler = build_auth_guardian_scheduler()
+    codexgo_refresh_scheduler = build_codexgo_refresh_scheduler()
     await usage_scheduler.start()
     await api_key_limit_reset_scheduler.start()
     await model_scheduler.start()
     await sticky_session_cleanup_scheduler.start()
     await quota_planner_scheduler.start()
     await auth_guardian_scheduler.start()
+    await codexgo_refresh_scheduler.start()
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
         import uvicorn
 
@@ -311,6 +316,7 @@ async def lifespan(app: FastAPI):
             metrics_server.should_exit = True
 
         await cache_poller.stop()
+        await codexgo_refresh_scheduler.stop()
         await quota_planner_scheduler.stop()
         await auth_guardian_scheduler.stop()
         await sticky_session_cleanup_scheduler.stop()
@@ -373,6 +379,7 @@ def create_app() -> FastAPI:
         ),
     )
     add_backend_api_codex_v1_alias_middleware(app)
+    add_codexneo_activity_log_middleware(app)
     add_app_version_middleware(app)
     add_exception_handlers(app)
 
@@ -397,6 +404,7 @@ def create_app() -> FastAPI:
     app.include_router(oauth_api.router)
     app.include_router(dashboard_auth_api.router)
     app.include_router(settings_api.router)
+    app.include_router(codexneo_api.router)
     app.include_router(firewall_api.router)
     app.include_router(sticky_sessions_api.router)
     app.include_router(api_keys_api.router)

@@ -34,12 +34,17 @@ from app.modules.accounts.schemas import (
     AccountUpdateResponse,
 )
 from app.modules.accounts.service import AccountNotProbableError, AccountStateTransitionError, InvalidAuthJsonError
+from app.modules.codexneo.sync import CodexNeoAccountsSyncService
 
 router = APIRouter(
     prefix="/api/accounts",
     tags=["dashboard"],
     dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
 )
+
+
+def get_codexneo_account_sync_service() -> CodexNeoAccountsSyncService:
+    return CodexNeoAccountsSyncService()
 
 
 @router.get("", response_model=AccountsResponse)
@@ -133,10 +138,14 @@ async def import_account(
     auth_json: UploadFile = File(...),
     _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
+    codex_home_sync: CodexNeoAccountsSyncService = Depends(get_codexneo_account_sync_service),
 ) -> AccountImportResponse:
     raw = await auth_json.read()
     try:
         response = await context.service.import_account(raw)
+        sync_result = await codex_home_sync.register_auth_json_to_codex_home(raw)
+        response.codex_home_sync_status = "synced" if sync_result.success else "failed"
+        response.codex_home_sync_message = sync_result.message
         AuditService.log_async(
             "account_created",
             actor_ip=request.client.host if request.client else None,
@@ -291,13 +300,22 @@ async def delete_account(
     delete_history: bool = False,
     _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
+    codex_home_sync: CodexNeoAccountsSyncService = Depends(get_codexneo_account_sync_service),
 ) -> AccountDeleteResponse:
+    account = await context.repository.get_by_id(account_id)
+    if account is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
     success = await context.service.delete_account(account_id, delete_history=delete_history)
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
+    sync_result = await codex_home_sync.remove_account_from_codex_home(account)
     AuditService.log_async(
         "account_deleted",
         actor_ip=request.client.host if request.client else None,
         details={"account_id": account_id, "delete_history": delete_history},
     )
-    return AccountDeleteResponse(status="deleted")
+    return AccountDeleteResponse(
+        status="deleted",
+        codex_home_sync_status="synced" if sync_result.success else "failed",
+        codex_home_sync_message=sync_result.message,
+    )

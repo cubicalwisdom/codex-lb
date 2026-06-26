@@ -1,0 +1,1 @@
+"""CodexNeo dashboard integration."""

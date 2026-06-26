@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -10,6 +11,7 @@ from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import DEFAULT_EMAIL
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -28,6 +30,7 @@ from app.modules.usage.additional_quota_keys import normalize_additional_quota_r
 
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
+_DUPLICATE_ACCOUNT_SUFFIX_RE = re.compile(r"__copy\d+$")
 _UNSET = object()
 
 
@@ -59,12 +62,43 @@ class AccountsRepository:
     async def get_by_id(self, account_id: str) -> Account | None:
         return await self._session.get(Account, account_id)
 
-    async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+    async def list_accounts(
+        self,
+        *,
+        refresh_existing: bool = False,
+        include_generated_copies: bool = False,
+    ) -> list[Account]:
         stmt = select(Account).order_by(Account.email)
         if refresh_existing:
             stmt = stmt.execution_options(populate_existing=True)
         result = await self._session.execute(stmt)
-        return list(result.scalars().all())
+        accounts = list(result.scalars().all())
+        if include_generated_copies:
+            return accounts
+        return _dedupe_generated_copy_accounts(accounts)
+
+    async def consolidate_generated_copy_duplicates(self) -> int:
+        """Merge generated duplicate account rows into one canonical identity row."""
+        async with sqlite_writer_section():
+            accounts = await self.list_accounts(refresh_existing=True, include_generated_copies=True)
+            groups: dict[tuple[str, str, str | None, str | None], list[Account]] = {}
+            for account in accounts:
+                key = _generated_copy_dedupe_key(account)
+                if key is not None:
+                    groups.setdefault(key, []).append(account)
+
+            removed = 0
+            for grouped in groups.values():
+                if len(grouped) == 1 or not any(_is_generated_copy_account_id(account.id) for account in grouped):
+                    continue
+                canonical = _canonical_generated_copy_account(grouped)
+                duplicate_ids = [account.id for account in grouped if account.id != canonical.id]
+                if not duplicate_ids:
+                    continue
+                await self._merge_duplicate_account_rows(canonical.id, duplicate_ids)
+                removed += len(duplicate_ids)
+            await self._session.commit()
+            return removed
 
     async def list_request_usage_summary_by_account(
         self,
@@ -392,10 +426,15 @@ class AccountsRepository:
         if not duplicate_ids:
             return
 
+        await self._merge_duplicate_account_rows(canonical.id, duplicate_ids)
+
+    async def _merge_duplicate_account_rows(self, canonical_account_id: str, duplicate_ids: list[str]) -> None:
         duplicate_api_key_ids = (
             (
                 await self._session.execute(
-                    select(ApiKeyAccountAssignment.api_key_id).where(ApiKeyAccountAssignment.account_id == canonical.id)
+                    select(ApiKeyAccountAssignment.api_key_id).where(
+                        ApiKeyAccountAssignment.account_id == canonical_account_id
+                    )
                 )
             )
             .scalars()
@@ -416,28 +455,30 @@ class AccountsRepository:
             if assignment.api_key_id in existing_api_key_ids:
                 await self._session.delete(assignment)
             else:
-                assignment.account_id = canonical.id
+                assignment.account_id = canonical_account_id
                 existing_api_key_ids.add(assignment.api_key_id)
 
         await self._session.execute(
-            update(UsageHistory).where(UsageHistory.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
+            update(UsageHistory).where(UsageHistory.account_id.in_(duplicate_ids)).values(account_id=canonical_account_id)
         )
         await self._session.execute(
             update(AdditionalUsageHistory)
             .where(AdditionalUsageHistory.account_id.in_(duplicate_ids))
-            .values(account_id=canonical.id)
+            .values(account_id=canonical_account_id)
         )
         await self._session.execute(
-            update(RequestLog).where(RequestLog.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
+            update(RequestLog).where(RequestLog.account_id.in_(duplicate_ids)).values(account_id=canonical_account_id)
         )
-        await self._reconcile_limit_warmups(canonical.id, duplicate_ids)
+        await self._reconcile_limit_warmups(canonical_account_id, duplicate_ids)
         await self._session.execute(
-            update(StickySession).where(StickySession.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
+            update(StickySession)
+            .where(StickySession.account_id.in_(duplicate_ids))
+            .values(account_id=canonical_account_id)
         )
         await self._session.execute(
             update(HttpBridgeSessionRecord)
             .where(HttpBridgeSessionRecord.account_id.in_(duplicate_ids))
-            .values(account_id=canonical.id)
+            .values(account_id=canonical_account_id)
         )
         await self._session.execute(delete(Account).where(Account.id.in_(duplicate_ids)))
 
@@ -877,6 +918,52 @@ def _can_reuse_email_fallback(existing: Account, incoming: Account) -> bool:
         or not existing.chatgpt_account_id
         or existing.chatgpt_account_id == incoming.chatgpt_account_id
     )
+
+
+def _dedupe_generated_copy_accounts(accounts: list[Account]) -> list[Account]:
+    groups: dict[tuple[str, str, str | None, str | None], list[Account]] = {}
+    passthrough: list[Account] = []
+    for account in accounts:
+        key = _generated_copy_dedupe_key(account)
+        if key is None:
+            passthrough.append(account)
+            continue
+        groups.setdefault(key, []).append(account)
+
+    selected_ids: set[str] = set()
+    for grouped in groups.values():
+        if len(grouped) == 1 or not any(_is_generated_copy_account_id(account.id) for account in grouped):
+            selected_ids.update(account.id for account in grouped)
+            continue
+        selected_ids.add(_canonical_generated_copy_account(grouped).id)
+
+    return [account for account in accounts if account.id in selected_ids or account in passthrough]
+
+
+def _generated_copy_dedupe_key(account: Account) -> tuple[str, str, str | None, str | None] | None:
+    if not account.chatgpt_account_id or not _is_duplicate_detection_email(account.email):
+        return None
+    return account.email, account.chatgpt_account_id, account.workspace_id or account.workspace_label, account.plan_type
+
+
+def _is_duplicate_detection_email(email: str | None) -> bool:
+    return bool(email and email.strip()) and email != DEFAULT_EMAIL
+
+
+def _canonical_generated_copy_account(accounts: list[Account]) -> Account:
+    return sorted(
+        accounts,
+        key=lambda account: (
+            account.status != AccountStatus.ACTIVE,
+            _is_generated_copy_account_id(account.id),
+            account.created_at or datetime.max,
+            account.id,
+        ),
+    )[0]
+
+
+def _is_generated_copy_account_id(account_id: str) -> bool:
+    return bool(_DUPLICATE_ACCOUNT_SUFFIX_RE.search(account_id))
 
 
 def _advisory_lock_key(scope: str, value: str) -> int:

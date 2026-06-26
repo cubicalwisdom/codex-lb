@@ -25,14 +25,26 @@ import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
 export function useAccountMutations() {
   const queryClient = useQueryClient();
 
+  const invalidateAccountViews = (accountId?: string) => {
+    void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+    void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+    if (accountId) {
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends", accountId] });
+    }
+    void queryClient.invalidateQueries({ queryKey: ["codexneo", "accounts"] });
+    void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+    void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+  };
+
   const importMutation = useMutation({
     mutationFn: importAccount,
-    onSuccess: () => {
-      toast.success("Account imported");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+    onSuccess: (data) => {
+      if (data.codexHomeSyncStatus === "failed") {
+        toast.warning(data.codexHomeSyncMessage || "Account imported, but CodexNeo sync failed");
+      } else {
+        toast.success("Account imported");
+      }
+      invalidateAccountViews(data.accountId);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Import failed");
@@ -85,12 +97,13 @@ export function useAccountMutations() {
   const deleteMutation = useMutation({
     mutationFn: ({ accountId, deleteHistory }: { accountId: string; deleteHistory: boolean }) =>
       deleteAccount(accountId, deleteHistory),
-    onSuccess: () => {
-      toast.success("Account deleted");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+    onSuccess: (data, variables) => {
+      if (data.codexHomeSyncStatus === "failed") {
+        toast.warning(data.codexHomeSyncMessage || "Account deleted, but CodexNeo sync failed");
+      } else {
+        toast.success("Account deleted");
+      }
+      invalidateAccountViews(variables.accountId);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Delete failed");

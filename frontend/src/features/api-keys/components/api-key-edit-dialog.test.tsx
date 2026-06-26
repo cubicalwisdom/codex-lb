@@ -179,6 +179,104 @@ describe("ApiKeyEditDialog", () => {
     expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
   });
 
+  it("commits an exact searched account before saving", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    server.use(
+      http.get("/api/accounts", () =>
+        HttpResponse.json({
+          accounts: [
+            createAccountSummary(),
+            createAccountSummary({
+              accountId: "acc_secondary",
+              email: "secondary@example.com",
+              displayName: "secondary@example.com",
+            }),
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ assignedAccountIds: [], accountAssignmentScopeEnabled: false })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "All accounts" }));
+    await user.type(screen.getByPlaceholderText("Search accounts..."), "secondary@example.com");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].assignedAccountIds).toEqual(["acc_secondary"]);
+  });
+
+  it("commits an exact searched allowed model before saving", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    server.use(
+      http.get("/api/models", () =>
+        HttpResponse.json({
+          models: [
+            { id: "gpt-5.5", name: "GPT 5.5" },
+            { id: "gpt-5.4", name: "GPT 5.4" },
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ allowedModels: null })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "All models" }));
+    await user.type(screen.getByPlaceholderText("Search models..."), "GPT-5.5");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].allowedModels).toEqual(["gpt-5.5"]);
+  });
+
+  it("submits enforced model changes", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ allowedModels: null, enforcedModel: null })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByPlaceholderText("e.g. gpt-5.3-codex"), "gpt-5.5");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].enforcedModel).toBe("gpt-5.5");
+  });
+
   it("omits assigned accounts when editing an unrelated field", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

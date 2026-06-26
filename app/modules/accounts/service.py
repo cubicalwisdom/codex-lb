@@ -272,7 +272,12 @@ class AccountsService:
             opencode_auth_json=opencode_auth_json,
         )
 
-    async def import_account(self, raw: bytes) -> AccountImportResponse:
+    async def import_account(
+        self,
+        raw: bytes,
+        *,
+        preserve_unknown_workspace_duplicates: bool | None = None,
+    ) -> AccountImportResponse:
         try:
             auth = parse_auth_json(raw)
         except (json.JSONDecodeError, ValidationError, UnicodeDecodeError, TypeError) as exc:
@@ -301,7 +306,12 @@ class AccountsService:
             deactivation_reason=None,
         )
 
-        saved = await self._repo.upsert_account_slot(account)
+        saved = await self._repo.upsert_account_slot(
+            account,
+            preserve_unknown_workspace_duplicates=preserve_unknown_workspace_duplicates,
+        )
+        await self._repo.consolidate_generated_copy_duplicates()
+        saved = await self._repo.get_by_id(saved.id) or saved
         if self._usage_repo and self._usage_updater:
             latest_usage = await self._usage_repo.latest_by_account(window="primary")
             await self._usage_updater.refresh_accounts([saved], latest_usage)

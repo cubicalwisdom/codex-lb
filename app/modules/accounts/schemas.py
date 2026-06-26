@@ -129,6 +129,8 @@ class AccountImportResponse(DashboardModel):
     seat_type: str | None = None
     plan_type: str
     status: str
+    codex_home_sync_status: str | None = None
+    codex_home_sync_message: str | None = None
 
 
 class OpenCodeOAuthAuth(DashboardModel):
@@ -191,6 +193,8 @@ class AccountRoutingPolicyUpdateResponse(DashboardModel):
 
 class AccountDeleteResponse(DashboardModel):
     status: str
+    codex_home_sync_status: str | None = None
+    codex_home_sync_message: str | None = None
 
 
 class AccountExportResponse(DashboardModel):

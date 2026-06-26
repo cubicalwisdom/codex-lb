@@ -112,6 +112,8 @@ export const AccountImportResponseSchema = z.object({
   seatType: z.string().nullable().optional(),
   planType: z.string(),
   status: z.string(),
+  codexHomeSyncStatus: z.string().nullable().optional(),
+  codexHomeSyncMessage: z.string().nullable().optional(),
 });
 
 const OpenCodeOAuthAuthSchema = z.object({
@@ -163,6 +165,8 @@ export const AccountAuthExportResponseSchema = z.object({
 
 export const AccountActionResponseSchema = z.object({
   status: z.string(),
+  codexHomeSyncStatus: z.string().nullable().optional(),
+  codexHomeSyncMessage: z.string().nullable().optional(),
 });
 
 export const AccountProbeRequestSchema = z.object({

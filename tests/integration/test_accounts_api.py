@@ -406,3 +406,51 @@ async def test_list_accounts_flags_email_duplicates(async_client):
     assert accounts_by_id["placeholder-b"]["isEmailDuplicate"] is False
     assert accounts_by_id["blank-a"]["isEmailDuplicate"] is False
     assert accounts_by_id["blank-b"]["isEmailDuplicate"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_accounts_hides_generated_copy_rows_for_same_identity(async_client):
+    from app.core.crypto import TokenEncryptor
+    from app.core.utils.time import utcnow
+    from app.db.models import Account, AccountStatus
+    from app.db.session import SessionLocal
+    from app.modules.accounts.repository import AccountsRepository
+
+    encryptor = TokenEncryptor()
+    email = "generated-copy@example.com"
+    chatgpt_id = "chatgpt_generated_copy"
+
+    def _account(account_id: str) -> Account:
+        return Account(
+            id=account_id,
+            chatgpt_account_id=chatgpt_id,
+            workspace_id=None,
+            email=email,
+            plan_type="pro",
+            access_token_encrypted=encryptor.encrypt(f"access-{account_id}"),
+            refresh_token_encrypted=encryptor.encrypt(f"refresh-{account_id}"),
+            id_token_encrypted=encryptor.encrypt(f"id-{account_id}"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+            deactivation_reason=None,
+        )
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_account("acc-generated"), merge_by_email=False)
+        await repo.upsert(_account("acc-generated__copy2"), merge_by_email=False)
+
+    response = await async_client.get("/api/accounts")
+    async with SessionLocal() as session:
+        remaining_rows = await AccountsRepository(session).list_accounts(
+            refresh_existing=True,
+            include_generated_copies=True,
+        )
+
+    assert response.status_code == 200
+    matching = [a for a in response.json()["accounts"] if a["email"] == email]
+    assert [a["accountId"] for a in matching] == ["acc-generated"]
+    assert sorted(a.id for a in remaining_rows if a.email == email) == [
+        "acc-generated",
+        "acc-generated__copy2",
+    ]

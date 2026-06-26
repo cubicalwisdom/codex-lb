@@ -26,6 +26,7 @@ export function ModelMultiSelect({
 }: ModelMultiSelectProps) {
   const { data: models = [], isLoading } = useModels();
   const [search, setSearch] = useState("");
+  const [open, setOpen] = useState(false);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return models;
@@ -36,6 +37,19 @@ export function ModelMultiSelect({
   }, [models, search]);
 
   const selectedSet = useMemo(() => new Set(value), [value]);
+
+  const commitExactSearch = useCallback(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return;
+    const exactMatch = models.find(
+      (model) => model.id.toLowerCase() === query || model.name.toLowerCase() === query,
+    );
+    if (!exactMatch) return;
+    if (!selectedSet.has(exactMatch.id)) {
+      onChange([...value, exactMatch.id]);
+    }
+    setSearch("");
+  }, [models, onChange, search, selectedSet, value]);
 
   const toggle = useCallback(
     (modelId: string) => {
@@ -64,7 +78,14 @@ export function ModelMultiSelect({
 
   return (
     <div className="space-y-1.5">
-      <DropdownMenu>
+      <DropdownMenu
+        modal={false}
+        open={open}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) commitExactSearch();
+          setOpen(nextOpen);
+        }}
+      >
         <DropdownMenuTrigger asChild>
           <Button
             type="button"
@@ -84,7 +105,14 @@ export function ModelMultiSelect({
               placeholder="Search models..."
               className="h-7 text-xs"
               onClick={(e) => e.stopPropagation()}
-              onKeyDown={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitExactSearch();
+                  setOpen(false);
+                }
+              }}
             />
           </div>
           <DropdownMenuSeparator />

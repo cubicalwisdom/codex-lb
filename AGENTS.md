@@ -27,6 +27,11 @@ This repo uses **OpenSpec as the primary workflow and SSOT** for change-driven d
 4) Validate specs locally: `openspec validate --specs`
 5) When done: verify + archive the change (do not archive unverified changes).
 
+### Runtime Restart Policy
+
+- If a code change requires the native codex-ib / codex-lb server to reload, restart that server automatically and verify the updated endpoint or page after restart.
+- Do not restart the Codex desktop app automatically. Ask the user for explicit permission before any action that stops, starts, or restarts Codex itself.
+
 ### Source of Truth
 
 - **Specs/Design/Tasks (SSOT)**: `openspec/`

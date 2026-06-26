@@ -1,0 +1,14 @@
+{
+  "name": "codex-ib-electron-shell",
+  "version": "1.20.1",
+  "description": "Portable Electron shell for Codex IB",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "package:win": "electron-packager . \"Codex IB\" --platform=win32 --arch=x64 --asar --overwrite"
+  },
+  "devDependencies": {
+    "electron": "^39.2.7",
+    "electron-packager": "^17.1.2"
+  }
+}

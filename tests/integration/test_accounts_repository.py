@@ -3,9 +3,10 @@ from __future__ import annotations
 import pytest
 
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.usage.repository import UsageRepository
 
 
 def _account(
@@ -258,3 +259,47 @@ async def test_upsert_account_slot_adds_third_label_only_workspace_for_same_emai
         ("triton_workspace", "Triton"),
         ("atlas_workspace", "Atlas"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_consolidate_generated_copy_duplicates_keeps_active_copy_and_usage(db_setup):
+    del db_setup
+    email = "copy-cleanup@example.com"
+    chatgpt_account_id = "chatgpt_copy_cleanup"
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(
+            _account(
+                "copy-cleanup",
+                chatgpt_account_id=chatgpt_account_id,
+                email=email,
+            ),
+            merge_by_email=False,
+        )
+        await repo.upsert(
+            _account(
+                "copy-cleanup__copy2",
+                chatgpt_account_id=chatgpt_account_id,
+                email=email,
+            ),
+            merge_by_email=False,
+        )
+        base = await repo.get_by_id("copy-cleanup")
+        copy = await repo.get_by_id("copy-cleanup__copy2")
+        assert base is not None
+        assert copy is not None
+        base.status = AccountStatus.REAUTH_REQUIRED
+        copy.status = AccountStatus.ACTIVE
+        session.add(UsageHistory(account_id="copy-cleanup", window="primary", used_percent=73.0))
+        await session.commit()
+
+        removed = await repo.consolidate_generated_copy_duplicates()
+        all_rows = await repo.list_accounts(refresh_existing=True, include_generated_copies=True)
+        visible_rows = await repo.list_accounts(refresh_existing=True)
+        latest_usage = await UsageRepository(session).latest_by_account(window="primary")
+
+    assert removed == 1
+    assert [account.id for account in all_rows if account.email == email] == ["copy-cleanup__copy2"]
+    assert [account.id for account in visible_rows if account.email == email] == ["copy-cleanup__copy2"]
+    assert latest_usage["copy-cleanup__copy2"].used_percent == 73.0
