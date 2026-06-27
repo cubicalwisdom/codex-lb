@@ -37,11 +37,7 @@ class CodexHomeAccountService:
         location_settings = location_service.refresh_bulk_states()
         if not registry_path.exists():
             backup_items = _dedupe_registry_items(
-                [
-                    item
-                    for item in location_service.all_account_rows()
-                    if item.get("backup") and not item.get("codex")
-                ],
+                location_service.all_account_rows(),
                 live_dir=self._codex_home / "accounts",
                 backup_dir=location_service.backup_dir,
                 active_key=None,
@@ -125,7 +121,7 @@ def _account_from_registry_item(item: dict[str, Any], *, active_key: str | None)
         account_name=_optional_str(item.get("account_name")),
         plan=_optional_str(item.get("plan")),
         auth_mode=_optional_str(item.get("auth_mode")),
-        active=account_key == active_key,
+        active=account_key == active_key or bool(item.get("active")),
         last_usage_at=_optional_str(last_usage_at),
         usage=_usage_from_registry(usage_data),
         codex=codex_present,
@@ -170,6 +166,22 @@ def _identity_for_registry_item(
     backup_dir: Path,
 ) -> tuple[str, str, str, str, str] | tuple[str, str]:
     account_key = _optional_str(item.get("account_key"))
+    auth_path = _optional_str(item.get("auth_path"))
+    if auth_path:
+        try:
+            auth = parse_auth_json(Path(auth_path).read_bytes())
+            claims = claims_from_auth(auth)
+        except Exception:
+            pass
+        else:
+            if claims.account_id or claims.email or claims.workspace_id or claims.workspace_label:
+                return (
+                    "auth",
+                    claims.account_id or "",
+                    (claims.email or "").strip().lower(),
+                    claims.workspace_id or "",
+                    claims.workspace_label or "",
+                )
     if account_key:
         for directory in (live_dir, backup_dir):
             snapshot = existing_snapshot_path(directory, account_key)

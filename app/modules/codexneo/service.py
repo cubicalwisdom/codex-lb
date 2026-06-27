@@ -215,11 +215,11 @@ class CodexNeoService:
         await self.update_settings(codex_api_base_url=base_url)
         response = CodexNeoActionResponse(
             success=True,
-            message=f"Codex API provider set to {base_url}",
+            message=f"Codex API provider set to {base_url}; restart Codex manually to apply",
             config_path=str(config_path),
             backup_path=str(backup_path) if backup_path else None,
         )
-        return await self._attach_restart_result(response, action_label="Auth->API Set")
+        return response
 
     async def revert_api_provider(self) -> CodexNeoActionResponse:
         config_path = self._codex_home / "config.toml"
@@ -236,11 +236,11 @@ class CodexNeoService:
         _verify_provider_reverted(config_path)
         response = CodexNeoActionResponse(
             success=True,
-            message="CodexNeo provider override reverted",
+            message="CodexNeo provider override reverted; restart Codex manually to apply",
             config_path=str(config_path),
             backup_path=str(backup_path) if backup_path else None,
         )
-        return await self._attach_restart_result(response, action_label="Auth->API Revert")
+        return response
 
     async def apply_codexgo_auth(self, action: CodexGoAction) -> CodexNeoActionResponse:
         data = self._read_settings_data()

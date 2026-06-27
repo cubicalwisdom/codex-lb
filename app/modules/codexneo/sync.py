@@ -15,7 +15,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
 from app.modules.codexneo.command_runner import run_codex_auth_command
 from app.modules.codexneo.home import resolve_configured_codex_home
-from app.modules.codexneo.locations import CodexNeoAccountLocationService
+from app.modules.codexneo.locations import CodexNeoAccountLocationService, register_auth_snapshot_locally
 from app.modules.codexneo.snapshots import account_key_from_snapshot, existing_snapshot_path
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -127,7 +127,10 @@ class CodexNeoAccountsSyncService:
 
     async def sync_all_accounts(self) -> CodexNeoSyncResult:
         inbound = await self.sync_codex_home_to_accounts()
-        existing_identities = _snapshot_identities(_discover_auth_snapshots(self._codex_home, self._data_dir))
+        existing_identities = _snapshot_identities(
+            _discover_auth_snapshots(self._codex_home, self._data_dir),
+            include_root=False,
+        )
         registered = 0
         skipped = 0
         async with get_background_session() as session:
@@ -228,10 +231,20 @@ class CodexNeoAccountsSyncService:
                 temp_path.unlink()
             except FileNotFoundError:
                 pass
+        if ok:
+            register_auth_snapshot_locally(self._codex_home, raw)
+            return CodexNeoSyncResult(success=True, message="Registered account in Codex Home", count=1)
+        try:
+            register_auth_snapshot_locally(self._codex_home, raw)
+        except Exception:
+            return CodexNeoSyncResult(
+                success=False,
+                message=f"Codex Home import failed: {_safe_summary(output)}",
+            )
         return CodexNeoSyncResult(
-            success=ok,
-            message="Registered account in Codex Home" if ok else f"Codex Home import failed: {_safe_summary(output)}",
-            count=1 if ok else 0,
+            success=True,
+            message="Registered account in Codex Home with local registry fallback",
+            count=1,
         )
 
     async def remove_account_from_codex_home(self, account: Account) -> CodexNeoSyncResult:
@@ -403,9 +416,15 @@ def _matching_account_ids(accounts: list[Account], claims: Any) -> list[str]:
     return [account.id for account in accounts if _claims_match_account(claims, account)]
 
 
-def _snapshot_identities(candidates: list[_AuthSnapshotCandidate]) -> set[tuple[str, str, str, str] | tuple[str, str]]:
+def _snapshot_identities(
+    candidates: list[_AuthSnapshotCandidate],
+    *,
+    include_root: bool = True,
+) -> set[tuple[str, str, str, str] | tuple[str, str]]:
     identities: set[tuple[str, str, str, str] | tuple[str, str]] = set()
     for candidate in candidates:
+        if not include_root and candidate.source == "root":
+            continue
         try:
             claims = claims_from_auth(parse_auth_json(candidate.path.read_bytes()))
         except Exception:

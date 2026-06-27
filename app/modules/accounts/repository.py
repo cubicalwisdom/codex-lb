@@ -620,10 +620,21 @@ class AccountsRepository:
 
     async def delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         async with sqlite_writer_section():
-            await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
             if delete_history:
+                await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
+                await self._session.execute(
+                    delete(AdditionalUsageHistory).where(AdditionalUsageHistory.account_id == account_id)
+                )
                 await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
             else:
+                await self._session.execute(
+                    update(UsageHistory).where(UsageHistory.account_id == account_id).values(account_id=None),
+                )
+                await self._session.execute(
+                    update(AdditionalUsageHistory)
+                    .where(AdditionalUsageHistory.account_id == account_id)
+                    .values(account_id=None),
+                )
                 await self._session.execute(
                     update(RequestLog)
                     .where(RequestLog.account_id == account_id)
@@ -835,6 +846,8 @@ def _apply_account_updates(target: Account, source: Account) -> None:
     target.refresh_token_encrypted = source.refresh_token_encrypted
     target.id_token_encrypted = source.id_token_encrypted
     target.last_refresh = source.last_refresh
+    if target.status == AccountStatus.PAUSED and source.status == AccountStatus.ACTIVE:
+        return
     target.status = source.status
     target.deactivation_reason = source.deactivation_reason
     target.reset_at = source.reset_at

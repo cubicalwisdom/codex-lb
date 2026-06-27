@@ -1,14 +1,41 @@
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
 
+from app.core.auth import generate_unique_account_id
 from app.modules.codexneo.accounts import CodexHomeAccountService
 from app.modules.codexneo.locations import CodexNeoAccountLocationService
 from app.modules.codexneo.snapshots import preferred_snapshot_path
 
 pytestmark = pytest.mark.unit
+
+
+def _encode_jwt(payload: dict) -> str:
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    return f"header.{body}.sig"
+
+
+def _auth_json(*, email: str, account_id: str, plan: str = "pro") -> str:
+    return json.dumps(
+        {
+            "tokens": {
+                "idToken": _encode_jwt(
+                    {
+                        "email": email,
+                        "https://api.openai.com/auth": {"chatgpt_plan_type": plan},
+                    }
+                ),
+                "accessToken": f"secret-access-{account_id}",
+                "refreshToken": f"secret-refresh-{account_id}",
+                "accountId": account_id,
+            },
+            "lastRefreshAt": "2026-06-24T00:00:00Z",
+        }
+    )
 
 
 def _write_live_account(codex_home, account_key: str, *, email: str | None = None, active: bool = False) -> None:
@@ -44,6 +71,40 @@ def _write_live_account(codex_home, account_key: str, *, email: str | None = Non
     )
     if active:
         (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+
+
+def test_root_auth_json_does_not_duplicate_registered_snapshot(tmp_path) -> None:
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    email = "active-root@example.com"
+    account_id = "acc-active-root"
+    root_account_key = generate_unique_account_id(account_id, email)
+    account_key = f"user-active::{account_id}"
+    auth_json = _auth_json(email=email, account_id=account_id)
+    accounts = codex_home / "accounts"
+    accounts.mkdir(parents=True)
+    (codex_home / "auth.json").write_text(auth_json, encoding="utf-8")
+    preferred_snapshot_path(accounts, account_key).write_text(auth_json, encoding="utf-8")
+    (accounts / "registry.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "active_account_key": account_key,
+                "accounts": [{"account_key": account_key, "email": email, "plan": "pro"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = CodexNeoAccountLocationService(codex_home=codex_home, data_dir=data_dir)
+
+    rows = service.all_account_rows()
+
+    assert len(rows) == 1
+    assert rows[0]["account_key"] == account_key
+    assert rows[0]["account_key"] != root_account_key
+    assert rows[0]["email"] == email
+    assert rows[0]["active"] is True
+    assert rows[0]["codex"] is True
 
 
 def _write_backup_account(data_dir, account_key: str, *, email: str, auth_account_id: str) -> None:

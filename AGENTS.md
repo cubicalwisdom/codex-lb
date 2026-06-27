@@ -6,6 +6,19 @@
 - GitHub auth for git/API is available via env vars: `GITHUB_USER`, `GITHUB_TOKEN` (PAT). Do not hardcode or commit tokens.
 - For authenticated git over HTTPS in automation, use: `https://x-access-token:${GITHUB_TOKEN}@github.com/<owner>/<repo>.git`
 
+## Branch And Portable App Policy
+
+- Active development branch: `codexneo-portable-windows`. This is the main branch to work on for the Windows portable Codex IB / CodexNeo app.
+- Upstream/original branch: `main`. Keep `main` aligned with the original fork/upstream project and do not use it for portable-app feature work. When upstream changes land on `main`, port/cherry-pick only the needed changes into `codexneo-portable-windows`.
+- Expected branch shape for this local repo is only:
+  - `main`
+  - `codexneo-portable-windows`
+- Do not create extra long-lived branches unless the user explicitly asks. If you find additional local/remote branches, verify they are not needed for the portable app before deleting anything.
+- The active portable distribution path is `dist/CodexIB-Electron-Portable`. The older browser/VBS portable package (`dist/CodexIB-Portable`) was intentionally removed after Electron portable became the active package.
+- The portable app runtime loads code and data from the portable folder, not only from the source tree. When fixing live portable behavior, update source files and mirror required runtime files into `dist/CodexIB-Electron-Portable` if the user needs the current portable app to pick up the change after their restart.
+- Do not restart the portable Electron app unless the user explicitly asks. The user may restart it manually. Backend/source-server restarts are allowed only when required for verification and not prohibited by the user.
+- Do not restart Codex Desktop automatically. Auth->API Set/Revert write verified config and tell the user to restart manually; only explicit Restart Codex / Switch & Restart runtime actions should restart Codex Desktop.
+
 ## Code Conventions
 
 The `/project-conventions` skill is auto-activated on code edits (PreToolUse guard).

@@ -228,6 +228,33 @@ async def test_sync_root_auth_json_without_managed_snapshot_to_accounts(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_sync_all_registers_root_only_account_into_codex_home(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    data_dir = tmp_path / "data"
+    email = "root-only-register@example.com"
+    raw_account_id = "acc_root_only_register"
+    expected_account_key = generate_unique_account_id(raw_account_id, email)
+    root_auth = _auth_json(email=email, account_id=raw_account_id)
+    (codex_home / "auth.json").write_bytes(root_auth)
+    await _import_account_to_db(root_auth)
+    runner = RecordingCommandRunner()
+    service = CodexNeoAccountsSyncService(codex_home=codex_home, data_dir=data_dir, command_runner=runner)
+
+    result = await service.sync_all_accounts()
+
+    assert result.success is True
+    import_calls = [args for args, _ in runner.calls if args and args[0] == "import"]
+    assert len(import_calls) == 1
+    assert "registered 1" in result.message
+    assert "secret-access" not in result.message
+    registry = json.loads((codex_home / "accounts" / "registry.json").read_text(encoding="utf-8"))
+    assert [account["account_key"] for account in registry["accounts"]] == [expected_account_key]
+    assert (codex_home / "accounts" / f"{expected_account_key}.auth.json").is_file()
+
+
+@pytest.mark.asyncio
 async def test_sync_backup_only_snapshots_to_accounts(tmp_path, db_setup) -> None:
     del db_setup
     codex_home = tmp_path / ".codex"

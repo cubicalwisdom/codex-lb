@@ -11,7 +11,7 @@ from app.core.auth import fallback_account_id, generate_unique_account_id
 from app.core.crypto import TokenEncryptor
 from app.core.usage.refresh_scheduler import reconcile_recoverable_account_statuses
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, RequestLog
+from app.db.models import Account, AccountStatus, AdditionalUsageHistory, RequestLog, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -556,11 +556,73 @@ async def test_delete_account_soft_deletes_request_logs(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_delete_account_preserves_usage_history_by_default(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_delete_usage", "delete-usage@example.com"))
+        session.add(
+            UsageHistory(
+                account_id="acc_delete_usage",
+                window="primary",
+                used_percent=42.0,
+                input_tokens=100,
+                output_tokens=25,
+                recorded_at=utcnow(),
+            )
+        )
+        session.add(
+            AdditionalUsageHistory(
+                account_id="acc_delete_usage",
+                quota_key="codex_other",
+                limit_name="codex_other",
+                metered_feature="codex_other",
+                window="primary",
+                used_percent=55.0,
+                recorded_at=utcnow(),
+            )
+        )
+        await session.commit()
+
+    delete = await async_client.delete("/api/accounts/acc_delete_usage")
+    assert delete.status_code == 200
+
+    async with SessionLocal() as session:
+        usage = (await session.execute(select(UsageHistory))).scalar_one()
+        additional_usage = (await session.execute(select(AdditionalUsageHistory))).scalar_one()
+        assert usage.account_id is None
+        assert usage.input_tokens == 100
+        assert usage.output_tokens == 25
+        assert additional_usage.account_id is None
+        assert additional_usage.quota_key == "codex_other"
+
+
+@pytest.mark.asyncio
 async def test_delete_account_with_delete_history_hard_deletes_request_logs(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         logs_repo = RequestLogsRepository(session)
         await accounts_repo.upsert(_make_account("acc_hard_delete", "hard-delete@example.com"))
+        session.add(
+            UsageHistory(
+                account_id="acc_hard_delete",
+                window="primary",
+                used_percent=80.0,
+                input_tokens=20,
+                output_tokens=10,
+                recorded_at=utcnow(),
+            )
+        )
+        session.add(
+            AdditionalUsageHistory(
+                account_id="acc_hard_delete",
+                quota_key="codex_other",
+                limit_name="codex_other",
+                metered_feature="codex_other",
+                window="primary",
+                used_percent=90.0,
+                recorded_at=utcnow(),
+            )
+        )
         await logs_repo.add_log(
             account_id="acc_hard_delete",
             request_id="req_hard_delete_1",
@@ -580,6 +642,10 @@ async def test_delete_account_with_delete_history_hard_deletes_request_logs(asyn
     async with SessionLocal() as session:
         result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_hard_delete_1"))
         assert result.scalar_one_or_none() is None
+        usage_result = await session.execute(select(UsageHistory))
+        assert usage_result.scalar_one_or_none() is None
+        additional_usage_result = await session.execute(select(AdditionalUsageHistory))
+        assert additional_usage_result.scalar_one_or_none() is None
 
     request_logs = await async_client.get("/api/request-logs?limit=10")
     assert request_logs.status_code == 200

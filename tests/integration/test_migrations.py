@@ -628,6 +628,22 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                 if len(row) > 6
             }
             assert ("accounts", "account_id", "id", "set null") in request_log_fk_actions
+            usage_fk_rows = (await session.execute(text("PRAGMA foreign_key_list(usage_history)"))).fetchall()
+            usage_fk_actions = {
+                (str(row[2]).lower(), str(row[3]).lower(), str(row[4]).lower(), str(row[6]).lower())
+                for row in usage_fk_rows
+                if len(row) > 6
+            }
+            assert ("accounts", "account_id", "id", "set null") in usage_fk_actions
+            additional_usage_fk_rows = (
+                await session.execute(text("PRAGMA foreign_key_list(additional_usage_history)"))
+            ).fetchall()
+            additional_usage_fk_actions = {
+                (str(row[2]).lower(), str(row[3]).lower(), str(row[4]).lower(), str(row[6]).lower())
+                for row in additional_usage_fk_rows
+                if len(row) > 6
+            }
+            assert ("accounts", "account_id", "id", "set null") in additional_usage_fk_actions
             api_key_index_rows = (await session.execute(text("PRAGMA index_list(api_keys)"))).fetchall()
             api_key_index_names = {str(row[1]) for row in api_key_index_rows if len(row) > 1}
             assert "idx_api_keys_name" in api_key_index_names
@@ -663,7 +679,6 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert logs_count == 1
             assert sticky_count == 2
 
-            await session.execute(text("DELETE FROM usage_history WHERE account_id='acc_legacy'"))
             await session.execute(text("DELETE FROM sticky_sessions WHERE account_id='acc_legacy'"))
             await session.execute(text("DELETE FROM accounts WHERE id='acc_legacy'"))
             await session.commit()
@@ -673,6 +688,10 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             ).one()
             assert remaining_log[0] is None
             assert remaining_log[1] is None
+            remaining_usage_account_id = (
+                await session.execute(text("SELECT account_id FROM usage_history WHERE id=1"))
+            ).scalar_one()
+            assert remaining_usage_account_id is None
     finally:
         await engine.dispose()
 

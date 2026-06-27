@@ -258,3 +258,19 @@
 - [x] Move CodexNeo account import/sync cleanup to explicit write paths while keeping auto sync routed through `POST /api/codexneo/accounts/sync`.
 - [x] Fix backend `ty` diagnostics and frontend CodexNeo page lint diagnostics.
 - [x] Run focused and broad backend/frontend verification, Ruff, TypeScript/build, OpenSpec validation, restart native codex-lb if needed, and update root handover plus implementation list.
+
+## 30. Root-only Auth And Manual Auth->API Apply
+
+- [x] Add failing backend test proving top-level Codex Home `auth.json` appears in the CodexNeo account table even before it has a managed registry/snapshot row.
+- [x] Add failing backend test proving explicit master sync registers a Codex IB account whose only Codex Home presence is root `auth.json` into managed Codex Home accounts.
+- [x] Add failing backend tests proving Auth->API Set and Auth->API Revert do not automatically restart Codex Desktop after verified config writes.
+- [x] Implement root-only discovery and registration by loading root `auth.json` as a live CodexNeo row and materializing it into managed Codex Home registry/snapshot storage during explicit sync.
+- [x] Keep Codex Desktop restart on the explicit Restart Codex action only.
+- [x] Run focused backend verification without restarting the portable app or Codex Desktop.
+
+## 31. Accounts Tab User Setting Persistence
+
+- [x] Add failing backend test proving an operator-paused account remains paused after the same auth snapshot is synced/imported again.
+- [x] Preserve user-paused account status while still allowing token/refresh metadata updates during auth sync.
+- [x] Patch the portable backend copy without restarting the portable app.
+- [x] Run focused Accounts repository/API verification, Ruff, OpenSpec validation, and portable backend syntax check.

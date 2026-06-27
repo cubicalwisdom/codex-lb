@@ -35,8 +35,8 @@ The system SHALL expose CodexNeo actions to test, set, and revert the configured
 - **AND** the system SHALL atomically write a managed provider override using `model_provider = "openai"` and `openai_base_url = "<configured URL>"`
 - **AND** the system SHALL maintain a protected original `config.toml` baseline that is created only once and is not overwritten by later Set/Revert actions
 - **AND** if the current config already contains a CodexNeo or legacy managed API override, the protected original baseline SHALL be created from the sanitized config with that managed override removed
-- **AND** after the written config is verified, the system SHALL restart Codex Desktop so it reloads the provider configuration
-- **AND** if the config write or verification fails, the system SHALL NOT restart Codex Desktop
+- **AND** after the written config is verified, the action response SHALL report that Codex must be restarted manually to apply the provider configuration
+- **AND** Auth->API Set SHALL NOT stop, kill, start, or restart Codex Desktop automatically
 
 #### Scenario: API URL is reverted
 
@@ -45,8 +45,8 @@ The system SHALL expose CodexNeo actions to test, set, and revert the configured
 - **AND** the system SHALL restore the protected original `config.toml` baseline when it exists
 - **AND** if no protected original baseline exists, the system SHALL atomically remove only managed CodexNeo or legacy provider overrides from the current config
 - **AND** plain user `model_provider = "openai"` settings without a managed `openai_base_url` override SHALL be preserved
-- **AND** after the reverted config is verified, the system SHALL restart Codex Desktop so it reloads the default provider configuration
-- **AND** if the revert write or verification fails, the system SHALL NOT restart Codex Desktop
+- **AND** after the reverted config is verified, the action response SHALL report that Codex must be restarted manually to apply the provider configuration
+- **AND** Auth->API Revert SHALL NOT stop, kill, start, or restart Codex Desktop automatically
 
 #### Scenario: Config backups are retained safely
 
@@ -55,11 +55,11 @@ The system SHALL expose CodexNeo actions to test, set, and revert the configured
 - **AND** the protected original baseline SHALL NOT be pruned
 - **AND** unrelated user backups and Windows app backups SHALL NOT be deleted by the web app retention policy
 
-#### Scenario: Codex Desktop restart fails after config success
+#### Scenario: Codex Desktop restart remains explicit
 
-- **WHEN** Auth->API Set or Auth->API Revert writes and verifies the config but Codex Desktop restart fails
-- **THEN** the action response SHALL report the restart failure without rolling back the verified config change
-- **AND** the CodexNeo activity log SHALL record a safe restart failure summary
+- **WHEN** an admin clicks the explicit Restart Codex control
+- **THEN** the system MAY stop and relaunch Codex Desktop through the configured restart provider
+- **AND** restart success or failure SHALL be reported in the action response
 
 ### Requirement: CodexGO auth use and refresh
 
@@ -356,6 +356,7 @@ The CodexNeo account table SHALL mirror CodexNeo Windows app availability and st
 - **WHEN** the CodexNeo account table loads accounts from Codex Home and Backup state
 - **THEN** each account SHALL include an `Avail` label derived from location and availability metadata such as `Ready`, `Backup`, or `Temp off`
 - **AND** each account SHALL include `Status / Last` text derived from usage status and relative last-usage time such as `Fresh / just now` or `Stored / 7h ago`
+- **AND** a valid top-level Codex Home `auth.json` SHALL be shown as an active Codex account row even when it has not yet been materialized into the managed `accounts/registry.json` snapshot store
 - **AND** `Unknown` SHALL be used only when no usage status, usage window, Codex presence, Backup presence, or Accounts status source can provide a stronger status
 - **AND** raw Unix timestamps SHALL NOT be displayed as the `Status / Last` cell text
 
@@ -442,6 +443,7 @@ The CodexNeo account table SHALL mirror CodexNeo Windows app availability and st
 - **WHEN** an admin clicks the CodexNeo `Sync` control
 - **THEN** the dashboard SHALL sync valid configured Codex Home and app-owned Backup auth snapshots into the encrypted Codex IB Accounts database
 - **AND** eligible Codex IB Accounts rows that are missing from Codex Home SHALL be registered into the configured Codex Home
+- **AND** a Codex IB account whose only configured Codex Home presence is root `auth.json` SHALL be registered into the managed Codex Home accounts registry/snapshot store with a token-free registry row and a local auth snapshot so it can continue to appear in the CodexNeo account table
 - **AND** generated Accounts `__copy` rows for the same upstream identity MAY be consolidated during this write operation
 - **AND** the backend SHALL write a local `codexneo-master-registry.json` inventory under the codex-lb data directory
 - **AND** the master registry and action responses SHALL NOT contain access tokens, refresh tokens, ID tokens, API keys, buyer tokens, or raw auth JSON contents

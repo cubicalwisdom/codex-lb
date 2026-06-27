@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from app.core.auth import claims_from_auth, parse_auth_json
+from app.core.auth import claims_from_auth, generate_unique_account_id, parse_auth_json
 from app.core.config.settings import get_settings as get_app_settings
 from app.modules.codexneo.schemas import CodexNeoActionResponse
 from app.modules.codexneo.snapshots import (
@@ -184,6 +184,31 @@ class CodexNeoAccountLocationService:
         live_map = _account_map(live_root)
         backup_map = _account_map(backup_root)
         rows: list[dict[str, Any]] = []
+        root_row = _root_auth_row(self._codex_home)
+        if root_row is not None:
+            root_key = str(root_row["account_key"])
+            live_key = root_key if root_key in live_map else None
+            root_identity = _identity_for_auth_path(self._codex_home / "auth.json")
+            if live_key is None and root_identity is not None:
+                for key, row in live_map.items():
+                    if (
+                        _identity_for_key(
+                            key,
+                            live_row=row,
+                            backup_row=backup_map.get(key),
+                            live_dir=self._live_accounts_dir(),
+                            backup_dir=self._backup_dir,
+                        )
+                        == root_identity
+                    ):
+                        live_key = key
+                        break
+            if live_key is not None:
+                live_map[live_key] = {**live_map[live_key], "active": True, "auth_path": root_row.get("auth_path")}
+            else:
+                root_row["codex"] = True
+                root_row["backup"] = root_key in backup_map and snapshot_exists(self._backup_dir, root_key)
+                rows.append(root_row)
         for key, row in live_map.items():
             merged = dict(row)
             merged["codex_registered"] = True
@@ -407,6 +432,66 @@ def _default_settings() -> dict[str, Any]:
     }
 
 
+def register_auth_snapshot_locally(codex_home: Path, raw: bytes, *, active: bool = False) -> str:
+    auth = parse_auth_json(raw)
+    claims = claims_from_auth(auth)
+    account_key = generate_unique_account_id(
+        claims.account_id,
+        claims.email,
+        claims.workspace_id,
+        claims.workspace_label,
+    )
+    live_dir = codex_home / "accounts"
+    registry_path = live_dir / "registry.json"
+    root = _ensure_registry(_read_json(registry_path, default={}))
+    row: dict[str, Any] = {
+        "account_key": account_key,
+        "selector": claims.email,
+        "email": claims.email,
+        "plan": claims.plan_type,
+        "auth_mode": "chatgpt",
+    }
+    _upsert_account(root, {key: value for key, value in row.items() if value is not None})
+    if active:
+        previous_key = root.get("active_account_key")
+        if previous_key != account_key:
+            root["previous_active_account_key"] = previous_key
+        root["active_account_key"] = account_key
+        root["active_account_activated_at_ms"] = int(time.time() * 1000)
+    live_dir.mkdir(parents=True, exist_ok=True)
+    _snapshot_path(live_dir, account_key).write_bytes(raw)
+    _write_json_atomic(registry_path, root)
+    return account_key
+
+
+def _root_auth_row(codex_home: Path) -> dict[str, Any] | None:
+    auth_path = codex_home / "auth.json"
+    if not auth_path.is_file():
+        return None
+    try:
+        auth = parse_auth_json(auth_path.read_bytes())
+        claims = claims_from_auth(auth)
+    except Exception:
+        return None
+    account_key = generate_unique_account_id(
+        claims.account_id,
+        claims.email,
+        claims.workspace_id,
+        claims.workspace_label,
+    )
+    row: dict[str, Any] = {
+        "account_key": account_key,
+        "selector": claims.email,
+        "email": claims.email,
+        "plan": claims.plan_type,
+        "auth_mode": "chatgpt",
+        "active": True,
+        "codex_registered": False,
+        "auth_path": str(auth_path),
+    }
+    return {key: value for key, value in row.items() if value is not None}
+
+
 def _clean_keys(account_keys: list[str]) -> list[str]:
     return [key.strip() for key in account_keys if key.strip()]
 
@@ -545,6 +630,23 @@ def _identity_for_key(
     row = live_row or backup_row
     email = str((row or {}).get("email") or (row or {}).get("selector") or "").strip().lower()
     return ("email", email) if email else ("key", account_key)
+
+
+def _identity_for_auth_path(path: Path) -> tuple[str, ...] | None:
+    try:
+        auth = parse_auth_json(path.read_bytes())
+        claims = claims_from_auth(auth)
+    except Exception:
+        return None
+    if claims.account_id or claims.email or claims.workspace_id or claims.workspace_label:
+        return (
+            "auth",
+            claims.account_id or "",
+            (claims.email or "").strip().lower(),
+            claims.workspace_id or "",
+            claims.workspace_label or "",
+        )
+    return None
 
 
 def _ordered_unique(values) -> list[str]:

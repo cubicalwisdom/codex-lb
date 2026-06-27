@@ -15,7 +15,7 @@ def _encryptor() -> TokenEncryptor:
 
 
 @pytest.mark.asyncio
-async def test_set_api_provider_restarts_codex_after_verified_config_write(tmp_path) -> None:
+async def test_set_api_provider_does_not_restart_codex_after_verified_config_write(tmp_path) -> None:
     calls: list[str] = []
 
     async def restart_provider() -> CodexRestartResult:
@@ -33,18 +33,18 @@ async def test_set_api_provider_restarts_codex_after_verified_config_write(tmp_p
 
     result = await service.set_api_provider("https://codex.local/v1")
 
-    assert calls == ["restart"]
+    assert calls == []
     assert result.success is True
-    assert result.restart_attempted is True
-    assert result.restart_succeeded is True
-    assert result.restart_output == "Codex Desktop restarted"
+    assert result.restart_attempted is False
+    assert result.restart_succeeded is None
+    assert result.restart_output is None
     assert 'openai_base_url = "https://codex.local/v1"' in (codex_home / "config.toml").read_text(
         encoding="utf-8"
     )
 
 
 @pytest.mark.asyncio
-async def test_revert_api_provider_restarts_codex_after_verified_revert(tmp_path) -> None:
+async def test_revert_api_provider_does_not_restart_codex_after_verified_revert(tmp_path) -> None:
     calls: list[str] = []
 
     async def restart_provider() -> CodexRestartResult:
@@ -69,20 +69,20 @@ async def test_revert_api_provider_restarts_codex_after_verified_revert(tmp_path
 
     result = await service.revert_api_provider()
 
-    assert calls == ["restart"]
+    assert calls == []
     assert result.success is True
-    assert result.restart_attempted is True
-    assert result.restart_succeeded is True
+    assert result.restart_attempted is False
+    assert result.restart_succeeded is None
+    assert result.restart_output is None
     assert "CodexNeo provider override reverted" in result.message
     assert "openai_base_url" not in (codex_home / "config.toml").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
-async def test_api_provider_set_reports_restart_failure_without_rolling_back_config(tmp_path) -> None:
+async def test_restart_codex_app_reports_restart_failure(tmp_path) -> None:
     async def restart_provider() -> CodexRestartResult:
         return CodexRestartResult(success=False, message="Could not relaunch Codex Desktop")
 
-    log_service = CodexNeoActivityLogService(log_path=tmp_path / "activity.log")
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()
     service = CodexNeoService(
@@ -90,21 +90,16 @@ async def test_api_provider_set_reports_restart_failure_without_rolling_back_con
         codex_home=codex_home,
         encryptor=_encryptor(),
         codex_restart_provider=restart_provider,
-        activity_log_service=log_service,
+        activity_log_service=CodexNeoActivityLogService(log_path=tmp_path / "activity.log"),
     )
 
-    result = await service.set_api_provider("https://codex.local/v1")
+    result = await service.restart_codex_app()
 
     assert result.success is False
     assert result.restart_attempted is True
     assert result.restart_succeeded is False
     assert result.restart_output == "Could not relaunch Codex Desktop"
-    assert "Codex API provider set" in result.message
     assert "Codex restart failed" in result.message
-    assert 'openai_base_url = "https://codex.local/v1"' in (codex_home / "config.toml").read_text(
-        encoding="utf-8"
-    )
-    assert "Codex restart failed" in log_service.read()
 
 
 @pytest.mark.asyncio

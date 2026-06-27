@@ -16,6 +16,7 @@ def _account(
     email: str | None = None,
     workspace_id: str | None = None,
     workspace_label: str | None = None,
+    status: AccountStatus = AccountStatus.ACTIVE,
 ) -> Account:
     return Account(
         id=account_id,
@@ -28,7 +29,7 @@ def _account(
         refresh_token_encrypted=b"refresh",
         id_token_encrypted=b"id",
         last_refresh=utcnow(),
-        status=AccountStatus.ACTIVE,
+        status=status,
         deactivation_reason=None,
         limit_warmup_enabled=True,
     )
@@ -58,6 +59,41 @@ async def test_list_accounts_refresh_existing_reloads_identity_map(db_setup):
         refreshed = (await reader_repo.list_accounts(refresh_existing=True))[0]
         assert refreshed is loaded
         assert refreshed.limit_warmup_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_upsert_account_slot_preserves_user_paused_status_on_auth_sync(db_setup):
+    del db_setup
+    paused = _account(
+        "acc_paused_persist",
+        chatgpt_account_id="chatgpt_paused_persist",
+        email="paused-persist@example.com",
+        status=AccountStatus.PAUSED,
+    )
+    incoming_auth_sync = _account(
+        "acc_paused_persist",
+        chatgpt_account_id="chatgpt_paused_persist",
+        email="paused-persist@example.com",
+        status=AccountStatus.ACTIVE,
+    )
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert_account_slot(paused, preserve_unknown_workspace_duplicates=False)
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert_account_slot(incoming_auth_sync, preserve_unknown_workspace_duplicates=False)
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        loaded = await repo.get_by_id("acc_paused_persist")
+
+    assert loaded is not None
+    assert loaded.status == AccountStatus.PAUSED
+    assert loaded.deactivation_reason is None
+    assert loaded.reset_at is None
+    assert loaded.blocked_at is None
 
 
 @pytest.mark.asyncio

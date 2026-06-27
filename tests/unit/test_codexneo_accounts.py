@@ -4,6 +4,7 @@ import base64
 import json
 import time
 
+from app.core.auth import generate_unique_account_id
 from app.modules.codexneo.accounts import CodexHomeAccountService
 
 pytestmark = __import__("pytest").mark.unit
@@ -12,6 +13,53 @@ pytestmark = __import__("pytest").mark.unit
 def _snapshot_filename(account_key: str) -> str:
     encoded = base64.urlsafe_b64encode(account_key.encode("utf-8")).rstrip(b"=").decode("ascii")
     return f"{encoded}.auth.json"
+
+
+def _encode_jwt(payload: dict) -> str:
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    return f"header.{body}.sig"
+
+
+def _auth_json(*, email: str, account_id: str, plan: str = "pro") -> str:
+    return json.dumps(
+        {
+            "tokens": {
+                "idToken": _encode_jwt(
+                    {
+                        "email": email,
+                        "https://api.openai.com/auth": {"chatgpt_plan_type": plan},
+                    }
+                ),
+                "accessToken": f"secret-access-{account_id}",
+                "refreshToken": f"secret-refresh-{account_id}",
+                "accountId": account_id,
+            },
+            "lastRefreshAt": "2026-06-24T00:00:00Z",
+        }
+    )
+
+
+def test_root_auth_json_is_loaded_as_codex_account_without_registry(tmp_path) -> None:
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    email = "root-visible@example.com"
+    account_id = "acc_root_visible"
+    (codex_home / "auth.json").write_text(_auth_json(email=email, account_id=account_id), encoding="utf-8")
+
+    state = CodexHomeAccountService(codex_home=codex_home, data_dir=tmp_path / "data").load_accounts()
+
+    assert len(state.accounts) == 1
+    assert state.accounts[0].account_key == generate_unique_account_id(account_id, email)
+    assert state.accounts[0].email == email
+    assert state.accounts[0].plan == "pro"
+    assert state.accounts[0].active is True
+    assert state.accounts[0].codex is True
+    assert state.accounts[0].backup is False
+    assert state.accounts[0].availability == "Ready"
+    dumped = state.model_dump_json()
+    assert "secret-access" not in dumped
+    assert "secret-refresh" not in dumped
 
 
 def test_registry_account_discovery_returns_safe_fields_and_active_marker(tmp_path) -> None:

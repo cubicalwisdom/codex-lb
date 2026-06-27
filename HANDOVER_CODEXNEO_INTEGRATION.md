@@ -3,15 +3,46 @@
 ## Current State
 
 - Workspace: `H:\Opencode IDE\codex-ib\codex-lb`
-- Branch: `main`
-- Target app: Codex IB / codex-lb native Windows checkout, not the separate RC Codex Auth Switcher or CodexNeo app.
-- Requested UI: add a `CodexNeo` dashboard tab near Dashboard/APIs/Settings.
-- Requested behavior:
-  - Auth->API Test, Set, and Revert actions.
-  - Editable Codex API URL box used by those actions instead of a hard-coded URL.
-  - CodexGO auth use/refresh controls with timed auto-refresh.
-  - Provider URL and buyer token inputs.
-  - Real Windows Codex home behavior against `%USERPROFILE%\.codex`.
+- Active development branch: `codexneo-portable-windows`
+- Upstream/original branch: `main`
+- Target app: Codex IB / codex-lb with the CodexNeo web tab and the Windows Electron portable package.
+- Active portable package: `dist\CodexIB-Electron-Portable`
+- Portable executable: `dist\CodexIB-Electron-Portable\Codex IB.exe`
+- Portable runtime data: `dist\CodexIB-Electron-Portable\portable-data`
+- Portable live DB: `dist\CodexIB-Electron-Portable\portable-data\store.db`
+- Real Codex Home target: `C:\Users\rcgok\.codex` unless the user changes Codex Home in the UI.
+- Reference-only Windows app/repo: `H:\Opencode IDE\RC Codex Auth Switcher`; use it for parity evidence, not as the implementation target.
+
+## Branch Policy
+
+- `codexneo-portable-windows` is the main working branch for all portable Windows Codex IB / CodexNeo development.
+- `main` should remain the original fork/upstream branch. Keep it clean for upstream updates, then port/cherry-pick needed changes into `codexneo-portable-windows`.
+- The repo should have only two branches locally/remotely unless the user explicitly asks otherwise: `main` and `codexneo-portable-windows`.
+- Current verified branch shape on 2026-06-27:
+  - `main` at `17c1762` / `origin/main`
+  - `codexneo-portable-windows` at `0cc580f` / `origin/codexneo-portable-windows`
+- Do not delete branches, package folders, data folders, or startup entries without verifying the target path and confirming the item is not part of the active portable app.
+
+## Portable Runtime Rules
+
+- The portable app does not necessarily run source-tree Python files. It launches bundled Python from `dist\CodexIB-Electron-Portable\.python\python.exe` and app code copied under `dist\CodexIB-Electron-Portable\app`.
+- When a fix must affect the current portable app after the user's next restart, patch both:
+  - source tree files under `app/`, `frontend/`, `desktop/`, `scripts/`, or tests as appropriate
+  - mirrored runtime files under `dist\CodexIB-Electron-Portable\app\...` when the bundled portable copy needs the fix immediately
+- Do not restart `Codex IB.exe` / the portable Electron app unless the user explicitly says to. The user has repeatedly preferred to restart it manually.
+- Do not restart Codex Desktop automatically. Auth->API Set/Revert should write and verify config only and return a manual-restart message. Explicit `Restart Codex` and `Switch & Restart` actions are the only intended runtime restart actions.
+- If a running app still shows old behavior after code is patched, first determine whether the source server or portable bundled server is running on `127.0.0.1:2455`.
+
+## Current Behavior Summary
+
+- CodexNeo tab contains Auth->API controls, CodexGO auth controls, health diagnostics, Codex Home controls, Codex Home account table, import/export, auto refresh, auto sync, minimize-to-tray controls, and activity log.
+- CodexNeo account discovery reads configured Codex Home, including root `auth.json`, managed account snapshots, encoded snapshot filenames, and app-owned Backup snapshots.
+- `C:\Users\rcgok\.codex\auth.json` is intentionally treated as a real active/root Codex account source and is synced into CodexNeo/Codex IB when valid.
+- Main Accounts and CodexNeo are reconciled by explicit/auto sync, not by read-only account listing. Read routes should not mutate data.
+- Generated duplicate `__copy` Accounts rows may be hidden or consolidated only on approved write/sync paths; do not delete arbitrary account rows on a read.
+- Account pause/status changes made by the operator in the Accounts tab must persist across restart and auth sync.
+- Account delete now preserves request/usage history by default. Only explicit `delete_history=true` hard-deletes history.
+- Old non-portable `C:\Users\rcgok\.codex-lb` data was removed during cleanup. Active portable data is under `dist\CodexIB-Electron-Portable\portable-data`.
 
 ## Design Notes
 
@@ -19,7 +50,37 @@
 - Local settings should be stored under codex-lb's configured data directory, with buyer token encrypted through the existing `TokenEncryptor`.
 - Host writes must back up and atomically replace `%USERPROFILE%\.codex\config.toml` and `%USERPROFILE%\.codex\auth.json`.
 - Buyer tokens must not be logged, returned from GET responses, or written to plaintext app settings.
-- Runtime restart policy: restart the native codex-ib/codex-lb server automatically when needed to load or verify code changes. During testing/coding, do not restart the Codex Desktop app without explicit user permission. Auth->API Set/Revert intentionally restart Codex Desktop at runtime after successful config changes because Codex will not pick up the provider update otherwise.
+- Runtime restart policy: restart the native codex-ib/codex-lb source server only when needed to load or verify code changes and not prohibited by the user. Do not restart the portable Electron app or Codex Desktop without explicit user permission. Auth->API Set/Revert must not auto-restart Codex Desktop; they should instruct the user to restart manually.
+
+## Latest 2026-06-27 Fixes
+
+- Fixed root-auth mismatch: CodexNeo now includes valid top-level `C:\Users\rcgok\.codex\auth.json` and avoids double-counting it when it matches a managed registry/snapshot identity.
+- Fixed Auth->API Set/Revert restart behavior: Set/Revert no longer stop or restart Codex Desktop. This prevents very new or in-flight Codex chats from being lost when switching between CodexNeo Windows app and Codex IB through the auth API config path.
+- Fixed Accounts paused-state persistence: auth sync/import must preserve an operator-paused account instead of overwriting it back to active.
+- Fixed CodexNeo/Codex IB account mismatch root causes:
+  - old hidden non-portable server/startup artifacts were removed
+  - portable runtime was confirmed as the only intended app server
+  - CodexNeo visible account count now merges root `auth.json` with matching registered snapshots by parsed auth identity
+  - explicit Sync remains the write route for reconciliation
+- Fixed delete-history behavior:
+  - `request_logs` were already preserved by default
+  - `usage_history` and `additional_usage_history` previously had `ON DELETE CASCADE` and were being deleted
+  - new migration `app\db\alembic\versions\20260627_000000_preserve_usage_history_on_account_delete.py` changes both usage tables to nullable `account_id` with `ON DELETE SET NULL`
+  - `AccountsRepository.delete(..., delete_history=False)` now detaches usage rows instead of deleting them
+  - `delete_history=True` still hard-deletes request logs and usage rows
+  - same model/repository/migration code was mirrored into `dist\CodexIB-Electron-Portable\app\...`
+- Patched the live portable database in place:
+  - backup created at `dist\CodexIB-Electron-Portable\portable-data\store.db.bak-20260627-053740`
+  - `usage_history` and `additional_usage_history` foreign keys now use `ON DELETE SET NULL`
+  - `PRAGMA integrity_check` returned `ok`
+  - `PRAGMA foreign_key_check` returned 0 issues
+- Imported rough CodexNeo Windows aggregate usage into the portable DB as synthetic request-log rows:
+  - source marker: `codexneo-windows-estimate`
+  - model marker: `gpt-5.5-codex-estimate`
+  - target source values came from the CodexNeo Windows aggregate screenshot plus `H:\Opencode IDE\RC Codex Auth Switcher\dist\rc-codex-auth-data\api-routing.json`
+  - intended rough targets: today `199,533,710` tokens, lifetime about `2.811B` tokens, cost about `$9,380.18`
+  - rows are idempotent by source marker; rerun should delete and replace prior `codexneo-windows-estimate` rows
+- Note: while the portable app is running, verification/API requests may add real logs and make totals drift slightly above the seeded target. Recalculate the synthetic rows against the current base totals if exact rough display alignment is needed again.
 
 ## Progress Log
 
