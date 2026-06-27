@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
 
+from app.core.auth import generate_unique_account_id
 from app.modules.codexneo.health import CodexNeoHealthService
 
 pytestmark = pytest.mark.unit
@@ -11,6 +13,40 @@ pytestmark = pytest.mark.unit
 
 async def _count_accounts() -> int:
     return 2
+
+
+async def _count_one_account() -> int:
+    return 1
+
+
+def _snapshot_filename(account_key: str) -> str:
+    encoded = base64.urlsafe_b64encode(account_key.encode("utf-8")).rstrip(b"=").decode("ascii")
+    return f"{encoded}.auth.json"
+
+
+def _encode_jwt(payload: dict) -> str:
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    return f"header.{body}.sig"
+
+
+def _auth_json(*, email: str, account_id: str, plan: str = "pro") -> str:
+    return json.dumps(
+        {
+            "tokens": {
+                "idToken": _encode_jwt(
+                    {
+                        "email": email,
+                        "https://api.openai.com/auth": {"chatgpt_plan_type": plan},
+                    }
+                ),
+                "accessToken": f"secret-access-{account_id}",
+                "refreshToken": f"secret-refresh-{account_id}",
+                "accountId": account_id,
+            },
+            "lastRefreshAt": "2026-06-24T00:00:00Z",
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -125,6 +161,36 @@ async def test_codexneo_health_reports_mismatch_when_codex_ib_has_extra_accounts
     assert accounts_sync.status == "error"
     assert accounts_sync.message == "Mismatch"
     assert accounts_sync.detail == "1 CodexNeo account(s), 2 Codex IB account(s)"
+
+
+@pytest.mark.asyncio
+async def test_codexneo_health_counts_root_auth_and_backup_duplicate_once(tmp_path) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    data_dir = tmp_path / "data"
+    backup_dir = data_dir / "account-backups"
+    backup_dir.mkdir(parents=True)
+    email = "same-account@example.com"
+    raw_account_id = "acc_same_identity"
+    account_key = generate_unique_account_id(raw_account_id, email)
+    raw = _auth_json(email=email, account_id=raw_account_id)
+    (codex_home / "auth.json").write_text(raw, encoding="utf-8")
+    (backup_dir / "backup-registry.json").write_text(
+        json.dumps({"accounts": [{"account_key": account_key, "email": email, "plan": "pro"}]}),
+        encoding="utf-8",
+    )
+    (backup_dir / _snapshot_filename(account_key)).write_text(raw, encoding="utf-8")
+
+    result = await CodexNeoHealthService(
+        codex_home=codex_home,
+        data_dir=data_dir,
+        accounts_count_provider=_count_one_account,
+    ).health()
+
+    accounts_sync = {item.key: item for item in result.items}["accounts_sync"]
+    assert accounts_sync.status == "ok"
+    assert accounts_sync.message == "Counts aligned"
+    assert accounts_sync.detail == "1 CodexNeo account(s), 1 Codex IB account(s)"
 
 
 @pytest.mark.asyncio

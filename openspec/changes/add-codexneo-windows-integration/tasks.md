@@ -282,3 +282,24 @@
 - [x] Add the CodexNeo `Start with Windows` switch and Electron preload bridge.
 - [x] Register or unregister the packaged portable EXE at Windows login through Electron `app.setLoginItemSettings`.
 - [x] Run focused and broad verification, mirror runtime files into the Electron portable folder without restarting the running app, and update handover plus implementation list.
+
+## 33. CodexNeo Windows Usage Parity
+
+- [x] Trace CodexNeo Windows top usage values to `api-routing.json` aggregate counters and UTC day reset behavior.
+- [x] Add failing backend tests for deriving remaining account usage percentages from registry `used_percent` values.
+- [x] Add failing frontend tests proving the CodexNeo table renders and sorts by remaining usage percentage.
+- [x] Update the Windows usage import script to read `api-routing.json`, compute the Windows app lifetime cost estimate, and replace older synthetic rows idempotently.
+- [x] Import the current CodexNeo Windows aggregate into the active portable database without restarting the portable app.
+- [x] Run focused and broad backend/frontend verification, build static assets, mirror runtime files into the Electron portable folder, and update handover plus implementation list.
+
+## 34. Codex Home Accounts Toolbar Cleanup
+
+- [x] Reorganize the Codex Home Accounts control area into the requested order: auto refresh, Codex home, auto sync, Codex IB refresh/sync, minimize to tray, Start with Windows, and minimize all.
+- [x] Remove only the selected-account bulk `Temp unavailable`, `Mark available`, `Switch`, and `Switch & Restart` buttons while keeping row-level Switch and Switch & Restart actions.
+- [x] Add focused frontend coverage for the control order and removed bulk buttons.
+
+## 35. CodexNeo Health Identity Count Dedupe
+
+- [x] Add a failing health regression test for root `auth.json` and Backup containing the same real auth identity.
+- [x] Make the Accounts sync health count use the same identity dedupe as the CodexNeo account table.
+- [x] Verify the focused health suite and mirror the backend fix into the portable runtime.

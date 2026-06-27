@@ -113,6 +113,7 @@ export const CodexNeoHealthResponseSchema = z.object({
 
 export const CodexNeoAccountUsageWindowSchema = z.object({
   usedPercent: z.number().int().nullable().optional(),
+  remainingPercent: z.number().int().nullable().optional(),
   resetsAt: z.string().nullable().optional(),
   windowMinutes: z.number().int().nullable().optional(),
 });

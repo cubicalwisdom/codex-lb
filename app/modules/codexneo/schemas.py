@@ -118,6 +118,7 @@ class CodexNeoHealthResponse(DashboardModel):
 
 class CodexNeoAccountUsageWindow(DashboardModel):
     used_percent: int | None = None
+    remaining_percent: int | None = None
     resets_at: str | None = None
     window_minutes: int | None = None
 

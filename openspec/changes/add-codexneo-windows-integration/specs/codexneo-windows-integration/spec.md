@@ -151,6 +151,7 @@ The system SHALL discover Codex Home account state for CodexNeo without exposing
 - **WHEN** `%USERPROFILE%\.codex\accounts\registry.json` exists and contains account rows
 - **THEN** the system SHALL parse safe account fields including account key, selector, email, alias, account name, plan, auth mode, active state, last usage, and cached usage windows
 - **AND** the system SHALL recognize managed auth snapshots stored as either raw `<account_key>.auth.json` filenames or URL-safe base64-encoded account-key filenames
+- **AND** cached usage windows SHALL expose raw used percentage and normalized remaining percentage, deriving remaining percentage as `100 - used_percent` when the registry does not provide it
 - **AND** the response SHALL NOT include access tokens, refresh tokens, id tokens, or raw auth JSON
 
 #### Scenario: Account table sortable columns
@@ -158,7 +159,7 @@ The system SHALL discover Codex Home account state for CodexNeo without exposing
 - **WHEN** CodexNeo account rows are displayed
 - **THEN** the table SHALL include a sortable `#` source-order number column
 - **AND** the `Plan`, `5h`, `Weekly`, `Avail`, and `Status / Last` headers SHALL be sortable
-- **AND** numeric usage columns SHALL sort by percentage values instead of display text
+- **AND** the `5h` and `Weekly` columns SHALL display and sort by remaining usage percentage, matching CodexNeo Windows app behavior
 - **AND** `Avail` SHALL sort `Ready` before `Backup` before unavailable or temporary states
 - **AND** `Status / Last` SHALL sort `Fresh` before `Stored` before `Unknown` before unavailable or error states
 - **AND** sorting SHALL preserve selected account keys and SHALL NOT mutate Codex/Backup location state
@@ -232,7 +233,7 @@ The system SHALL expose import and export controls with no-overwrite safeguards.
 
 ### Requirement: CodexNeo account actions
 
-The system SHALL expose confirmation-gated account actions for selected Codex Home account keys.
+The system SHALL expose account actions for CodexNeo account keys while keeping the selected-account toolbar limited to multi-account actions.
 
 #### Scenario: Metadata action is requested
 
@@ -242,9 +243,8 @@ The system SHALL expose confirmation-gated account actions for selected Codex Ho
 
 #### Scenario: Switch or delete action is requested
 
-- **WHEN** an admin switches, switches and restarts, or deletes selected accounts
+- **WHEN** an admin switches or switches and restarts an account from its row action, or deletes selected accounts
 - **THEN** the system SHALL route the operation through the configured Codex auth command using the selected Codex Home
-- **AND** Switch and Delete SHALL require explicit UI confirmation
 - **AND** Switch and Restart SHALL invoke restart only after the switch command succeeds
 
 #### Scenario: Delete removes account locations
@@ -411,6 +411,13 @@ The CodexNeo account table SHALL mirror CodexNeo Windows app availability and st
 - **AND** the button or nearby status text SHALL indicate refresh activity or completion
 - **AND** a disabled refresh control SHALL clearly reflect that the page is busy or read-only
 
+#### Scenario: Codex Home Accounts controls are organized
+
+- **WHEN** the Codex Home Accounts section is shown
+- **THEN** its control area SHALL group controls in this order: auto refresh, Codex home status, auto sync, Codex IB refresh/sync, minimize to tray, Start with Windows, and minimize all
+- **AND** the selected-account toolbar SHALL NOT expose bulk `Temp unavailable`, `Mark available`, `Switch`, or `Switch & Restart` buttons
+- **AND** row-level `Switch` and `Switch & Restart` actions SHALL remain available in the account table
+
 #### Scenario: CodexNeo account rows can be selected in bulk
 
 - **WHEN** an admin clicks the CodexNeo `Select all` control
@@ -471,6 +478,13 @@ The CodexNeo account table SHALL mirror CodexNeo Windows app availability and st
 - **AND** the page SHALL avoid overlapping auto-sync runs while one sync is already pending
 - **AND** synced queries SHALL be invalidated through the normal sync success path
 
+#### Scenario: Accounts sync health count matches visible account identity dedupe
+
+- **WHEN** root Codex Home `auth.json` and a managed Codex Home or Backup snapshot resolve to the same real auth identity
+- **THEN** the Accounts sync diagnostic SHALL count that identity once
+- **AND** the diagnostic CodexNeo account count SHALL match the deduped account table count
+- **AND** the duplicate source SHALL NOT create a false CodexNeo/Codex IB mismatch
+
 #### Scenario: CodexNeo actions do not show secondary browser confirmations
 
 - **WHEN** an admin clicks CodexNeo actions such as Restart Codex, Switch, Switch & Restart, or Delete selected
@@ -514,6 +528,14 @@ The system SHALL support a one-time dashboard-only import of rough aggregate usa
 - **AND** the import SHALL affect dashboard aggregate metrics only
 - **AND** the import SHALL NOT add an ongoing calculator UI or change account auth material
 - **AND** rerunning the import SHALL replace the previous synthetic import rows instead of duplicating totals
+
+#### Scenario: Windows usage values are imported from api-routing
+
+- **WHEN** the operator runs the CodexNeo Windows usage import script with a Windows `api-routing.json` path
+- **THEN** the script SHALL read aggregate per-account counters from that file
+- **AND** today's counters SHALL include only entries whose stored day key matches the current UTC day, matching CodexNeo Windows app reset behavior
+- **AND** lifetime tokens and estimated cost SHALL include the lifetime counters from all accounts
+- **AND** rerunning the import SHALL replace both current and older synthetic import rows instead of duplicating totals
 
 ### Requirement: Hidden Windows startup launcher
 

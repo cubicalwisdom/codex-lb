@@ -62,8 +62,8 @@ function renderCodexNeoPage({
         plan: "Pro",
         active: true,
         usage: {
-          primary: { usedPercent: 98, resetsAt: "2026-06-22T18:23:00Z", windowMinutes: 300 },
-          secondary: { usedPercent: 49, resetsAt: "2026-06-28T11:54:00Z", windowMinutes: 10080 },
+          primary: { usedPercent: 98, remainingPercent: 2, resetsAt: "2026-06-22T18:23:00Z", windowMinutes: 300 },
+          secondary: { usedPercent: 49, remainingPercent: 51, resetsAt: "2026-06-28T11:54:00Z", windowMinutes: 10080 },
         },
         codex: true,
         backup: true,
@@ -93,8 +93,8 @@ function renderCodexNeoPage({
         plan: "Team",
         active: false,
         usage: {
-          primary: { usedPercent: 11, resetsAt: "2026-06-22T18:23:00Z", windowMinutes: 300 },
-          secondary: { usedPercent: 2, resetsAt: "2026-06-28T11:54:00Z", windowMinutes: 10080 },
+          primary: { usedPercent: 11, remainingPercent: 89, resetsAt: "2026-06-22T18:23:00Z", windowMinutes: 300 },
+          secondary: { usedPercent: 2, remainingPercent: 98, resetsAt: "2026-06-28T11:54:00Z", windowMinutes: 10080 },
         },
         codex: true,
         backup: false,
@@ -299,8 +299,8 @@ describe("CodexNeoPage", () => {
     expect(screen.getByText("t01.036252.89@gmail.com")).toBeInTheDocument();
     expect(screen.getByText("backup@example.com")).toBeInTheDocument();
     expect(screen.getByText("unknown@example.com")).toBeInTheDocument();
-    expect(screen.getByText("98%")).toBeInTheDocument();
-    expect(screen.getByText("49%")).toBeInTheDocument();
+    expect(screen.getByText("2%")).toBeInTheDocument();
+    expect(screen.getByText("51%")).toBeInTheDocument();
     expect(screen.getByText("Fresh / just now")).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "API" })).not.toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "API h" })).not.toBeInTheDocument();
@@ -368,29 +368,50 @@ describe("CodexNeoPage", () => {
     expect(mutations.importFolderMutation.mutateAsync).not.toHaveBeenCalled();
   });
 
-  it("runs selected account actions without browser confirmations", async () => {
+  it("runs remaining selected account actions without browser confirmations", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();
     const { mutations, accountsRefetch } = renderCodexNeoPage();
 
     await user.click(screen.getByLabelText("Select t01.036252.89@gmail.com"));
     expect(screen.queryByRole("button", { name: "Use API" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Temp unavailable" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark available" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Switch" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Switch & Restart" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Refresh selected" }));
-    await user.click(screen.getByRole("button", { name: "Temp unavailable" }));
-    await user.click(screen.getByRole("button", { name: "Switch" }));
     await user.click(screen.getByRole("button", { name: "Delete selected" }));
 
     expect(accountsRefetch).not.toHaveBeenCalled();
     expect(mutations.refreshSelectedMutation.mutateAsync).toHaveBeenCalledWith({ accountKeys: ["acct-active"] });
-    expect(mutations.markTempUnavailableMutation.mutateAsync).toHaveBeenCalledWith({ accountKeys: ["acct-active"] });
+    expect(mutations.markTempUnavailableMutation.mutateAsync).not.toHaveBeenCalled();
+    expect(mutations.markAvailableMutation.mutateAsync).not.toHaveBeenCalled();
     expect(mutations.setValidityDateMutation.mutateAsync).not.toHaveBeenCalled();
     expect(mutations.clearValidityDateMutation.mutateAsync).not.toHaveBeenCalled();
-    expect(mutations.switchAccountMutation.mutateAsync).toHaveBeenCalledWith({
-      accountKey: "acct-active",
-      restart: false,
-    });
+    expect(mutations.switchAccountMutation.mutateAsync).not.toHaveBeenCalled();
     expect(mutations.deleteAccountsMutation.mutateAsync).toHaveBeenCalledWith({ accountKeys: ["acct-active"] });
     expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it("organizes Codex Home account controls in the requested order", () => {
+    renderCodexNeoPage();
+
+    const groups = Array.from(screen.getByTestId("codex-home-account-controls").children).map((element) =>
+      element.textContent?.replace(/\s+/g, " ").trim() ?? "",
+    );
+
+    expect(groups).toHaveLength(7);
+    expect(groups[0]).toContain("Auto refresh Codex Home");
+    expect(groups[0]).toContain("Every (sec)");
+    expect(groups[1]).toContain("Codex home");
+    expect(groups[1]).toContain("Mismatch");
+    expect(groups[2]).toContain("Auto sync Codex IB");
+    expect(groups[3]).toContain("Codex IB");
+    expect(groups[3]).toContain("Refresh");
+    expect(groups[3]).toContain("Sync");
+    expect(groups[4]).toContain("Minimize to tray");
+    expect(groups[5]).toContain("Start with Windows");
+    expect(groups[6]).toContain("Minimize all");
   });
 
   it("selects every visible account row without changing location checkboxes", async () => {
@@ -461,10 +482,10 @@ describe("CodexNeoPage", () => {
     expect(rowEmails()).toEqual(["backup@example.com", "t01.036252.89@gmail.com", "unknown@example.com"]);
 
     await user.click(screen.getByRole("button", { name: "Sort by 5h" }));
-    expect(rowEmails()).toEqual(["backup@example.com", "unknown@example.com", "t01.036252.89@gmail.com"]);
+    expect(rowEmails()).toEqual(["backup@example.com", "t01.036252.89@gmail.com", "unknown@example.com"]);
 
     await user.click(screen.getByRole("button", { name: "Sort by Weekly" }));
-    expect(rowEmails()).toEqual(["backup@example.com", "unknown@example.com", "t01.036252.89@gmail.com"]);
+    expect(rowEmails()).toEqual(["backup@example.com", "t01.036252.89@gmail.com", "unknown@example.com"]);
 
     await user.click(screen.getByRole("button", { name: "Sort by Avail" }));
     expect(rowEmails()).toEqual(["t01.036252.89@gmail.com", "backup@example.com", "unknown@example.com"]);
@@ -529,7 +550,7 @@ describe("CodexNeoPage", () => {
     const { mutations } = renderCodexNeoPage();
 
     await user.click(screen.getByLabelText("Minimize to tray"));
-    await user.click(screen.getByRole("button", { name: "Minimize" }));
+    await user.click(screen.getByRole("button", { name: "Minimize all" }));
 
     expect(mutations.updateSettingsMutation.mutateAsync).toHaveBeenCalledWith(
       expect.objectContaining({ minimizeToTrayEnabled: true }),

@@ -154,7 +154,9 @@ def test_registry_account_discovery_returns_safe_fields_and_active_marker(tmp_pa
     assert state.accounts[0].email == "t01.036252.89@gmail.com"
     assert state.accounts[0].plan == "Pro"
     assert state.accounts[0].usage.primary.used_percent == 98
+    assert state.accounts[0].usage.primary.remaining_percent == 2
     assert state.accounts[0].usage.secondary.used_percent == 49
+    assert state.accounts[0].usage.secondary.remaining_percent == 51
     assert state.accounts[0].codex is True
     assert state.accounts[0].backup is True
     assert state.accounts[0].api is True
@@ -336,3 +338,38 @@ def test_registry_account_with_usage_window_without_status_reports_fresh(tmp_pat
     state = CodexHomeAccountService(codex_home=codex_home, data_dir=tmp_path / "data").load_accounts()
 
     assert state.accounts[0].status == "Fresh / just now"
+
+
+def test_registry_usage_windows_expose_remaining_percent_for_windows_parity(tmp_path) -> None:
+    codex_home = tmp_path / ".codex"
+    registry_path = codex_home / "accounts" / "registry.json"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {
+                        "account_key": "usage-key",
+                        "email": "usage@example.com",
+                        "last_usage_at": int(time.time()),
+                        "last_usage": {
+                            "primary": {"used_percent": 1, "window_minutes": 300},
+                            "secondary": {"used_percent": 91, "window_minutes": 10080},
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (codex_home / "accounts" / "usage-key.auth.json").write_text(
+        json.dumps({"tokens": {"access_token": "secret", "account_id": "acc_usage"}}),
+        encoding="utf-8",
+    )
+
+    state = CodexHomeAccountService(codex_home=codex_home, data_dir=tmp_path / "data").load_accounts()
+
+    assert state.accounts[0].usage.primary.used_percent == 1
+    assert state.accounts[0].usage.primary.remaining_percent == 99
+    assert state.accounts[0].usage.secondary.used_percent == 91
+    assert state.accounts[0].usage.secondary.remaining_percent == 9

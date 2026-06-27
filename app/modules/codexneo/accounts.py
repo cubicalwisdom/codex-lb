@@ -278,8 +278,13 @@ def _usage_from_registry(usage: dict[str, Any]) -> CodexNeoAccountUsage:
 def _usage_window_from_registry(value: Any) -> CodexNeoAccountUsageWindow | None:
     if not isinstance(value, dict):
         return None
+    used_percent = _optional_int(value.get("used_percent"))
+    remaining_percent = _optional_int(value.get("remaining_percent"))
+    if remaining_percent is None and used_percent is not None:
+        remaining_percent = 100 - used_percent
     return CodexNeoAccountUsageWindow(
-        used_percent=_optional_int(value.get("used_percent")),
+        used_percent=_clamp_percent(used_percent),
+        remaining_percent=_clamp_percent(remaining_percent),
         resets_at=_optional_str(value.get("resets_at")),
         window_minutes=_optional_int(value.get("window_minutes")),
     )
@@ -299,6 +304,12 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _clamp_percent(value: int | None) -> int | None:
+    if value is None:
+        return None
+    return max(0, min(100, value))
 
 
 def _format_availability(item: dict[str, Any], *, codex: bool, backup: bool) -> str:

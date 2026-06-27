@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from app.modules.codexneo.accounts import _dedupe_registry_items
 from app.modules.codexneo.activity_log import default_activity_log_path
 from app.modules.codexneo.home import default_settings_path, resolve_configured_codex_home
 from app.modules.codexneo.locations import CodexNeoAccountLocationService
@@ -212,9 +213,35 @@ def _snapshot_count(directory: Path) -> int:
 
 def _safe_visible_account_count(codex_home: Path, data_dir: Path) -> int:
     try:
-        return len(CodexNeoAccountLocationService(codex_home=codex_home, data_dir=data_dir).all_account_rows())
+        location_service = CodexNeoAccountLocationService(codex_home=codex_home, data_dir=data_dir)
+        rows = location_service.all_account_rows()
+        return len(
+            _dedupe_registry_items(
+                rows,
+                live_dir=codex_home / "accounts",
+                backup_dir=location_service.backup_dir,
+                active_key=_active_account_key(codex_home),
+            )
+        )
     except Exception:
         return 0
+
+
+def _active_account_key(codex_home: Path) -> str | None:
+    registry_path = codex_home / "accounts" / "registry.json"
+    if not registry_path.exists():
+        return None
+    try:
+        root = json.loads(registry_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(root, dict):
+        return None
+    value = root.get("active_account_key")
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _registry_message(status: str) -> str:

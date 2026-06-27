@@ -68,8 +68,6 @@ export function CodexNeoPage() {
     importFolderUploadMutation,
     exportAllMutation,
     exportSelectedMutation,
-    markTempUnavailableMutation,
-    markAvailableMutation,
     refreshSelectedMutation,
     syncAccountsMutation,
     switchAccountMutation,
@@ -146,8 +144,6 @@ export function CodexNeoPage() {
     importFolderUploadMutation.isPending ||
     exportAllMutation.isPending ||
     exportSelectedMutation.isPending ||
-    markTempUnavailableMutation.isPending ||
-    markAvailableMutation.isPending ||
     refreshSelectedMutation.isPending ||
     syncAccountsMutation.isPending ||
     switchAccountMutation.isPending ||
@@ -258,7 +254,6 @@ export function CodexNeoPage() {
     () => selectedAccountKeys.filter((key) => visibleAccountKeys.includes(key)),
     [selectedAccountKeys, visibleAccountKeys],
   );
-  const firstSelected = selectedAccounts[0];
   const allVisibleAccountsSelected =
     visibleAccountKeys.length > 0 && visibleAccountKeys.every((key) => selectedAccounts.includes(key));
   const accountsSyncDiagnostic = health?.items.find((item) => item.key === "accounts_sync");
@@ -561,20 +556,15 @@ export function CodexNeoPage() {
       </section>
 
       <section className="space-y-4 rounded-lg border border-border/70 bg-background/60 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <ListChecks className="h-4 w-4 text-primary" aria-hidden="true" />
-            <h2 className="text-base font-semibold">Codex Home Accounts</h2>
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center justify-end gap-3">
-            {accounts?.registryPath ? (
-              <span className="max-w-full truncate text-xs text-muted-foreground">{accounts.registryPath}</span>
-            ) : null}
-            {accountsSyncDiagnostic ? (
-              <Badge variant={accountsSyncMismatch ? "destructive" : "outline"}>
-                {accountsSyncMismatch ? "Mismatch" : "Aligned"}
-              </Badge>
-            ) : null}
+        <div className="flex items-center gap-2">
+          <ListChecks className="h-4 w-4 text-primary" aria-hidden="true" />
+          <h2 className="text-base font-semibold">Codex Home Accounts</h2>
+        </div>
+        <div
+          data-testid="codex-home-account-controls"
+          className="grid gap-4 xl:grid-cols-[minmax(16rem,auto)_minmax(14rem,1fr)_minmax(12rem,auto)_auto_minmax(11rem,auto)_minmax(12rem,auto)_auto] xl:items-end"
+        >
+          <div className="flex flex-wrap items-end gap-3">
             <div className="flex h-10 items-center gap-2">
               <Switch
                 id="codex-home-auto-refresh-enabled"
@@ -600,56 +590,75 @@ export function CodexNeoPage() {
                 onChange={(event) => setCodexHomeRefreshSecondsOverride(Number(event.target.value))}
               />
             </div>
-            <div className="flex h-10 items-center gap-2">
-              <Switch
-                id="codex-home-auto-sync-enabled"
-                checked={codexHomeAutoSyncEnabled}
-                disabled={controlsDisabled}
-                onCheckedChange={setPersistentCodexHomeAutoSyncEnabled}
-              />
-              <Label htmlFor="codex-home-auto-sync-enabled" className="whitespace-nowrap">
-                Auto sync Codex IB
-              </Label>
+          </div>
+          <div className="min-w-0 space-y-1.5">
+            <span className="text-xs font-medium text-muted-foreground">Codex home</span>
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              {accounts?.registryPath ? (
+                <span className="max-w-full truncate text-xs text-muted-foreground">{accounts.registryPath}</span>
+              ) : (
+                <span className="text-xs text-muted-foreground">Registry path unavailable</span>
+              )}
+              {accountsSyncDiagnostic ? (
+                <Badge variant={accountsSyncMismatch ? "destructive" : "outline"}>
+                  {accountsSyncMismatch ? "Mismatch" : "Aligned"}
+                </Badge>
+              ) : null}
             </div>
+          </div>
+          <div className="flex h-10 items-center gap-2">
+            <Switch
+              id="codex-home-auto-sync-enabled"
+              checked={codexHomeAutoSyncEnabled}
+              disabled={controlsDisabled}
+              onCheckedChange={setPersistentCodexHomeAutoSyncEnabled}
+            />
+            <Label htmlFor="codex-home-auto-sync-enabled" className="whitespace-nowrap">
+              Auto sync Codex IB
+            </Label>
+          </div>
+          <div className="flex flex-wrap items-end gap-2">
+            <span className="pb-2 text-sm font-medium text-muted-foreground">Codex IB</span>
             <Button type="button" variant="outline" disabled={controlsDisabled} onClick={refreshAccounts}>
               {accountsQuery.isFetching ? "Refreshing..." : "Refresh"}
             </Button>
             <Button type="button" variant="outline" disabled={controlsDisabled} onClick={() => syncAccountsMutation.mutateAsync()}>
               {syncAccountsMutation.isPending ? "Syncing..." : "Sync"}
             </Button>
-            <div className="flex h-10 items-center gap-2">
-              <Switch
-                id="codexneo-minimize-to-tray-enabled"
-                checked={minimizeToTrayEnabled}
-                disabled={controlsDisabled}
-                onCheckedChange={setPersistentMinimizeToTrayEnabled}
-              />
-              <Label htmlFor="codexneo-minimize-to-tray-enabled" className="whitespace-nowrap">
-                Minimize to tray
-              </Label>
-            </div>
-            <div className="flex h-10 items-center gap-2">
-              <Switch
-                id="codexneo-start-with-windows-enabled"
-                checked={startWithWindowsEnabled}
-                disabled={controlsDisabled}
-                onCheckedChange={setPersistentStartWithWindowsEnabled}
-              />
-              <Label htmlFor="codexneo-start-with-windows-enabled" className="whitespace-nowrap">
-                Start with Windows
-              </Label>
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={controlsDisabled || !electronControlsAvailable}
-              onClick={minimizeWindow}
-              title={electronControlsAvailable ? "Minimize Codex IB" : "Available in the Electron app"}
-            >
-              <Minus className="h-4 w-4" aria-hidden="true" />
-              Minimize
-            </Button>
           </div>
+          <div className="flex h-10 items-center gap-2">
+            <Switch
+              id="codexneo-minimize-to-tray-enabled"
+              checked={minimizeToTrayEnabled}
+              disabled={controlsDisabled}
+              onCheckedChange={setPersistentMinimizeToTrayEnabled}
+            />
+            <Label htmlFor="codexneo-minimize-to-tray-enabled" className="whitespace-nowrap">
+              Minimize to tray
+            </Label>
+          </div>
+          <div className="flex h-10 items-center gap-2">
+            <Switch
+              id="codexneo-start-with-windows-enabled"
+              checked={startWithWindowsEnabled}
+              disabled={controlsDisabled}
+              onCheckedChange={setPersistentStartWithWindowsEnabled}
+            />
+            <Label htmlFor="codexneo-start-with-windows-enabled" className="whitespace-nowrap">
+              Start with Windows
+            </Label>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={controlsDisabled || !electronControlsAvailable}
+            onClick={minimizeWindow}
+            title={electronControlsAvailable ? "Minimize Codex IB" : "Available in the Electron app"}
+            className="justify-self-start whitespace-nowrap xl:justify-self-end"
+          >
+            <Minus className="h-4 w-4" aria-hidden="true" />
+            Minimize all
+          </Button>
         </div>
         <p className="text-sm text-muted-foreground">{accounts?.message ?? "Loading Codex accounts..."}</p>
         {accountsRefreshFeedback ? (
@@ -745,18 +754,6 @@ export function CodexNeoPage() {
             onClick={() => refreshSelectedMutation.mutateAsync({ accountKeys: selectedAccounts })}
           >
             Refresh selected
-          </Button>
-          <Button type="button" variant="outline" disabled={controlsDisabled || selectedAccounts.length === 0} onClick={() => markTempUnavailableMutation.mutateAsync({ accountKeys: selectedAccounts })}>
-            Temp unavailable
-          </Button>
-          <Button type="button" variant="outline" disabled={controlsDisabled || selectedAccounts.length === 0} onClick={() => markAvailableMutation.mutateAsync({ accountKeys: selectedAccounts })}>
-            Mark available
-          </Button>
-          <Button type="button" variant="outline" disabled={controlsDisabled || !firstSelected} onClick={() => switchAccountMutation.mutateAsync({ accountKey: firstSelected, restart: false })}>
-            Switch
-          </Button>
-          <Button type="button" variant="outline" disabled={controlsDisabled || !firstSelected} onClick={() => switchAccountMutation.mutateAsync({ accountKey: firstSelected, restart: true })}>
-            Switch &amp; Restart
           </Button>
           <Button type="button" variant="destructive" disabled={controlsDisabled || selectedAccounts.length === 0} onClick={() => deleteAccountsMutation.mutateAsync({ accountKeys: selectedAccounts })}>
             Delete selected
@@ -976,8 +973,8 @@ function AccountRow({
       <td className="px-3 py-2 text-muted-foreground">{sourceNumber}</td>
       <td className="px-3 py-2 whitespace-nowrap">{label}</td>
       <td className="px-3 py-2">{account.plan ?? "-"}</td>
-      <td className="px-3 py-2">{formatPercent(account.usage.primary?.usedPercent)}</td>
-      <td className="px-3 py-2">{formatPercent(account.usage.secondary?.usedPercent)}</td>
+      <td className="px-3 py-2">{formatPercent(usageRemainingPercent(account.usage.primary))}</td>
+      <td className="px-3 py-2">{formatPercent(usageRemainingPercent(account.usage.secondary))}</td>
       <td className="px-3 py-2 text-center">
         <input
           aria-label={`Codex ${label}`}
@@ -1030,6 +1027,18 @@ function formatPercent(value: number | null | undefined) {
   return typeof value === "number" ? `${value}%` : "-";
 }
 
+function usageRemainingPercent(
+  window: { remainingPercent?: number | null; usedPercent?: number | null } | null | undefined,
+) {
+  if (typeof window?.remainingPercent === "number") return clampPercent(window.remainingPercent);
+  if (typeof window?.usedPercent === "number") return clampPercent(100 - window.usedPercent);
+  return null;
+}
+
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
 function clampCodexHomeRefreshSeconds(value: number) {
   if (!Number.isFinite(value)) return DEFAULT_CODEX_HOME_REFRESH_SECONDS;
   return Math.max(MIN_CODEX_HOME_REFRESH_SECONDS, Math.min(MAX_CODEX_HOME_REFRESH_SECONDS, Math.round(value)));
@@ -1052,9 +1061,9 @@ function compareAccountRows(left: AccountTableRow, right: AccountTableRow, key: 
     case "plan":
       return compareText(left.account.plan, right.account.plan);
     case "fiveHour":
-      return compareNumber(usageSortValue(left.account.usage.primary?.usedPercent), usageSortValue(right.account.usage.primary?.usedPercent));
+      return compareNumber(usageSortValue(usageRemainingPercent(left.account.usage.primary)), usageSortValue(usageRemainingPercent(right.account.usage.primary)));
     case "weekly":
-      return compareNumber(usageSortValue(left.account.usage.secondary?.usedPercent), usageSortValue(right.account.usage.secondary?.usedPercent));
+      return compareNumber(usageSortValue(usageRemainingPercent(left.account.usage.secondary)), usageSortValue(usageRemainingPercent(right.account.usage.secondary)));
     case "availability":
       return compareNumber(availabilityPriority(left.account.availability), availabilityPriority(right.account.availability));
     case "status":
