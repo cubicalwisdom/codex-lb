@@ -11,6 +11,7 @@ export const CodexNeoSettingsSchema = z.object({
   codexHomeAutoRefreshIntervalSeconds: z.number().int().min(5).max(3600),
   codexHomeAutoSyncEnabled: z.boolean(),
   minimizeToTrayEnabled: z.boolean(),
+  startWithWindowsEnabled: z.boolean(),
   buyerTokenSaved: z.boolean(),
 });
 
@@ -25,6 +26,7 @@ export const CodexNeoSettingsUpdateRequestSchema = z.object({
   codexHomeAutoRefreshIntervalSeconds: z.number().int().min(5).max(3600).optional(),
   codexHomeAutoSyncEnabled: z.boolean().optional(),
   minimizeToTrayEnabled: z.boolean().optional(),
+  startWithWindowsEnabled: z.boolean().optional(),
   buyerToken: z.string().optional(),
   clearBuyerToken: z.boolean().optional(),
 });

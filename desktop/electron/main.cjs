@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell } = require("elec
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { applyStartWithWindowsSetting } = require("./startup.cjs");
 
 const HOST = process.env.CODEX_IB_HOST || "127.0.0.1";
 const PORT = Number.parseInt(process.env.CODEX_IB_PORT || "2455", 10);
@@ -14,6 +15,7 @@ let backendProcess = null;
 let tray = null;
 let isQuitting = false;
 let minimizeToTrayEnabled = false;
+let startWithWindowsEnabled = false;
 
 function sidecarRoot() {
   if (app.isPackaged) {
@@ -215,6 +217,12 @@ ipcMain.handle("codex-ib:minimize", (_event, options = {}) => {
   mainWindow.minimize();
   appendLog(sidecarRoot(), "Window minimized normally.");
   return true;
+});
+
+ipcMain.handle("codex-ib:set-start-with-windows-enabled", (_event, enabled) => {
+  startWithWindowsEnabled = applyStartWithWindowsSetting(app, enabled);
+  appendLog(sidecarRoot(), `Start-with-Windows preference set to ${startWithWindowsEnabled}.`);
+  return startWithWindowsEnabled;
 });
 
 async function boot() {

@@ -51,6 +51,7 @@ function renderCodexNeoPage({
     codexHomeAutoRefreshIntervalSeconds: 30,
     codexHomeAutoSyncEnabled: false,
     minimizeToTrayEnabled: false,
+    startWithWindowsEnabled: false,
     buyerTokenSaved: true,
   };
   const accounts = {
@@ -534,6 +535,23 @@ describe("CodexNeoPage", () => {
       expect.objectContaining({ minimizeToTrayEnabled: true }),
     );
     expect(minimizeToTray).toHaveBeenCalledWith({ toTray: true });
+  });
+
+  it("persists Start with Windows and registers it through Electron", async () => {
+    const user = userEvent.setup();
+    const setStartWithWindowsEnabled = vi.fn().mockResolvedValue(true);
+    Object.defineProperty(window, "codexIbElectron", {
+      configurable: true,
+      value: { setStartWithWindowsEnabled },
+    });
+    const { mutations } = renderCodexNeoPage();
+
+    await user.click(screen.getByLabelText("Start with Windows"));
+
+    expect(mutations.updateSettingsMutation.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ startWithWindowsEnabled: true }),
+    );
+    expect(setStartWithWindowsEnabled).toHaveBeenCalledWith(true);
   });
 
   it("runs explicit two-way sync from the Codex Home Accounts toolbar", async () => {

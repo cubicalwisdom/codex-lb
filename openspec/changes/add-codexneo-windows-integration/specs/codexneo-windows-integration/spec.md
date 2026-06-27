@@ -18,6 +18,13 @@ The system SHALL persist CodexNeo settings locally under the codex-lb configured
 - **THEN** the system SHALL encrypt the token before writing it to local settings storage
 - **AND** later CodexGO use/refresh calls SHALL decrypt it only for the outgoing provider request
 
+#### Scenario: Portable startup preference is saved
+
+- **WHEN** an admin changes the CodexNeo `Start with Windows` setting in the Electron portable app
+- **THEN** the system SHALL persist the setting with the other CodexNeo settings under the codex-lb configured data directory
+- **AND** the Electron shell SHALL register or unregister the current packaged `Codex IB.exe` for current-user Windows login startup
+- **AND** disabling the setting SHALL remove that login startup registration without deleting CodexNeo account or usage data
+
 ### Requirement: Codex API provider config actions
 
 The system SHALL expose CodexNeo actions to test, set, and revert the configured Codex API provider URL for the real Windows Codex home.

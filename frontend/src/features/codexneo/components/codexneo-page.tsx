@@ -98,6 +98,7 @@ export function CodexNeoPage() {
   const [codexHomeRefreshSecondsOverride, setCodexHomeRefreshSecondsOverride] = useState<number | null>(null);
   const [codexHomeAutoSyncEnabledOverride, setCodexHomeAutoSyncEnabledOverride] = useState<boolean | null>(null);
   const [minimizeToTrayEnabledOverride, setMinimizeToTrayEnabledOverride] = useState<boolean | null>(null);
+  const [startWithWindowsEnabledOverride, setStartWithWindowsEnabledOverride] = useState<boolean | null>(null);
   const [autoSyncFeedback, setAutoSyncFeedback] = useState<string | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const importFolderInputRef = useRef<HTMLInputElement | null>(null);
@@ -119,6 +120,7 @@ export function CodexNeoPage() {
     DEFAULT_CODEX_HOME_REFRESH_SECONDS;
   const codexHomeAutoSyncEnabled = codexHomeAutoSyncEnabledOverride ?? settings?.codexHomeAutoSyncEnabled ?? false;
   const minimizeToTrayEnabled = minimizeToTrayEnabledOverride ?? settings?.minimizeToTrayEnabled ?? false;
+  const startWithWindowsEnabled = startWithWindowsEnabledOverride ?? settings?.startWithWindowsEnabled ?? false;
 
   const busy =
     settingsQuery.isPending ||
@@ -170,6 +172,7 @@ export function CodexNeoPage() {
       codexHomeAutoRefreshIntervalSeconds: clampCodexHomeRefreshSeconds(codexHomeRefreshSeconds),
       codexHomeAutoSyncEnabled,
       minimizeToTrayEnabled,
+      startWithWindowsEnabled,
     };
     if (buyerToken.trim()) {
       payload.buyerToken = buyerToken.trim();
@@ -187,6 +190,7 @@ export function CodexNeoPage() {
     managementLogEnabled,
     minimizeToTrayEnabled,
     openaiLogEnabled,
+    startWithWindowsEnabled,
   ]);
 
   const saveSettings = async () => {
@@ -206,6 +210,9 @@ export function CodexNeoPage() {
   useEffect(() => {
     void electronApi?.setMinimizeToTrayEnabled?.(minimizeToTrayEnabled);
   }, [electronApi, minimizeToTrayEnabled]);
+  useEffect(() => {
+    void electronApi?.setStartWithWindowsEnabled?.(startWithWindowsEnabled);
+  }, [electronApi, startWithWindowsEnabled]);
   const persistCodexNeoSetting = (payload: CodexNeoSettingsUpdateRequest) => {
     void updateSettingsMutation.mutateAsync(payload);
   };
@@ -226,6 +233,11 @@ export function CodexNeoPage() {
     setMinimizeToTrayEnabledOverride(checked);
     void electronApi?.setMinimizeToTrayEnabled?.(checked);
     persistCodexNeoSetting({ minimizeToTrayEnabled: checked });
+  };
+  const setPersistentStartWithWindowsEnabled = (checked: boolean) => {
+    setStartWithWindowsEnabledOverride(checked);
+    void electronApi?.setStartWithWindowsEnabled?.(checked);
+    persistCodexNeoSetting({ startWithWindowsEnabled: checked });
   };
   const minimizeWindow = () => {
     void electronApi?.minimizeToTray({ toTray: minimizeToTrayEnabled });
@@ -614,6 +626,17 @@ export function CodexNeoPage() {
               />
               <Label htmlFor="codexneo-minimize-to-tray-enabled" className="whitespace-nowrap">
                 Minimize to tray
+              </Label>
+            </div>
+            <div className="flex h-10 items-center gap-2">
+              <Switch
+                id="codexneo-start-with-windows-enabled"
+                checked={startWithWindowsEnabled}
+                disabled={controlsDisabled}
+                onCheckedChange={setPersistentStartWithWindowsEnabled}
+              />
+              <Label htmlFor="codexneo-start-with-windows-enabled" className="whitespace-nowrap">
+                Start with Windows
               </Label>
             </div>
             <Button

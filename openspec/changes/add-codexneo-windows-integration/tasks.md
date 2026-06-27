@@ -274,3 +274,11 @@
 - [x] Preserve user-paused account status while still allowing token/refresh metadata updates during auth sync.
 - [x] Patch the portable backend copy without restarting the portable app.
 - [x] Run focused Accounts repository/API verification, Ruff, OpenSpec validation, and portable backend syntax check.
+
+## 32. Electron Portable Start With Windows
+
+- [x] Add failing backend, frontend, and Electron helper tests for a persisted `Start with Windows` preference.
+- [x] Persist `startWithWindowsEnabled` in CodexNeo settings and expose it through the settings API.
+- [x] Add the CodexNeo `Start with Windows` switch and Electron preload bridge.
+- [x] Register or unregister the packaged portable EXE at Windows login through Electron `app.setLoginItemSettings`.
+- [x] Run focused and broad verification, mirror runtime files into the Electron portable folder without restarting the running app, and update handover plus implementation list.
