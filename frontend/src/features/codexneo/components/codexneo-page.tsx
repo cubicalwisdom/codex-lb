@@ -13,7 +13,16 @@ import {
   Minus,
   Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type MouseEvent,
+  type PointerEvent,
+} from "react";
 
 import { AlertMessage } from "@/components/alert-message";
 import { CodexLogo } from "@/components/brand/codex-logo";
@@ -31,6 +40,8 @@ import type {
   CodexNeoSettingsUpdateRequest,
 } from "@/features/codexneo/schemas";
 import { getErrorMessageOrNull } from "@/utils/errors";
+
+import { applyAccountSelectionRange } from "./account-selection";
 
 const DEFAULT_INTERVAL_MINUTES = 30;
 const DEFAULT_CODEX_HOME_REFRESH_SECONDS = 30;
@@ -100,6 +111,8 @@ export function CodexNeoPage() {
   const [autoSyncFeedback, setAutoSyncFeedback] = useState<string | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const importFolderInputRef = useRef<HTMLInputElement | null>(null);
+  const lastSelectedAccountKeyRef = useRef<string | null>(null);
+  const shiftRangeSelectActiveRef = useRef(false);
   const autoSyncSignatureRef = useRef<string | null>(null);
   const codexApiBaseUrl = codexApiBaseUrlOverride ?? settings?.codexApiBaseUrl ?? "";
   const codexgoApiBaseUrl = codexgoApiBaseUrlOverride ?? settings?.codexgoApiBaseUrl ?? "";
@@ -259,10 +272,39 @@ export function CodexNeoPage() {
   const accountsSyncDiagnostic = health?.items.find((item) => item.key === "accounts_sync");
   const accountsSyncMismatch = accountsSyncDiagnostic?.status === "error";
   const accountsSyncSignature = `${accountsSyncDiagnostic?.message ?? ""}|${accountsSyncDiagnostic?.detail ?? ""}`;
-  const toggleAccount = (accountKey: string, checked: boolean) => {
-    setSelectedAccountKeys((current) =>
-      checked ? Array.from(new Set([...current, accountKey])) : current.filter((key) => key !== accountKey),
-    );
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Shift") shiftRangeSelectActiveRef.current = true;
+    };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Shift") shiftRangeSelectActiveRef.current = false;
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keyup", handleKeyUp);
+      shiftRangeSelectActiveRef.current = false;
+    };
+  }, []);
+  const toggleAccount = (accountKey: string, checked: boolean, rangeSelect = false) => {
+    const anchorKey = lastSelectedAccountKeyRef.current;
+    const shouldRangeSelect = rangeSelect || shiftRangeSelectActiveRef.current;
+    setSelectedAccountKeys((current) => {
+      return applyAccountSelectionRange({
+        current,
+        visible: visibleAccountKeys,
+        accountKey,
+        checked,
+        rangeSelect: shouldRangeSelect,
+        anchorKey,
+      });
+    });
+    lastSelectedAccountKeyRef.current = accountKey;
   };
   const runImportFile = async () => {
     if (fileOperationPath.trim()) {
@@ -783,7 +825,7 @@ export function CodexNeoPage() {
                   account={account}
                   sourceNumber={sourceNumber}
                   selected={selectedAccountKeys.includes(account.accountKey)}
-                  onSelectedChange={(checked) => toggleAccount(account.accountKey, checked)}
+                  onSelectedChange={(checked, rangeSelect) => toggleAccount(account.accountKey, checked, rangeSelect)}
                   disabled={controlsDisabled}
                   onSwitch={(accountKey) => switchAccountMutation.mutateAsync({ accountKey, restart: false })}
                   onSwitchRestart={(accountKey) => switchAccountMutation.mutateAsync({ accountKey, restart: true })}
@@ -953,13 +995,14 @@ function AccountRow({
   account: CodexNeoAccountRow;
   sourceNumber: number;
   selected: boolean;
-  onSelectedChange: (checked: boolean) => void;
+  onSelectedChange: (checked: boolean, rangeSelect: boolean) => void;
   disabled: boolean;
   onSwitch: (accountKey: string) => Promise<unknown>;
   onSwitchRestart: (accountKey: string) => Promise<unknown>;
   onLocationChange: (accountKey: string, location: "codex" | "backup", present: boolean) => Promise<unknown>;
 }) {
   const label = account.email ?? account.selector ?? account.accountKey;
+  const rangeSelectRef = useRef(false);
   return (
     <tr className={account.active ? "bg-primary/10 font-medium" : "border-t border-border/70"}>
       <td className="px-3 py-2">
@@ -967,7 +1010,17 @@ function AccountRow({
           aria-label={`Select ${label}`}
           type="checkbox"
           checked={selected}
-          onChange={(event) => onSelectedChange(event.target.checked)}
+          onMouseDown={(event: MouseEvent<HTMLInputElement>) => {
+            rangeSelectRef.current = event.shiftKey;
+          }}
+          onPointerDown={(event: PointerEvent<HTMLInputElement>) => {
+            rangeSelectRef.current = event.shiftKey;
+          }}
+          onClick={(event: MouseEvent<HTMLInputElement>) => {
+            onSelectedChange(event.currentTarget.checked, event.shiftKey || rangeSelectRef.current);
+            rangeSelectRef.current = false;
+          }}
+          onChange={() => undefined}
         />
       </td>
       <td className="px-3 py-2 text-muted-foreground">{sourceNumber}</td>

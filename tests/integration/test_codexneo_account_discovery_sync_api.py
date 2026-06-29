@@ -64,7 +64,7 @@ async def test_codexneo_accounts_get_is_read_only(app_instance) -> None:
         def __init__(self) -> None:
             self.sync_calls = 0
 
-        def load_accounts(self) -> CodexNeoAccountsResponse:
+        async def load_accounts_with_codex_ib_usage(self) -> CodexNeoAccountsResponse:
             return CodexNeoAccountsResponse(
                 accounts=[],
                 active_account_key=None,

@@ -3,12 +3,16 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from scripts.import_codexneo_windows_usage import (
+    CODEXNEO_WINDOWS_USAGE_MODEL,
     TOTAL_COST_USD,
     TOTAL_TOKENS_LIFETIME,
     TOTAL_TOKENS_TODAY,
     build_import_rows,
     load_api_routing_usage_totals,
+    pricing_model_for_codexneo_windows_usage,
 )
 
 
@@ -20,7 +24,7 @@ def test_build_import_rows_preserves_codexneo_windows_totals() -> None:
     assert prior.request_id == "codexneo-windows-import-prior"
     assert today.input_tokens + today.output_tokens == TOTAL_TOKENS_TODAY
     assert sum(row.input_tokens + row.output_tokens for row in rows) == TOTAL_TOKENS_LIFETIME
-    assert sum(row.cost_usd for row in rows) == TOTAL_COST_USD
+    assert sum(row.cost_usd for row in rows) == pytest.approx(TOTAL_COST_USD)
     assert all(0 <= row.cached_input_tokens <= row.input_tokens for row in rows)
 
 
@@ -69,3 +73,12 @@ def test_load_api_routing_usage_totals_matches_windows_reset_behavior(tmp_path) 
     assert totals.cached_input_tokens_lifetime == 700
     assert totals.total_tokens_lifetime == 3_300
     assert round(totals.total_cost_usd, 6) == 0.02085
+
+
+def test_import_cost_uses_shared_current_gpt_5_5_standard_pricing() -> None:
+    canonical, price = pricing_model_for_codexneo_windows_usage()
+
+    assert canonical == CODEXNEO_WINDOWS_USAGE_MODEL
+    assert price.input_per_1m == 5.0
+    assert price.cached_input_per_1m == 0.5
+    assert price.output_per_1m == 30.0

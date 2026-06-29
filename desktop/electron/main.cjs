@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell } = require("elec
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { claimPortableSingleInstance } = require("./single-instance.cjs");
 const { applyStartWithWindowsSetting } = require("./startup.cjs");
 
 const HOST = process.env.CODEX_IB_HOST || "127.0.0.1";
@@ -247,7 +248,9 @@ async function boot() {
   createWindow(root);
 }
 
-app.whenReady().then(boot);
+if (claimPortableSingleInstance({ app, root: sidecarRoot(), appendLog, showMainWindow })) {
+  app.whenReady().then(boot);
+}
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {

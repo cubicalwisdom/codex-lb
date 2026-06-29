@@ -146,6 +146,10 @@ class CodexNeoAccountRow(DashboardModel):
     api_day_count: int = 0
     availability: str | None = None
     status: str | None = None
+    codex_ib_account_id: str | None = None
+    codex_ib_status: str | None = None
+    codex_ib_status_reason: str | None = None
+    codex_ib_routable: bool | None = None
 
 
 class CodexNeoAccountsResponse(DashboardModel):

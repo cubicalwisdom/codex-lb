@@ -175,7 +175,7 @@ async def clear_activity_log(
 async def get_codex_home_accounts(
     service: CodexHomeAccountService = Depends(get_account_service),
 ) -> CodexNeoAccountsResponse:
-    return service.load_accounts()
+    return await service.load_accounts_with_codex_ib_usage()
 
 
 @router.get("/health", response_model=CodexNeoHealthResponse)

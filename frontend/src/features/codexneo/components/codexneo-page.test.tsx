@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -442,6 +442,22 @@ describe("CodexNeoPage", () => {
     expect(screen.getByLabelText("Select backup@example.com")).not.toBeChecked();
     expect(screen.getByRole("button", { name: "Export selected" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Select all" })).toBeInTheDocument();
+  });
+
+  it("selects a visible account range with shift click", async () => {
+    const user = userEvent.setup();
+    renderCodexNeoPage();
+
+    await user.click(screen.getByLabelText("Select t01.036252.89@gmail.com"));
+    fireEvent.keyDown(document, { key: "Shift" });
+    await user.click(screen.getByLabelText("Select unknown@example.com"));
+    fireEvent.keyUp(document, { key: "Shift" });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select t01.036252.89@gmail.com")).toBeChecked();
+      expect(screen.getByLabelText("Select backup@example.com")).toBeChecked();
+      expect(screen.getByLabelText("Select unknown@example.com")).toBeChecked();
+    });
   });
 
   it("keeps sortable headers compact without visible sort-state labels", async () => {

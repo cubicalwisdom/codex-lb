@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy import delete, or_
 
+from app.core.usage.pricing import ModelPrice, UsageTokens, calculate_cost_from_usage, get_pricing_for_model
 from app.core.utils.time import utcnow
 from app.db.models import RequestKind, RequestLog
 from app.db.session import SessionLocal, sqlite_writer_section
@@ -18,7 +19,8 @@ TOTAL_TOKENS_TODAY = 0
 TOTAL_TOKENS_LIFETIME = 2_811_043_428
 TOTAL_COST_USD = 9_380.18
 OUTPUT_RATIO = 0.04
-MODEL = "gpt-5.5"
+CODEXNEO_WINDOWS_USAGE_MODEL = "gpt-5.5"
+MODEL = CODEXNEO_WINDOWS_USAGE_MODEL
 REQUEST_ID_PREFIX = "codexneo-windows-import-"
 LEGACY_REQUEST_ID_PREFIX = "codexneo-windows-estimate-"
 SOURCE_MARKER = "codexneo-windows-estimate"
@@ -103,12 +105,16 @@ def build_import_rows(totals: CodexNeoWindowsUsageTotals | None = None) -> list[
 
 
 def _cached_input_for_cost(*, input_tokens: int, output_tokens: int, cost_usd: float) -> int:
+    _, price = pricing_model_for_codexneo_windows_usage()
     input_millions = input_tokens / 1_000_000
     output_millions = output_tokens / 1_000_000
-    # CodexNeo Windows reference pricing: gpt-5.5 input $5/M, cached input
-    # $0.50/M, output $30/M. Solve for cached input using only the imported
-    # lifetime token and cost totals.
-    cached_millions = ((input_millions * 5.0) + (output_millions * 30.0) - cost_usd) / 4.5
+    input_rate = price.input_per_1m
+    cached_rate = price.cached_input_per_1m if price.cached_input_per_1m is not None else input_rate
+    output_rate = price.output_per_1m
+    input_cache_savings = input_rate - cached_rate
+    if input_cache_savings <= 0:
+        return 0
+    cached_millions = ((input_millions * input_rate) + (output_millions * output_rate) - cost_usd) / input_cache_savings
     return max(0, min(input_tokens, round(cached_millions * 1_000_000)))
 
 
@@ -116,8 +122,23 @@ def _cost_for_tokens(*, input_tokens: int, output_tokens: int, cached_input_toke
     safe_input = max(input_tokens, 0)
     safe_output = max(output_tokens, 0)
     safe_cached = max(0, min(cached_input_tokens, safe_input))
-    non_cached_input = safe_input - safe_cached
-    return ((non_cached_input * 5.0) + (safe_cached * 0.5) + (safe_output * 30.0)) / 1_000_000
+    _, price = pricing_model_for_codexneo_windows_usage()
+    cost = calculate_cost_from_usage(
+        UsageTokens(
+            input_tokens=float(safe_input),
+            output_tokens=float(safe_output),
+            cached_input_tokens=float(safe_cached),
+        ),
+        price,
+    )
+    return float(cost or 0.0)
+
+
+def pricing_model_for_codexneo_windows_usage() -> tuple[str, ModelPrice]:
+    resolved = get_pricing_for_model(CODEXNEO_WINDOWS_USAGE_MODEL)
+    if resolved is None:
+        raise RuntimeError(f"Missing CodexNeo Windows usage pricing for {CODEXNEO_WINDOWS_USAGE_MODEL}")
+    return resolved
 
 
 def _default_usage_totals() -> CodexNeoWindowsUsageTotals:

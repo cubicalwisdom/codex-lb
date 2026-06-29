@@ -141,6 +141,10 @@ export const CodexNeoAccountRowSchema = z.object({
   apiDayCount: z.number().int(),
   availability: z.string().nullable().optional(),
   status: z.string().nullable().optional(),
+  codexIbAccountId: z.string().nullable().optional(),
+  codexIbStatus: z.string().nullable().optional(),
+  codexIbStatusReason: z.string().nullable().optional(),
+  codexIbRoutable: z.boolean().nullable().optional(),
 });
 
 export const CodexNeoAccountsResponseSchema = z.object({

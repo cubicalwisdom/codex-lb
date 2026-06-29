@@ -25,6 +25,13 @@ The system SHALL persist CodexNeo settings locally under the codex-lb configured
 - **AND** the Electron shell SHALL register or unregister the current packaged `Codex IB.exe` for current-user Windows login startup
 - **AND** disabling the setting SHALL remove that login startup registration without deleting CodexNeo account or usage data
 
+#### Scenario: Electron portable enforces one visible app instance
+
+- **WHEN** a second Electron portable `Codex IB.exe` launcher is started while an existing portable app instance is already running
+- **THEN** the second launcher process SHALL exit without starting another backend process or opening another app window
+- **AND** the already-running app instance SHALL show, restore, and focus its existing window
+- **AND** the event SHALL be logged without exposing account auth material
+
 ### Requirement: Codex API provider config actions
 
 The system SHALL expose CodexNeo actions to test, set, and revert the configured Codex API provider URL for the real Windows Codex home.
@@ -153,6 +160,24 @@ The system SHALL discover Codex Home account state for CodexNeo without exposing
 - **AND** the system SHALL recognize managed auth snapshots stored as either raw `<account_key>.auth.json` filenames or URL-safe base64-encoded account-key filenames
 - **AND** cached usage windows SHALL expose raw used percentage and normalized remaining percentage, deriving remaining percentage as `100 - used_percent` when the registry does not provide it
 - **AND** the response SHALL NOT include access tokens, refresh tokens, id tokens, or raw auth JSON
+
+#### Scenario: Codex IB usage fills missing or older registry windows
+
+- **WHEN** a CodexNeo account row matches exactly one Codex IB account by account id or normalized email
+- **AND** Codex IB has a newer primary or secondary `usage_history` row than the corresponding registry usage snapshot, or the registry window is missing
+- **THEN** the CodexNeo account response SHALL use the latest Codex IB row for that window
+- **AND** a newer registry window SHALL remain authoritative
+- **AND** ambiguous duplicate-email matches SHALL NOT borrow usage from another account
+- **AND** the read-only CodexNeo account refresh SHALL NOT write usage data into the Codex registry or Codex IB database
+
+#### Scenario: Codex IB auth status overrides usage freshness
+
+- **WHEN** a CodexNeo account row matches exactly one Codex IB account by account id or normalized email
+- **AND** the Codex IB account status is not active, including `reauth_required`, `paused`, `deactivated`, `rate_limited`, or `quota_exceeded`
+- **THEN** the CodexNeo account response SHALL preserve any newer Codex IB usage windows for that account
+- **AND** the response SHALL expose the raw Codex IB status, deactivation reason, and routable flag
+- **AND** the `Avail` and `Status / Last` fields SHALL reflect the Codex IB non-routable status instead of reporting `Ready` or `Fresh` solely because usage data exists
+- **AND** an active matched Codex IB account with fresh usage SHALL keep the existing `Ready` and `Fresh / ...` behavior
 
 #### Scenario: Account table sortable columns
 
@@ -424,6 +449,13 @@ The CodexNeo account table SHALL mirror CodexNeo Windows app availability and st
 - **THEN** all currently visible CodexNeo account table rows SHALL become selected
 - **AND** Codex Home and Backup location checkboxes SHALL NOT be changed by selection alone
 
+#### Scenario: CodexNeo account rows can be range-selected
+
+- **WHEN** an admin selects one visible CodexNeo account row and then Shift-clicks another visible account row checkbox
+- **THEN** every visible row between the anchor row and clicked row SHALL be selected or unselected with the clicked row
+- **AND** range selection SHALL use the current sorted visible row order
+- **AND** Codex Home and Backup location checkboxes SHALL NOT be changed by selection alone
+
 #### Scenario: CodexGO refresh interval unit is visible
 
 - **WHEN** the CodexGO refresh interval control is shown
@@ -535,6 +567,7 @@ The system SHALL support a one-time dashboard-only import of rough aggregate usa
 - **THEN** the script SHALL read aggregate per-account counters from that file
 - **AND** today's counters SHALL include only entries whose stored day key matches the current UTC day, matching CodexNeo Windows app reset behavior
 - **AND** lifetime tokens and estimated cost SHALL include the lifetime counters from all accounts
+- **AND** estimated GPT-5.5 cost SHALL use the same shared Codex IB pricing model as dashboard request-log cost calculations, including input, cached-input, and output rates
 - **AND** rerunning the import SHALL replace both current and older synthetic import rows instead of duplicating totals
 
 ### Requirement: Hidden Windows startup launcher

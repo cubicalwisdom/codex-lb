@@ -3,8 +3,12 @@ from __future__ import annotations
 import base64
 import json
 import time
+from datetime import timedelta
 
 from app.core.auth import generate_unique_account_id
+from app.core.utils.time import utcnow
+from app.db.models import Account, AccountStatus, UsageHistory
+from app.db.session import SessionLocal
 from app.modules.codexneo.accounts import CodexHomeAccountService
 
 pytestmark = __import__("pytest").mark.unit
@@ -37,6 +41,21 @@ def _auth_json(*, email: str, account_id: str, plan: str = "pro") -> str:
             },
             "lastRefreshAt": "2026-06-24T00:00:00Z",
         }
+    )
+
+
+def _codex_ib_account(account_id: str, *, email: str) -> Account:
+    return Account(
+        id=account_id,
+        chatgpt_account_id=account_id.split("_", 1)[0],
+        email=email,
+        plan_type="plus",
+        access_token_encrypted=b"access",
+        refresh_token_encrypted=b"refresh",
+        id_token_encrypted=b"id",
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
     )
 
 
@@ -373,3 +392,253 @@ def test_registry_usage_windows_expose_remaining_percent_for_windows_parity(tmp_
     assert state.accounts[0].usage.primary.remaining_percent == 99
     assert state.accounts[0].usage.secondary.used_percent == 91
     assert state.accounts[0].usage.secondary.remaining_percent == 9
+
+
+@__import__("pytest").mark.asyncio
+async def test_codex_ib_usage_fills_missing_registry_windows(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    accounts_dir = codex_home / "accounts"
+    accounts_dir.mkdir(parents=True)
+    account_id = "acc_usage_fallback"
+    email = "usage-fallback@example.com"
+    accounts_dir.joinpath("registry.json").write_text(
+        json.dumps(
+            {
+                "active_account_key": account_id,
+                "accounts": [
+                    {
+                        "account_key": account_id,
+                        "email": email,
+                        "plan": "plus",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    recorded_at = utcnow()
+    async with SessionLocal() as session:
+        session.add(_codex_ib_account(account_id, email=email))
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id=account_id,
+                    window="primary",
+                    used_percent=30,
+                    reset_at=1_800_000_000,
+                    window_minutes=300,
+                    recorded_at=recorded_at,
+                ),
+                UsageHistory(
+                    account_id=account_id,
+                    window="secondary",
+                    used_percent=6,
+                    reset_at=1_800_500_000,
+                    window_minutes=10080,
+                    recorded_at=recorded_at,
+                ),
+            ]
+        )
+        await session.commit()
+
+    state = await CodexHomeAccountService(
+        codex_home=codex_home,
+        data_dir=tmp_path / "data",
+    ).load_accounts_with_codex_ib_usage()
+
+    account = state.accounts[0]
+    assert account.usage.primary.used_percent == 30
+    assert account.usage.primary.remaining_percent == 70
+    assert account.usage.secondary.used_percent == 6
+    assert account.usage.secondary.remaining_percent == 94
+    assert account.status.startswith("Fresh / ")
+    assert account.last_usage_at is not None
+
+
+@__import__("pytest").mark.asyncio
+async def test_codex_ib_auth_status_overrides_fresh_usage_label(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    accounts_dir = codex_home / "accounts"
+    accounts_dir.mkdir(parents=True)
+    account_id = "acc_reauth_usage"
+    email = "reauth-usage@example.com"
+    accounts_dir.joinpath("registry.json").write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {
+                        "account_key": account_id,
+                        "email": email,
+                        "plan": "plus",
+                        "codex": True,
+                        "backup": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    codex_ib_account = _codex_ib_account(account_id, email=email)
+    codex_ib_account.status = AccountStatus.REAUTH_REQUIRED
+    codex_ib_account.deactivation_reason = "Usage API error: HTTP 401 - token invalidated"
+    recorded_at = utcnow()
+    async with SessionLocal() as session:
+        session.add(codex_ib_account)
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id=account_id,
+                    window="primary",
+                    used_percent=100,
+                    window_minutes=300,
+                    recorded_at=recorded_at,
+                ),
+                UsageHistory(
+                    account_id=account_id,
+                    window="secondary",
+                    used_percent=0,
+                    window_minutes=10080,
+                    recorded_at=recorded_at,
+                ),
+            ]
+        )
+        await session.commit()
+
+    state = await CodexHomeAccountService(
+        codex_home=codex_home,
+        data_dir=tmp_path / "data",
+    ).load_accounts_with_codex_ib_usage()
+
+    account = state.accounts[0]
+    assert account.usage.primary is not None
+    assert account.usage.primary.used_percent == 100
+    assert account.usage.secondary is not None
+    assert account.usage.secondary.used_percent == 0
+    assert account.codex_ib_status == AccountStatus.REAUTH_REQUIRED.value
+    assert account.codex_ib_status_reason == "Usage API error: HTTP 401 - token invalidated"
+    assert account.codex_ib_routable is False
+    assert account.availability == "Re-auth required"
+    assert account.status is not None
+    assert account.status.startswith("Re-auth required / ")
+
+
+@__import__("pytest").mark.asyncio
+async def test_codex_ib_usage_preserves_newer_registry_window_and_fills_missing_window(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    accounts_dir = codex_home / "accounts"
+    accounts_dir.mkdir(parents=True)
+    account_id = "acc_usage_merge"
+    email = "usage-merge@example.com"
+    registry_timestamp = int(time.time())
+    accounts_dir.joinpath("registry.json").write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {
+                        "account_key": account_id,
+                        "email": email,
+                        "plan": "plus",
+                        "last_usage_at": registry_timestamp,
+                        "last_usage": {
+                            "status": "ok",
+                            "primary": {
+                                "used_percent": 10,
+                                "window_minutes": 300,
+                            },
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async with SessionLocal() as session:
+        session.add(_codex_ib_account(account_id, email=email))
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id=account_id,
+                    window="primary",
+                    used_percent=90,
+                    window_minutes=300,
+                    recorded_at=utcnow() - timedelta(hours=1),
+                ),
+                UsageHistory(
+                    account_id=account_id,
+                    window="secondary",
+                    used_percent=6,
+                    window_minutes=10080,
+                    recorded_at=utcnow(),
+                ),
+            ]
+        )
+        await session.commit()
+
+    state = await CodexHomeAccountService(
+        codex_home=codex_home,
+        data_dir=tmp_path / "data",
+    ).load_accounts_with_codex_ib_usage()
+
+    account = state.accounts[0]
+    assert account.usage.primary.used_percent == 10
+    assert account.usage.primary.remaining_percent == 90
+    assert account.usage.secondary.used_percent == 6
+    assert account.usage.secondary.remaining_percent == 94
+
+
+@__import__("pytest").mark.asyncio
+async def test_codex_ib_usage_does_not_cross_ambiguous_duplicate_email_accounts(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    accounts_dir = codex_home / "accounts"
+    accounts_dir.mkdir(parents=True)
+    email = "shared-workspace@example.com"
+    accounts_dir.joinpath("registry.json").write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {
+                        "account_key": "registry-only-key",
+                        "email": email,
+                        "plan": "team",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                _codex_ib_account("workspace-account-a", email=email),
+                _codex_ib_account("workspace-account-b", email=email),
+                UsageHistory(
+                    account_id="workspace-account-a",
+                    window="primary",
+                    used_percent=25,
+                    recorded_at=utcnow(),
+                ),
+                UsageHistory(
+                    account_id="workspace-account-b",
+                    window="primary",
+                    used_percent=75,
+                    recorded_at=utcnow(),
+                ),
+            ]
+        )
+        await session.commit()
+
+    state = await CodexHomeAccountService(
+        codex_home=codex_home,
+        data_dir=tmp_path / "data",
+    ).load_accounts_with_codex_ib_usage()
+
+    assert state.accounts[0].usage.primary is None
+    assert state.accounts[0].usage.secondary is None

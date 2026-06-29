@@ -303,3 +303,27 @@
 - [x] Add a failing health regression test for root `auth.json` and Backup containing the same real auth identity.
 - [x] Make the Accounts sync health count use the same identity dedupe as the CodexNeo account table.
 - [x] Verify the focused health suite and mirror the backend fix into the portable runtime.
+
+## 36. Electron Single Instance And Fast Account Selection
+
+- [x] Add failing Electron helper coverage proving a second portable launch exits and focuses the existing app instance.
+- [x] Add focused range-selection coverage for selecting all visible account rows between an anchor and Shift-clicked row.
+- [x] Enforce Electron `requestSingleInstanceLock()` before booting the portable app backend/window.
+- [x] Wire CodexNeo account checkbox range selection through the current sorted visible row order.
+
+## 37. CodexNeo Windows Import Pricing Source
+
+- [x] Verify current GPT-5.5 standard API pricing from the provider before changing estimates.
+- [x] Add failing backend coverage proving the CodexNeo Windows usage import resolves GPT-5.5 rates from shared Codex IB pricing.
+- [x] Replace duplicated import-script cost constants with the shared pricing model used by dashboard request-log cost calculation.
+
+## 38. CodexNeo And Codex IB Usage Reconciliation
+
+- [x] Add failing backend coverage for filling missing Codex registry usage from the latest matching Codex IB usage rows.
+- [x] Add failing backend coverage for preserving newer registry usage and rejecting ambiguous duplicate-email fallback.
+- [x] Add failing backend coverage for carrying Codex IB non-active auth status into CodexNeo without hiding usage windows.
+- [x] Add a read-only CodexNeo account-load path that reconciles registry and Codex IB usage per window.
+- [x] Overlay Codex IB auth status, reason, and routable state on reconciled CodexNeo account rows.
+- [x] Wire the CodexNeo accounts API to the reconciled read-only path.
+- [x] Verify focused backend tests, OpenSpec validation, and the mirrored portable-data mapper response.
+- [x] Restart the portable app/backend when approved and verify the live portable API response loads the mirrored modules.
