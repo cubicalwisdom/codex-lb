@@ -434,7 +434,11 @@ class UsageUpdater:
         if payload is None:
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
-        if _payload_mismatches_account_slot(account, payload):
+        if _payload_mismatches_account_slot(
+            account,
+            payload,
+            allow_plan_reconcile=get_settings().usage_refresh_allow_plan_reconcile,
+        ):
             logger.warning(
                 "Usage refresh payload identity mismatch; skipping account mutation "
                 "account_id=%s stored_workspace_id=%s payload_workspace_id=%s stored_plan_type=%s "
@@ -449,6 +453,8 @@ class UsageUpdater:
                 get_request_id(),
             )
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+
+        _log_plan_reconcile_if_needed(account, payload)
 
         identity_matches_slot = await self._sync_identity_metadata(account, payload)
         if not identity_matches_slot:
@@ -746,16 +752,42 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
     return credits_has, credits_unlimited, _parse_credits_balance(balance_value)
 
 
-def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) -> bool:
+def _payload_mismatches_account_slot(
+    account: Account,
+    payload: UsagePayload,
+    *,
+    allow_plan_reconcile: bool = False,
+) -> bool:
     payload_workspace_id = _clean_optional(payload.workspace_id)
     if account.workspace_id and payload_workspace_id and account.workspace_id != payload_workspace_id:
         return True
+    if account.workspace_id and not payload_workspace_id:
+        return _payload_plan_mismatches_account(account, payload)
     if not payload_workspace_id:
-        payload_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
-        stored_plan_type = coerce_account_plan_type(account.plan_type, "free")
-        if payload.plan_type and stored_plan_type not in {"unknown", ""} and payload_plan_type != stored_plan_type:
+        if _payload_plan_mismatches_account(account, payload):
+            if allow_plan_reconcile and not account.workspace_id:
+                return False
             return True
     return False
+
+
+def _payload_plan_mismatches_account(account: Account, payload: UsagePayload) -> bool:
+    payload_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
+    stored_plan_type = coerce_account_plan_type(account.plan_type, "free")
+    return bool(payload.plan_type and stored_plan_type not in {"unknown", ""} and payload_plan_type != stored_plan_type)
+
+
+def _log_plan_reconcile_if_needed(account: Account, payload: UsagePayload) -> None:
+    if not _payload_plan_mismatches_account(account, payload):
+        return
+    logger.warning(
+        "Usage refresh reconciling account plan from upstream payload "
+        "account_id=%s stored_plan_type=%s payload_plan_type=%s request_id=%s",
+        account.id,
+        account.plan_type,
+        payload.plan_type,
+        get_request_id(),
+    )
 
 
 def _clean_optional(value: str | None) -> str | None:

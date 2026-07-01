@@ -6,8 +6,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from app.core import usage as usage_core
 from app.core.auth import claims_from_auth, parse_auth_json
 from app.core.config.settings import get_settings as get_app_settings
+from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -27,8 +29,10 @@ from app.modules.usage.repository import UsageRepository
 @dataclass(frozen=True)
 class _CodexIbAccountState:
     id: str
+    plan_type: str | None
     status: AccountStatus
     deactivation_reason: str | None
+    reset_at: float | None
 
 
 class CodexHomeAccountService:
@@ -139,6 +143,7 @@ class CodexHomeAccountService:
             usage_repo = UsageRepository(session)
             primary_by_account = await usage_repo.latest_by_account("primary", account_ids=account_ids)
             secondary_by_account = await usage_repo.latest_by_account("secondary", account_ids=account_ids)
+            monthly_by_account = await usage_repo.latest_by_account("monthly", account_ids=account_ids)
 
         accounts: list[CodexNeoAccountRow] = []
         for row in response.accounts:
@@ -149,6 +154,7 @@ class CodexHomeAccountService:
                     account=match,
                     primary=primary_by_account.get(match.id) if match is not None else None,
                     secondary=secondary_by_account.get(match.id) if match is not None else None,
+                    monthly=monthly_by_account.get(match.id) if match is not None else None,
                 )
             )
         return response.model_copy(update={"accounts": accounts})
@@ -210,6 +216,7 @@ def _merge_codex_ib_usage(
     account: _CodexIbAccountState | None,
     primary: UsageHistory | None,
     secondary: UsageHistory | None,
+    monthly: UsageHistory | None,
 ) -> CodexNeoAccountRow:
     registry_last = _parse_timestamp(row.last_usage_at)
     use_primary = _history_should_replace_registry_window(
@@ -229,8 +236,12 @@ def _merge_codex_ib_usage(
     merged_secondary = _usage_window_from_history(secondary) if use_secondary else row.usage.secondary
     selected_history = [
         history
-        for use_history, history in ((use_primary, primary), (use_secondary, secondary))
-        if use_history and history is not None
+        for history in (
+            primary if use_primary else None,
+            secondary if use_secondary else None,
+            monthly if account is not None else None,
+        )
+        if history is not None
     ]
     latest_history_at = max((_history_recorded_at(history) for history in selected_history), default=None)
     latest_usage_at = _latest_timestamp(registry_last, latest_history_at)
@@ -248,10 +259,16 @@ def _merge_codex_ib_usage(
         )
 
     if account is not None:
-        account_status = account.status
+        account_status = _effective_codex_ib_status(
+            account,
+            primary=primary,
+            secondary=secondary,
+            monthly=monthly,
+        )
         update.update(
             {
                 "codex_ib_account_id": account.id,
+                "plan": account.plan_type or row.plan,
                 "codex_ib_status": account_status.value,
                 "codex_ib_status_reason": account.deactivation_reason,
                 "codex_ib_routable": _is_codex_ib_routable(account_status),
@@ -288,8 +305,10 @@ def _codex_ib_status_label(status: AccountStatus) -> str:
 def _codex_ib_account_state(account: Account) -> _CodexIbAccountState:
     return _CodexIbAccountState(
         id=account.id,
+        plan_type=account.plan_type,
         status=_coerce_account_status(account.status),
         deactivation_reason=account.deactivation_reason,
+        reset_at=float(account.reset_at) if account.reset_at is not None else None,
     )
 
 
@@ -300,6 +319,79 @@ def _coerce_account_status(status: AccountStatus | str) -> AccountStatus:
         return AccountStatus(status)
     except ValueError:
         return AccountStatus.DEACTIVATED
+
+
+def _effective_codex_ib_status(
+    account: _CodexIbAccountState,
+    *,
+    primary: UsageHistory | None,
+    secondary: UsageHistory | None,
+    monthly: UsageHistory | None,
+) -> AccountStatus:
+    primary_usage, secondary_usage = _effective_usage_histories(primary, secondary)
+    monthly_usage = (
+        monthly
+        if usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
+        else None
+    )
+    if monthly_usage is not None:
+        primary_usage = None
+        secondary_usage = None
+    if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0:
+        primary_usage = None
+    long_usage = monthly_usage or secondary_usage
+    credits_has, credits_unlimited, credits_balance = _credits_snapshot(
+        monthly_usage,
+        primary_usage,
+        secondary_usage,
+    )
+    status, _, _ = apply_usage_quota(
+        status=account.status,
+        primary_used=float(primary_usage.used_percent) if primary_usage is not None else None,
+        primary_reset=primary_usage.reset_at if primary_usage is not None else None,
+        primary_window_minutes=primary_usage.window_minutes if primary_usage is not None else None,
+        runtime_reset=account.reset_at,
+        secondary_used=float(long_usage.used_percent) if long_usage is not None else None,
+        secondary_reset=long_usage.reset_at if long_usage is not None else None,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
+    )
+    return status
+
+
+def _effective_usage_histories(
+    primary: UsageHistory | None,
+    secondary: UsageHistory | None,
+) -> tuple[UsageHistory | None, UsageHistory | None]:
+    if primary is None:
+        return None, secondary
+    if not usage_core.is_weekly_window_minutes(primary.window_minutes):
+        return primary, secondary
+    if secondary is None:
+        return None, primary
+    primary_recorded = _history_recorded_at(primary)
+    secondary_recorded = _history_recorded_at(secondary)
+    if primary_recorded > secondary_recorded or (
+        primary_recorded == secondary_recorded and float(primary.used_percent) < float(secondary.used_percent)
+    ):
+        return None, primary
+    return None, secondary
+
+
+def _credits_snapshot(
+    *histories: UsageHistory | None,
+) -> tuple[bool | None, bool | None, float | None]:
+    for history in histories:
+        if history is None:
+            continue
+        if (
+            history.credits_has is not None
+            or history.credits_unlimited is not None
+            or history.credits_balance is not None
+        ):
+            return history.credits_has, history.credits_unlimited, history.credits_balance
+    return None, None, None
 
 
 def _history_should_replace_registry_window(

@@ -527,6 +527,101 @@ async def test_codex_ib_auth_status_overrides_fresh_usage_label(tmp_path, db_set
 
 
 @__import__("pytest").mark.asyncio
+async def test_codex_ib_plan_overrides_stale_codexneo_registry_plan(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    accounts_dir = codex_home / "accounts"
+    accounts_dir.mkdir(parents=True)
+    account_id = "acc_reconciled_plan"
+    email = "reconciled-plan@example.com"
+    accounts_dir.joinpath("registry.json").write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {
+                        "account_key": account_id,
+                        "email": email,
+                        "plan": "Pro",
+                        "codex": True,
+                        "backup": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    codex_ib_account = _codex_ib_account(account_id, email=email)
+    codex_ib_account.plan_type = "free"
+    async with SessionLocal() as session:
+        session.add(codex_ib_account)
+        await session.commit()
+
+    state = await CodexHomeAccountService(
+        codex_home=codex_home,
+        data_dir=tmp_path / "data",
+    ).load_accounts_with_codex_ib_usage()
+
+    account = state.accounts[0]
+    assert account.codex_ib_account_id == account_id
+    assert account.plan == "free"
+
+
+@__import__("pytest").mark.asyncio
+async def test_codex_ib_monthly_usage_overrides_ready_label_for_quota_exhaustion(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    accounts_dir = codex_home / "accounts"
+    accounts_dir.mkdir(parents=True)
+    account_id = "acc_free_monthly_exhausted"
+    email = "free-monthly-exhausted@example.com"
+    accounts_dir.joinpath("registry.json").write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {
+                        "account_key": account_id,
+                        "email": email,
+                        "plan": "Pro",
+                        "codex": True,
+                        "backup": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    codex_ib_account = _codex_ib_account(account_id, email=email)
+    codex_ib_account.plan_type = "free"
+    async with SessionLocal() as session:
+        session.add(codex_ib_account)
+        session.add(
+            UsageHistory(
+                account_id=account_id,
+                window="monthly",
+                used_percent=100,
+                window_minutes=43200,
+                recorded_at=utcnow(),
+            )
+        )
+        await session.commit()
+
+    state = await CodexHomeAccountService(
+        codex_home=codex_home,
+        data_dir=tmp_path / "data",
+    ).load_accounts_with_codex_ib_usage()
+
+    account = state.accounts[0]
+    assert account.plan == "free"
+    assert account.codex_ib_status == AccountStatus.QUOTA_EXCEEDED.value
+    assert account.codex_ib_routable is False
+    assert account.availability == "Quota exceeded"
+    assert account.status is not None
+    assert account.status.startswith("Quota exceeded / ")
+
+
+@__import__("pytest").mark.asyncio
 async def test_codex_ib_usage_preserves_newer_registry_window_and_fills_missing_window(tmp_path, db_setup) -> None:
     del db_setup
     codex_home = tmp_path / ".codex"

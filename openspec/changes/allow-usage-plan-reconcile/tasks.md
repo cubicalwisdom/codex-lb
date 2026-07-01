@@ -1,0 +1,7 @@
+- [x] Add an opt-in usage refresh plan-reconcile setting.
+- [x] Allow plan-only mismatch payloads to write usage when the setting is enabled and no workspace identity is involved.
+- [x] Preserve default mismatch rejection and workspace mismatch rejection.
+- [x] Add targeted unit coverage.
+- [x] Show the reconciled Codex IB plan in merged CodexNeo account rows.
+- [x] Show Codex IB effective quota exhaustion in merged CodexNeo account rows.
+- [x] Run targeted tests and OpenSpec validation.

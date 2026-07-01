@@ -1372,6 +1372,103 @@ async def test_usage_refresh_skips_unknown_workspace_plan_mismatch(monkeypatch) 
 
 
 @pytest.mark.asyncio
+async def test_usage_refresh_reconciles_legacy_plan_mismatch_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ALLOW_PLAN_RECONCILE", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "plan_type": "free",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 7.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 5 * 60 * 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": 11.0,
+                        "reset_at": 1736630400,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_legacy_plan_reconcile", "upstream_user", email="same@example.com")
+    account.plan_type = "pro"
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = 1736190000
+    accounts_repo.accounts_by_id[account.id] = account
+
+    result = await updater.refresh_accounts([account], latest_usage={})
+
+    assert result is True
+    assert account.plan_type == "free"
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+    assert len(accounts_repo.token_updates) == 1
+    assert accounts_repo.token_updates[0]["plan_type"] == "free"
+    assert len(usage_repo.entries) == 2
+    by_window = {entry.window: entry for entry in usage_repo.entries}
+    assert by_window["primary"].used_percent == 7.0
+    assert by_window["secondary"].used_percent == 11.0
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_keeps_workspace_plan_mismatch_blocked_when_reconcile_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ALLOW_PLAN_RECONCILE", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "plan_type": "free",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 7.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 5 * 60 * 60,
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_workspace_reconcile_blocked", "upstream_user", email="same@example.com")
+    account.workspace_id = "ws_team"
+    account.plan_type = "business"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    result = await updater.refresh_accounts([account], latest_usage={})
+
+    assert result is False
+    assert usage_repo.entries == []
+    assert accounts_repo.status_updates == []
+    assert accounts_repo.token_updates == []
+    assert account.workspace_id == "ws_team"
+    assert account.plan_type == "business"
+
+
+@pytest.mark.asyncio
 async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspace_and_plan_conflicts(
     monkeypatch,
 ) -> None:
