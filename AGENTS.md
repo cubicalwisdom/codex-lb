@@ -56,6 +56,7 @@ This repo uses **OpenSpec as the primary workflow and SSOT** for change-driven d
 
 - **Do not add/update feature or behavior documentation under `docs/`**. Use OpenSpec context docs under `openspec/specs/<capability>/context.md` (or change-level context under `openspec/changes/<change>/context.md`) as the SSOT.
 - **Do not edit `CHANGELOG.md` directly.** Leave changelog updates to the release process; record change notes in OpenSpec artifacts instead.
+- After every verified behavior change in the CodexNeo portable branch, update the root handover and the relevant agent-facing tracking notes such as `CODEXNEO_IMPLEMENTATION_LIST.md`. If a code commit was already made before those notes were updated, make a separate docs-only commit before reporting the work clean.
 
 ### Documentation Model (Spec + Context)
 
