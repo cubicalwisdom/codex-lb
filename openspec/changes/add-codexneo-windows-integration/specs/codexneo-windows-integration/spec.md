@@ -100,11 +100,13 @@ The system SHALL support a local timed CodexGO refresh loop.
 - **WHEN** auto-refresh is enabled and a buyer token is saved
 - **THEN** the system SHALL refresh CodexGO auth at the configured interval
 - **AND** the interval SHALL be constrained to a safe minute range
+- **AND** the Management activity-log stream SHALL record safe started and completion summaries when enabled
 
 #### Scenario: Auto-refresh is not configured
 
 - **WHEN** auto-refresh is disabled or no buyer token is saved
 - **THEN** the scheduler SHALL skip refresh work without logging secrets
+- **AND** the Management activity-log stream SHALL record a safe skip reason when enabled
 
 ### Requirement: CodexNeo activity log
 

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
+from app.modules.codexneo.activity_log import CodexNeoActivityLogService
 from app.modules.codexneo.service import CodexGoAction, CodexNeoService
 
 logger = logging.getLogger(__name__)
@@ -21,9 +23,11 @@ class CodexGoRefreshScheduler:
         self,
         service: _CodexNeoRefreshService | None = None,
         *,
+        activity_log_service: CodexNeoActivityLogService | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._service = service or CodexNeoService()
+        self._activity_log_service = activity_log_service or CodexNeoActivityLogService()
         self._sleep = sleep
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -48,10 +52,29 @@ class CodexGoRefreshScheduler:
 
     async def refresh_once(self) -> bool:
         settings = await self._service.get_settings()
-        if not settings.codexgo_auto_refresh_enabled or not settings.buyer_token_saved:
+        if not settings.codexgo_auto_refresh_enabled:
+            self._append_management_log("Management task CodexGO auto-refresh -> skipped; reason=disabled.")
             return False
-        await self._service.apply_codexgo_auth(CodexGoAction.REFRESH)
+        if not settings.buyer_token_saved:
+            self._append_management_log("Management task CodexGO auto-refresh -> skipped; reason=buyer_token_missing.")
+            return False
+        started = time.perf_counter()
+        self._append_management_log("Management task CodexGO auto-refresh -> started.")
+        try:
+            await self._service.apply_codexgo_auth(CodexGoAction.REFRESH)
+        except Exception as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            self._append_management_log(
+                "Management task CodexGO auto-refresh -> failed; "
+                f"error={type(exc).__name__}; {elapsed_ms}ms."
+            )
+            raise
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        self._append_management_log(f"Management task CodexGO auto-refresh -> applied; {elapsed_ms}ms.")
         return True
+
+    def _append_management_log(self, message: str) -> None:
+        self._activity_log_service.append("management", message)
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
