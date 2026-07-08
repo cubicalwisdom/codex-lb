@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # accept it as of 2026-04. See https://github.com/Soju06/codex-lb/issues/493
 _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS: frozenset[str] = frozenset({"minimal"})
 _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
+_REASONING_EFFORT_WIRE_ALIASES: dict[str, str] = {"ultra": "max"}
 
 # Cursor exposes GPT-5 family model labels with UI suffixes such as "Extra
 # High Fast". The ChatGPT/Codex upstream accepts the canonical GPT-5-family
@@ -37,6 +38,9 @@ _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
 # Keep this deliberately narrow: only strip known Cursor-style suffix tokens
 # from known GPT-5 base model slugs, and leave every other model untouched.
 _GPT5_ALIAS_BASE_MODELS: tuple[str, ...] = (
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
     "gpt-5.4-mini",
     "gpt-5.3-codex",
     "gpt-5.2-codex",
@@ -56,10 +60,12 @@ _MODEL_ALIAS_REASONING_TOKENS: dict[str, str] = {
     "low": "low",
     "medium": "medium",
     "high": "high",
+    "max": "max",
+    "ultra": "max",
     "xhigh": "high",
     "extra": "high",
 }
-_MODEL_ALIAS_REASONING_RANK: dict[str, int] = {"minimal": 0, "low": 1, "medium": 2, "high": 3}
+_MODEL_ALIAS_REASONING_RANK: dict[str, int] = {"minimal": 0, "low": 1, "medium": 2, "high": 3, "max": 4}
 _MODEL_ALIAS_SERVICE_TIER_TOKENS: dict[str, str] = {
     "fast": "priority",
     "priority": "priority",
@@ -274,6 +280,18 @@ def normalize_unsupported_reasoning_effort(
 
     requested_effort = payload.reasoning.effort
     normalized_effort = requested_effort.strip().lower()
+    wire_alias = _REASONING_EFFORT_WIRE_ALIASES.get(normalized_effort)
+    if wire_alias is not None:
+        payload.reasoning.effort = wire_alias
+        logger.info(
+            "reasoning_effort_normalized request_id=%s model=%s requested_effort=%s normalized_effort=%s",
+            get_request_id(),
+            payload.model,
+            requested_effort,
+            wire_alias,
+        )
+        return
+
     if normalized_effort not in _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS:
         return
 

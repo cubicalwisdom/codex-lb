@@ -44,6 +44,16 @@ When `database_url` resolves to a PostgreSQL backend, the application MUST confi
 - **THEN** neither `pool_pre_ping` nor `pool_recycle` is configured on the engine
 - **AND** existing SQLite-specific tuning (PRAGMAs, `busy_timeout`) is unchanged
 
+### Requirement: File-backed SQLite engines do not retain idle pooled connections
+
+When `database_url` resolves to a file-backed SQLite backend, the application MUST configure async engines with `NullPool` and SQLite busy-timeout connect arguments instead of queue-pool size, overflow, or timeout controls. In-memory SQLite MAY keep its existing engine semantics so tests and ephemeral databases continue to share one in-memory schema where required.
+
+#### Scenario: File-backed SQLite uses NullPool
+
+- **WHEN** `database_url` resolves to a file-backed SQLite database
+- **THEN** the request-path and background async engines use `NullPool`
+- **AND** they do not configure `pool_size`, `max_overflow`, or `pool_timeout`
+
 ### Requirement: Database pool controls cover request-adjacent background sessions
 The service SHALL expose database pool settings for both the main request pool
 and the background/request-adjacent session pool. The background pool SHALL

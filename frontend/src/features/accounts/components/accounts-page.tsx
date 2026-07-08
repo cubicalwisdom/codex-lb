@@ -143,18 +143,26 @@ export function AccountsPage() {
       {!accountsQuery.data ? (
         <AccountsSkeleton />
       ) : (
-        <div className="grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
-          <div className="rounded-xl border bg-card p-4">
-            <AccountList
-              accounts={accounts}
-              selectedAccountId={resolvedSelectedAccountId}
-              onSelect={handleSelectAccount}
-              sortMode={accountSortMode}
-              onSortModeChange={setAccountSortMode}
-              onOpenImport={() => importDialog.show()}
-              onOpenOauth={() => oauthDialog.show()}
-              readOnly={!canWrite}
-            />
+        <div
+          className="grid min-w-0 gap-4 lg:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]"
+          data-testid="accounts-grid"
+        >
+          <div
+            data-testid="accounts-list-panel"
+            className="min-w-0 min-h-0 h-full"
+          >
+            <div className="flex h-full min-h-0 min-w-0 flex-col rounded-xl border bg-card p-3 sm:p-4">
+              <AccountList
+                accounts={accounts}
+                selectedAccountId={resolvedSelectedAccountId}
+                onSelect={handleSelectAccount}
+                sortMode={accountSortMode}
+                onSortModeChange={setAccountSortMode}
+                onOpenImport={() => importDialog.show()}
+                onOpenOauth={() => oauthDialog.show()}
+                readOnly={!canWrite}
+              />
+            </div>
           </div>
 
           <AccountDetail

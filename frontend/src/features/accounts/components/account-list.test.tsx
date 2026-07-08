@@ -459,6 +459,36 @@ describe("AccountList", () => {
     expect(scrollRegion).not.toContainElement(addAccountButton);
   });
 
+  it("keeps account rows inside a bounded scroll region", () => {
+    render(
+      <AccountList
+        accounts={Array.from({ length: 20 }, (_, index) => ({
+          accountId: `acc-${index}`,
+          email: `account-${index}@example.com`,
+          displayName: `Account ${index}`,
+          planType: "plus",
+          status: "active",
+          limitWarmupEnabled: false,
+          additionalQuotas: [],
+        }))}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getByTestId("account-list-scroll-region")).toHaveClass(
+      "flex-1",
+      "min-h-0",
+      "overflow-y-auto",
+      "max-h-[min(32rem,calc(100dvh-16rem))]",
+    );
+    expect(screen.getByTestId("account-list-scroll-region")).not.toHaveClass(
+      "lg:max-h-none",
+    );
+  });
+
   it("filters re-auth required accounts by status", async () => {
     const user = userEvent.setup();
 

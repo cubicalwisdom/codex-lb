@@ -10,9 +10,10 @@ serve a conservative static catalog of known Codex model slugs from both
 `GET /v1/models` and `GET /backend-api/codex/models`. This static catalog is a
 bundled fallback for startup/offline paths; refreshed upstream model-registry
 data remains the authoritative source once available. The bootstrap catalog MUST
-include `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`,
-`gpt-5.3-codex-spark`, `gpt-5.2`, and `codex-auto-review`, and MUST NOT invent
-unverified variant slugs such as `gpt-5.5-pro`.
+include `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
+`gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`,
+`gpt-5.2`, and `codex-auto-review`, and MUST NOT invent unverified variant
+slugs such as `gpt-5.5-pro`.
 
 #### Scenario: OpenAI-compatible models endpoint serves bootstrap slugs
 
@@ -26,6 +27,13 @@ unverified variant slugs such as `gpt-5.5-pro`.
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **WHEN** a client calls `GET /backend-api/codex/models`
 - **THEN** entries such as `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `codex-auto-review` include representative upstream metadata including client version, context-window, visibility, modality, plan-availability, and reasoning/verbosity fields where known
+
+#### Scenario: GPT-5.6 bootstrap entries expose current metadata
+
+- **GIVEN** the model registry has no refreshed upstream snapshot
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` are present with websocket-preferred metadata
+- **AND** each entry exposes the known 272000-token backend context window and reasoning levels including `max`
 
 ### Requirement: Refreshed upstream model data remains authoritative
 

@@ -707,6 +707,8 @@ _UNSUPPORTED_UPSTREAM_FIELDS = {
     "user",
 }
 
+_REASONING_EFFORT_WIRE_ALIASES = {"ultra": "max"}
+
 
 def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _normalize_openai_compatible_aliases(payload)
@@ -783,7 +785,7 @@ def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
         reasoning_map = {}
 
     if isinstance(reasoning_effort, str) and "effort" not in reasoning_map:
-        reasoning_map["effort"] = reasoning_effort
+        reasoning_map["effort"] = _normalize_reasoning_effort_alias(reasoning_effort)
     if isinstance(reasoning_summary, str) and "summary" not in reasoning_map:
         reasoning_map["summary"] = reasoning_summary
 
@@ -810,8 +812,11 @@ def _normalize_thinking_alias(
         return {"effort": "medium"} if thinking else None
     if isinstance(thinking, str):
         normalized = thinking.strip().lower()
-        if normalized in {"low", "medium", "high", "xhigh"}:
+        if normalized in {"low", "medium", "high", "xhigh", "max"}:
             return {"effort": normalized}
+        alias = _REASONING_EFFORT_WIRE_ALIASES.get(normalized)
+        if alias is not None:
+            return {"effort": alias}
         if normalized in {"enabled", "true", "on"}:
             return {"effort": "medium"}
         if normalized in {"disabled", "false", "off"}:
@@ -822,7 +827,7 @@ def _normalize_thinking_alias(
         effort = thinking_mapping.get("effort")
         summary = thinking_mapping.get("summary")
         if isinstance(effort, str) and effort.strip():
-            normalized["effort"] = effort.strip().lower()
+            normalized["effort"] = _normalize_reasoning_effort_alias(effort)
         if isinstance(summary, str) and summary.strip():
             normalized["summary"] = summary.strip()
         if normalized:
@@ -841,6 +846,11 @@ def _normalize_thinking_alias(
     if isinstance(enable_thinking, bool):
         return {"effort": "medium"} if enable_thinking else None
     return None
+
+
+def _normalize_reasoning_effort_alias(effort: str) -> str:
+    normalized = effort.strip().lower()
+    return _REASONING_EFFORT_WIRE_ALIASES.get(normalized, normalized)
 
 
 def _normalize_openai_compatible_aliases(payload: MutableJsonObject) -> None:

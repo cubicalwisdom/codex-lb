@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* **models:** add GPT-5.6 Sol, Terra, and Luna bootstrap metadata, alias normalization, and pricing support.
+
+### Bug Fixes
+
+* **api-keys:** backfill `/v1/usage` limits from aggregate upstream credit windows when a key has no local limits.
+* **database:** use `NullPool` for file-backed SQLite async engines to avoid retaining idle portable-app database handles.
+* **proxy:** keep local account-cap and local rate-limit selection failures out of upstream capacity retry paths.
+* **accounts:** keep long account lists inside a bounded scroll region while preserving add/help actions.
+
 ## [1.20.1](https://github.com/Soju06/codex-lb/compare/v1.20.0...v1.20.1) (2026-06-18)
 
 

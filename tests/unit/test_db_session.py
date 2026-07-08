@@ -244,6 +244,27 @@ def test_postgres_engine_kwargs_use_nullpool_under_test_db_url(monkeypatch) -> N
     assert "pool_recycle" not in kwargs
 
 
+def test_sqlite_file_engine_kwargs_use_nullpool_without_pool_controls(monkeypatch) -> None:
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="sqlite+aiosqlite:///store.db",
+            database_pool_size=15,
+            database_max_overflow=10,
+            database_pool_timeout_seconds=30.0,
+        ),
+    )
+
+    kwargs = session_module._sqlite_file_async_engine_kwargs()
+
+    assert kwargs["poolclass"] is NullPool
+    assert kwargs["connect_args"] == {"timeout": 30.0}
+    assert "pool_size" not in kwargs
+    assert "max_overflow" not in kwargs
+    assert "pool_timeout" not in kwargs
+
+
 @pytest.mark.asyncio
 async def test_init_db_fails_when_migration_module_is_missing_even_with_fail_fast_disabled(monkeypatch) -> None:
     def _raise_missing_migration() -> tuple[object, object]:

@@ -549,6 +549,16 @@ The system MUST recognize `gpt-5.4-mini` pricing when computing request costs. S
 - **THEN** the system resolves the snapshot alias to `gpt-5.4-mini`
 - **AND** the system applies the same standard rates
 
+### Requirement: gpt-5.6 pricing is recognized
+
+The system MUST recognize `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` pricing when computing request costs. Reasoning and service-tier aliases for the same family MUST resolve to the canonical model price table entry.
+
+#### Scenario: GPT-5.6 alias request uses canonical pricing
+
+- **WHEN** a request for `gpt-5.6-sol-xhigh-fast`, `gpt-5.6-terra-ultra-fast`, or `gpt-5.6-luna-fast` completes
+- **THEN** the system resolves the alias to the matching canonical GPT-5.6 model
+- **AND** the system applies the configured canonical rates
+
 ### Requirement: API keys can read their own `/v1/usage`
 
 The system SHALL expose `GET /v1/usage` for self-service usage lookup by API-key clients. The route MUST require a valid API key in the `Authorization` header using the Bearer authentication scheme even when `api_key_auth_enabled` is false globally. The response MUST include only data for the authenticated key and MUST return:
@@ -588,6 +598,13 @@ Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` 
 - **AND** upstream Codex aggregate usage data exists
 - **THEN** `limits[]` contains the API-key limit values
 - **AND** `upstream_limits[]` contains the aggregate Codex credit windows
+
+#### Scenario: Upstream limits backfill empty API-key limits
+
+- **WHEN** an API key with no configured limits calls `GET /v1/usage`
+- **AND** upstream Codex aggregate usage data exists
+- **THEN** `limits[]` contains the aggregate Codex credit windows
+- **AND** `upstream_limits[]` contains the same aggregate Codex credit windows
 
 #### Scenario: Self-usage works while global proxy auth is disabled
 

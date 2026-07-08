@@ -37,6 +37,10 @@ _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
 _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
+_LOCAL_ACCOUNT_SELECTION_RATE_LIMIT_RE = re.compile(
+    r"^rate limit exceeded\.\s*try again in\s+[0-9]+(?:\.[0-9]+)?s\.?$",
+    re.IGNORECASE,
+)
 
 
 def _account_selection_recovery_sleep_seconds_from_message(message: str | None) -> float | None:
@@ -52,6 +56,9 @@ def _account_selection_recovery_sleep_seconds_from_message(message: str | None) 
         or "no accounts with available additional quota" in lowered
         or "no fresh additional quota data" in lowered
     ):
+        return None
+
+    if _LOCAL_ACCOUNT_SELECTION_RATE_LIMIT_RE.match(message):
         return None
 
     retry_hint = _ACCOUNT_SELECTION_RETRY_HINT_RE.search(message)

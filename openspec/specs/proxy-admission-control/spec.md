@@ -79,6 +79,12 @@ Local Responses overload failures MUST expose stable low-cardinality reason fiel
 - **WHEN** every eligible account is unavailable because of account-local caps
 - **THEN** the HTTP response is a local overload response with `Retry-After`
 - **AND** logs and metrics identify `account_response_create_cap` or `account_stream_cap`
+- **AND** the selection error message identifies the exhausted account-local cap instead of reporting generic upstream account unavailability
+
+#### Scenario: Local rate-limit selection errors are not retried as upstream recovery
+
+- **WHEN** account selection fails with the local message `Rate limit exceeded. Try again in Ns`
+- **THEN** the proxy does not enter the upstream account-capacity recovery sleep loop for that local selection error
 
 ### Requirement: HTTP bridge startup admission waits are bounded
 

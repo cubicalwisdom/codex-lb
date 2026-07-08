@@ -62,6 +62,13 @@ def _postgres_async_engine_kwargs(url: str, *, background: bool) -> dict[str, ob
     return kwargs
 
 
+def _sqlite_file_async_engine_kwargs() -> dict[str, object]:
+    return {
+        "poolclass": NullPool,
+        "connect_args": {"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
+    }
+
+
 def _database_pool_size(*, background: bool) -> int:
     if background:
         return _settings.database_background_pool_size or _settings.database_pool_size
@@ -102,10 +109,7 @@ if _is_sqlite_url(_settings.database_url):
         engine = create_async_engine(
             _settings.database_url,
             echo=False,
-            pool_size=_settings.database_pool_size,
-            max_overflow=_settings.database_max_overflow,
-            pool_timeout=_settings.database_pool_timeout_seconds,
-            connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
+            **_sqlite_file_async_engine_kwargs(),
         )
     _configure_sqlite_engine(engine.sync_engine, enable_wal=not is_sqlite_memory)
 else:
@@ -213,10 +217,7 @@ def init_background_db(url: str | None = None) -> None:
         _background_engine = create_async_engine(
             db_url,
             echo=False,
-            pool_size=_database_pool_size(background=True),
-            max_overflow=_database_max_overflow(background=True),
-            pool_timeout=_settings.database_pool_timeout_seconds,
-            connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
+            **_sqlite_file_async_engine_kwargs(),
         )
         _configure_sqlite_engine(_background_engine.sync_engine, enable_wal=not is_sqlite_memory)
     else:

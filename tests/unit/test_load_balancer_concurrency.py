@@ -311,6 +311,10 @@ async def test_account_stream_cap_returns_stable_local_reason_until_released() -
 
     assert capped.account is None
     assert capped.error_code == "account_stream_cap"
+    assert capped.error_message == (
+        "Account stream capacity is exhausted. Increase CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT "
+        "or wait for an active stream to finish."
+    )
 
     await balancer.release_account_lease(leases[0])
     recovered = await balancer.select_account(
@@ -422,6 +426,10 @@ async def test_bound_codex_session_sticky_fails_closed_when_pinned_account_is_sa
 
     assert selected.account is None
     assert selected.error_code == "account_stream_cap"
+    assert selected.error_message == (
+        "Account stream capacity is exhausted. Increase CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT "
+        "or wait for an active stream to finish."
+    )
     assert sticky_repo.account_id == account_a.id
 
     for lease in saturated_leases:

@@ -252,6 +252,34 @@ def test_provider_thinking_aliases_are_normalized():
     assert "enable_thinking" not in dumped
 
 
+def test_provider_thinking_max_alias_is_normalized():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "hi",
+        "input": [],
+        "thinking": "max",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    dumped = request.to_payload()
+    assert dumped["reasoning"] == {"effort": "max"}
+    assert "thinking" not in dumped
+
+
+def test_provider_thinking_ultra_alias_maps_to_wire_max():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "hi",
+        "input": [],
+        "thinking": "ultra",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    dumped = request.to_payload()
+    assert dumped["reasoning"] == {"effort": "max"}
+    assert "thinking" not in dumped
+
+
 def test_explicit_reasoning_wins_over_provider_thinking_aliases():
     payload = {
         "model": "gpt-5.1",

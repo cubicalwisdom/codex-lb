@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
@@ -127,5 +128,78 @@ describe("AccountsPage", () => {
     expect(
       screen.getByRole("heading", { name: "Visible First" }),
     ).toBeInTheDocument();
+  });
+
+  it("keeps the account list panel constrained in the desktop grid", () => {
+    mockedUseAccounts.mockReturnValue({
+      accountsQuery: {
+        data: [
+          account({
+            accountId: "acc-long",
+            email: "very.long.account.identifier@example.com",
+            displayName: "very.long.account.identifier@example.com",
+          }),
+        ],
+        error: null,
+        refetch: vi.fn(),
+      },
+      importMutation: idleMutation(),
+      pauseMutation: idleMutation(),
+      resumeMutation: idleMutation(),
+      probeMutation: idleMutation(),
+      deleteMutation: idleMutation(),
+      exportAuthMutation: idleMutation(),
+      setAliasMutation: idleMutation(),
+      limitWarmupMutation: idleMutation(),
+      routingPolicyMutation: idleMutation(),
+      updateMutation: idleMutation(),
+    } as unknown as ReturnType<typeof useAccounts>);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId("accounts-grid")).toHaveClass(
+      "min-w-0",
+      "lg:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]",
+    );
+    expect(screen.getByTestId("accounts-list-panel")).toHaveClass(
+      "min-w-0",
+      "min-h-0",
+      "h-full",
+    );
+  });
+
+  it("keeps helper instructions accessible when no accounts exist", async () => {
+    const user = userEvent.setup();
+
+    mockedUseAccounts.mockReturnValue({
+      accountsQuery: {
+        data: [],
+        error: null,
+        refetch: vi.fn(),
+      },
+      importMutation: idleMutation(),
+      pauseMutation: idleMutation(),
+      resumeMutation: idleMutation(),
+      probeMutation: idleMutation(),
+      deleteMutation: idleMutation(),
+      exportAuthMutation: idleMutation(),
+      setAliasMutation: idleMutation(),
+      limitWarmupMutation: idleMutation(),
+      routingPolicyMutation: idleMutation(),
+      updateMutation: idleMutation(),
+    } as unknown as ReturnType<typeof useAccounts>);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Need help?" }));
+    expect(screen.getByText("Windows OAuth Help")).toBeInTheDocument();
   });
 });

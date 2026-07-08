@@ -424,7 +424,7 @@ class LoadBalancer:
                     )
                     selection_states = _filter_states_for_account_caps(states, lease_kind=lease_kind)
                     if not selection_states and states:
-                        result = SelectionResult(None, "No available accounts")
+                        result = SelectionResult(None, _account_cap_error_message(lease_kind))
                         error_message = result.error_message
                         selection_error_code = _account_cap_error_code(lease_kind)
                         logger.warning(
@@ -616,8 +616,8 @@ class LoadBalancer:
                     states if hard_sticky else _filter_states_for_account_caps(states, lease_kind=lease_kind)
                 )
                 if not selection_states and states:
-                    result = SelectionResult(None, "No available accounts")
                     selection_error_code = _account_cap_error_code(lease_kind)
+                    result = SelectionResult(None, _account_cap_error_message(lease_kind))
                     logger.warning(
                         "Account cap exhausted during sticky selection lease_kind=%s reason=%s candidates=%s",
                         lease_kind,
@@ -680,8 +680,8 @@ class LoadBalancer:
                             if lease_kind is not None:
                                 if not self._account_lease_allowed_locked(selected.id, kind=lease_kind):
                                     selected_snapshot = None
-                                    error_message = "No available accounts"
                                     selection_error_code = _account_cap_error_code(lease_kind)
+                                    error_message = _account_cap_error_message(lease_kind)
                                 else:
                                     selected_lease = self._acquire_account_lease_locked(
                                         selected.id,
@@ -1725,6 +1725,20 @@ def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
     if lease_kind == "stream":
         return "account_stream_cap"
     return None
+
+
+def _account_cap_error_message(lease_kind: AccountLeaseKind | None) -> str:
+    if lease_kind == "response_create":
+        return (
+            "Account response-create capacity is exhausted. Increase "
+            "CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT or wait for an active response creation to finish."
+        )
+    if lease_kind == "stream":
+        return (
+            "Account stream capacity is exhausted. Increase CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT "
+            "or wait for an active stream to finish."
+        )
+    return "No available accounts"
 
 
 def _record_account_lease_acquired(kind: AccountLeaseKind) -> None:
