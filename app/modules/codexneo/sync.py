@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from app.core.auth import claims_from_auth, parse_auth_json
 from app.core.config.settings import get_settings as get_app_settings
+from app.core.plan_types import normalize_account_plan_type
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -210,6 +211,116 @@ class CodexNeoAccountsSyncService:
         _write_json_atomic(self._master_registry_path(), payload)
         return len(payload["accounts"])
 
+    async def auto_delete_free_reauth_plan_drift_accounts(self) -> CodexNeoSyncResult:
+        previous_paid_claims: list[tuple[str, Any]] = []
+        for candidate in _discover_auth_snapshots(self._codex_home, self._data_dir):
+            if not candidate.account_key:
+                continue
+            try:
+                claims = claims_from_auth(parse_auth_json(candidate.path.read_bytes()))
+            except Exception:
+                continue
+            if normalize_account_plan_type(claims.plan_type) in {"pro", "plus"}:
+                previous_paid_claims.append((candidate.account_key, claims))
+        if not previous_paid_claims:
+            return CodexNeoSyncResult(success=True, message="Auto delete found 0 eligible account(s)", count=0)
+
+        keys_to_delete: list[str] = []
+        account_ids_to_delete: set[str] = set()
+        async with get_background_session() as session:
+            repo = AccountsRepository(session)
+            accounts = await repo.list_accounts(refresh_existing=True, include_generated_copies=True)
+            for account in accounts:
+                if account.status in {AccountStatus.RATE_LIMITED, AccountStatus.PAUSED}:
+                    continue
+                if (
+                    normalize_account_plan_type(account.plan_type) != "free"
+                    and account.status != AccountStatus.REAUTH_REQUIRED
+                ):
+                    continue
+                matched_keys = [
+                    key
+                    for key, claims in previous_paid_claims
+                    if _claims_match_account(claims, account)
+                ]
+                if not matched_keys:
+                    continue
+                account_ids_to_delete.add(account.id)
+                for key in matched_keys:
+                    _add_unique(keys_to_delete, key)
+        if not account_ids_to_delete or not keys_to_delete:
+            return CodexNeoSyncResult(success=True, message="Auto delete found 0 eligible account(s)", count=0)
+
+        location_result = self._delete_with_local_registry_fallback(keys_to_delete)
+        if not location_result.success:
+            return location_result
+
+        deleted = 0
+        async with get_background_session() as session:
+            repo = AccountsRepository(session)
+            for account_id in sorted(account_ids_to_delete):
+                if await repo.delete(account_id, delete_history=False):
+                    deleted += 1
+        return CodexNeoSyncResult(
+            success=True,
+            message=(
+                f"Auto-deleted {deleted} free/auth-required account(s); "
+                f"removed {len(keys_to_delete)} CodexNeo source(s)"
+            ),
+            count=deleted,
+        )
+
+    async def auto_delete_quota_exceeded_weekly_exhausted_accounts(self) -> CodexNeoSyncResult:
+        keys_to_delete: list[str] = []
+        account_ids_to_delete: set[str] = set()
+        async with get_background_session() as session:
+            accounts_repo = AccountsRepository(session)
+            usage_repo = UsageRepository(session)
+            accounts = await accounts_repo.list_accounts(refresh_existing=True, include_generated_copies=True)
+            secondary_usage = await usage_repo.latest_by_account(
+                "secondary",
+                account_ids=[account.id for account in accounts],
+            )
+            for account in accounts:
+                if account.status != AccountStatus.QUOTA_EXCEEDED:
+                    continue
+                usage = secondary_usage.get(account.id)
+                if usage is None or usage.used_percent < 98:
+                    continue
+                if _matching_backup_keys_for_account(self._data_dir, account):
+                    continue
+                matched_keys = _matching_codex_keys_for_account(self._codex_home, account)
+                if not matched_keys:
+                    continue
+                account_ids_to_delete.add(account.id)
+                for key in matched_keys:
+                    _add_unique(keys_to_delete, key)
+        if not account_ids_to_delete or not keys_to_delete:
+            return CodexNeoSyncResult(
+                success=True,
+                message="Auto delete found 0 eligible quota-exceeded account(s)",
+                count=0,
+            )
+
+        location_result = self._delete_with_local_registry_fallback(keys_to_delete)
+        if not location_result.success:
+            return location_result
+
+        deleted = 0
+        async with get_background_session() as session:
+            repo = AccountsRepository(session)
+            for account_id in sorted(account_ids_to_delete):
+                if await repo.delete(account_id, delete_history=False):
+                    deleted += 1
+        return CodexNeoSyncResult(
+            success=True,
+            message=(
+                f"Auto-deleted {deleted} quota-exceeded account(s); "
+                f"removed {len(keys_to_delete)} CodexNeo source(s)"
+            ),
+            count=deleted,
+        )
+
     async def register_auth_json_to_codex_home(self, raw: bytes) -> CodexNeoSyncResult:
         try:
             parse_auth_json(raw)
@@ -409,6 +520,22 @@ def _matching_codexneo_keys_for_account(codex_home: Path, data_dir: Path, accoun
         claims = claims_from_auth(auth)
         if _claims_match_account(claims, account):
             _add_unique(keys, candidate.account_key)
+    return keys
+
+
+def _matching_backup_keys_for_account(data_dir: Path, account: Account) -> list[str]:
+    backup_dir = data_dir / "account-backups"
+    if not backup_dir.is_dir():
+        return []
+    keys: list[str] = []
+    for snapshot in sorted(backup_dir.glob("*.auth.json")):
+        try:
+            auth = parse_auth_json(snapshot.read_bytes())
+        except Exception:
+            continue
+        claims = claims_from_auth(auth)
+        if _claims_match_account(claims, account):
+            _add_unique(keys, account_key_from_snapshot(snapshot))
     return keys
 
 

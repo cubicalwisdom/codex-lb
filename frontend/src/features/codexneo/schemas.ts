@@ -12,6 +12,8 @@ export const CodexNeoSettingsSchema = z.object({
   codexHomeAutoSyncEnabled: z.boolean(),
   minimizeToTrayEnabled: z.boolean(),
   startWithWindowsEnabled: z.boolean(),
+  autoDeleteFreeReauthAccountsEnabled: z.boolean().default(false),
+  autoDeleteQuotaExceededAccountsEnabled: z.boolean().default(false),
   buyerTokenSaved: z.boolean(),
 });
 
@@ -27,6 +29,8 @@ export const CodexNeoSettingsUpdateRequestSchema = z.object({
   codexHomeAutoSyncEnabled: z.boolean().optional(),
   minimizeToTrayEnabled: z.boolean().optional(),
   startWithWindowsEnabled: z.boolean().optional(),
+  autoDeleteFreeReauthAccountsEnabled: z.boolean().optional(),
+  autoDeleteQuotaExceededAccountsEnabled: z.boolean().optional(),
   buyerToken: z.string().optional(),
   clearBuyerToken: z.boolean().optional(),
 });

@@ -7,12 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.auth import generate_unique_account_id
-from app.db.models import DashboardSettings
+from app.db.models import AccountStatus, DashboardSettings
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
 from app.modules.codexneo.locations import CodexNeoAccountLocationService
 from app.modules.codexneo.sync import CodexNeoAccountsSyncService
+from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
 pytestmark = pytest.mark.unit
@@ -161,6 +162,24 @@ async def _import_account_to_db(raw: bytes) -> None:
         await AccountsService(AccountsRepository(session)).import_account(raw)
 
 
+async def _set_account_state(account_id: str, *, plan_type: str, status: AccountStatus) -> None:
+    async with get_background_session() as session:
+        repo = AccountsRepository(session)
+        account = await repo.get_by_id(account_id)
+        assert account is not None
+        account.plan_type = plan_type
+        account.status = status
+        account.deactivation_reason = "test status"
+        await session.commit()
+
+
+async def _set_account_usage(account_id: str, *, primary_used: float, weekly_used: float) -> None:
+    async with get_background_session() as session:
+        repo = UsageRepository(session)
+        await repo.add_entry(account_id, primary_used, window="primary", window_minutes=300)
+        await repo.add_entry(account_id, weekly_used, window="secondary", window_minutes=10080)
+
+
 @pytest.mark.asyncio
 async def test_sync_codex_home_snapshots_to_accounts_and_backup(tmp_path, db_setup) -> None:
     del db_setup
@@ -270,6 +289,150 @@ async def test_sync_backup_only_snapshots_to_accounts(tmp_path, db_setup) -> Non
     assert result.count == 1
     assert generate_unique_account_id(raw_account_id, email) in await _account_ids()
     assert "secret-refresh" not in result.message
+
+
+@pytest.mark.asyncio
+async def test_auto_delete_free_reauth_plan_drift_accounts_only_deletes_eligible_rows(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    cases = [
+        ("free-active-key", "free-active@example.com", "acc_free_active", "plus", "free", AccountStatus.ACTIVE),
+        ("pro-reauth-key", "pro-reauth@example.com", "acc_pro_reauth", "plus", "pro", AccountStatus.REAUTH_REQUIRED),
+        (
+            "rate-limited-key",
+            "rate-limited@example.com",
+            "acc_rate_limited",
+            "plus",
+            "free",
+            AccountStatus.RATE_LIMITED,
+        ),
+        ("paused-key", "paused@example.com", "acc_paused", "plus", "free", AccountStatus.PAUSED),
+        (
+            "already-free-key",
+            "already-free@example.com",
+            "acc_already_free",
+            "free",
+            "free",
+            AccountStatus.REAUTH_REQUIRED,
+        ),
+    ]
+    for account_key, email, raw_account_id, snapshot_plan, account_plan, _status in cases:
+        _write_live_account(codex_home, account_key, email=email, raw_account_id=raw_account_id)
+        snapshot_path = codex_home / "accounts" / f"{account_key}.auth.json"
+        snapshot_path.write_bytes(_auth_json(email=email, account_id=raw_account_id, plan=snapshot_plan))
+        await _import_account_to_db(snapshot_path.read_bytes())
+        await _set_account_state(
+            generate_unique_account_id(raw_account_id, email),
+            plan_type=account_plan,
+            status=_status,
+        )
+    service = CodexNeoAccountsSyncService(codex_home=codex_home, data_dir=data_dir)
+
+    result = await service.auto_delete_free_reauth_plan_drift_accounts()
+
+    remaining_ids = await _account_ids()
+    assert result.success is True
+    assert result.count == 2
+    assert "Auto-deleted 2" in result.message
+    assert generate_unique_account_id("acc_free_active", "free-active@example.com") not in remaining_ids
+    assert generate_unique_account_id("acc_pro_reauth", "pro-reauth@example.com") not in remaining_ids
+    assert generate_unique_account_id("acc_rate_limited", "rate-limited@example.com") in remaining_ids
+    assert generate_unique_account_id("acc_paused", "paused@example.com") in remaining_ids
+    assert generate_unique_account_id("acc_already_free", "already-free@example.com") in remaining_ids
+    assert not (codex_home / "accounts" / "free-active-key.auth.json").exists()
+    assert not (codex_home / "accounts" / "pro-reauth-key.auth.json").exists()
+    assert (codex_home / "accounts" / "rate-limited-key.auth.json").exists()
+    assert (codex_home / "accounts" / "paused-key.auth.json").exists()
+    assert (codex_home / "accounts" / "already-free-key.auth.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_auto_delete_quota_exceeded_accounts_only_deletes_weekly_exhausted_unbacked_rows(
+    tmp_path,
+    db_setup,
+) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    cases = [
+        (
+            "eligible-key",
+            "eligible@example.com",
+            "acc_eligible",
+            AccountStatus.QUOTA_EXCEEDED,
+            0.0,
+            100.0,
+            False,
+        ),
+        (
+            "threshold-key",
+            "threshold@example.com",
+            "acc_threshold",
+            AccountStatus.QUOTA_EXCEEDED,
+            42.0,
+            98.0,
+            False,
+        ),
+        (
+            "five-hour-zero-weekly-available-key",
+            "five-hour-zero-weekly-available@example.com",
+            "acc_weekly_available",
+            AccountStatus.QUOTA_EXCEEDED,
+            100.0,
+            97.0,
+            False,
+        ),
+        (
+            "backed-up-key",
+            "backed-up@example.com",
+            "acc_backed_up",
+            AccountStatus.QUOTA_EXCEEDED,
+            100.0,
+            100.0,
+            True,
+        ),
+        (
+            "rate-limited-key",
+            "rate-limited-quota@example.com",
+            "acc_rate_limited_quota",
+            AccountStatus.RATE_LIMITED,
+            100.0,
+            100.0,
+            False,
+        ),
+    ]
+    for account_key, email, raw_account_id, status, primary_used, weekly_used, backed_up in cases:
+        _write_live_account(codex_home, account_key, email=email, raw_account_id=raw_account_id)
+        snapshot_path = codex_home / "accounts" / f"{account_key}.auth.json"
+        await _import_account_to_db(snapshot_path.read_bytes())
+        account_id = generate_unique_account_id(raw_account_id, email)
+        await _set_account_state(account_id, plan_type="pro", status=status)
+        await _set_account_usage(account_id, primary_used=primary_used, weekly_used=weekly_used)
+        if backed_up:
+            _write_backup_account(data_dir, account_key, email=email, raw_account_id=raw_account_id)
+    service = CodexNeoAccountsSyncService(codex_home=codex_home, data_dir=data_dir)
+
+    result = await service.auto_delete_quota_exceeded_weekly_exhausted_accounts()
+
+    remaining_ids = await _account_ids()
+    assert result.success is True
+    assert result.count == 2
+    assert "Auto-deleted 2 quota-exceeded" in result.message
+    assert generate_unique_account_id("acc_eligible", "eligible@example.com") not in remaining_ids
+    assert generate_unique_account_id("acc_threshold", "threshold@example.com") not in remaining_ids
+    assert (
+        generate_unique_account_id("acc_weekly_available", "five-hour-zero-weekly-available@example.com")
+        in remaining_ids
+    )
+    assert generate_unique_account_id("acc_backed_up", "backed-up@example.com") in remaining_ids
+    assert generate_unique_account_id("acc_rate_limited_quota", "rate-limited-quota@example.com") in remaining_ids
+    assert not (codex_home / "accounts" / "eligible-key.auth.json").exists()
+    assert not (codex_home / "accounts" / "threshold-key.auth.json").exists()
+    assert (codex_home / "accounts" / "five-hour-zero-weekly-available-key.auth.json").exists()
+    assert (codex_home / "accounts" / "backed-up-key.auth.json").exists()
+    assert (data_dir / "account-backups" / "backed-up-key.auth.json").exists()
+    assert (codex_home / "accounts" / "rate-limited-key.auth.json").exists()
 
 
 @pytest.mark.asyncio

@@ -139,6 +139,14 @@ export function syncCodexNeoAccounts() {
   return post(CODEXNEO_PATH + "/accounts/sync", CodexNeoActionResponseSchema, { body: {} });
 }
 
+export function autoDeleteCodexNeoFreeReauthAccounts() {
+  return post(CODEXNEO_PATH + "/accounts/auto-delete-free-reauth", CodexNeoActionResponseSchema, { body: {} });
+}
+
+export function autoDeleteCodexNeoQuotaExceededAccounts() {
+  return post(CODEXNEO_PATH + "/accounts/auto-delete-quota-exceeded", CodexNeoActionResponseSchema, { body: {} });
+}
+
 export function setCodexNeoAccountLocation(payload: unknown) {
   const validated = CodexNeoLocationRequestSchema.parse(payload);
   return post(CODEXNEO_PATH + "/accounts/location", CodexNeoActionResponseSchema, { body: validated });

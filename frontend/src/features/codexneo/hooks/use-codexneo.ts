@@ -3,6 +3,8 @@ import { toast } from "sonner";
 
 import { invalidateAccountRelatedQueries } from "@/features/accounts/query-invalidation";
 import {
+  autoDeleteCodexNeoFreeReauthAccounts,
+  autoDeleteCodexNeoQuotaExceededAccounts,
   clearCodexNeoActivityLog,
   clearCodexNeoValidityDate,
   deleteCodexNeoAccounts,
@@ -304,6 +306,22 @@ export function useCodexNeo() {
     },
     onError: (error: Error) => toast.error(error.message || "Accounts sync failed"),
   });
+  const autoDeleteFreeReauthAccountsMutation = useMutation({
+    mutationFn: () => autoDeleteCodexNeoFreeReauthAccounts(),
+    onSuccess: (result) => {
+      toastActionResult(result, "Auto delete free/auth required finished");
+      invalidateAccounts();
+    },
+    onError: (error: Error) => toast.error(error.message || "Auto delete free/auth required failed"),
+  });
+  const autoDeleteQuotaExceededAccountsMutation = useMutation({
+    mutationFn: () => autoDeleteCodexNeoQuotaExceededAccounts(),
+    onSuccess: (result) => {
+      toastActionResult(result, "Auto delete quota exceeded finished");
+      invalidateAccounts();
+    },
+    onError: (error: Error) => toast.error(error.message || "Auto delete quota exceeded failed"),
+  });
   const switchAccountMutation = useMutation({
     mutationFn: switchCodexNeoAccount,
     onSuccess: (result) => {
@@ -366,6 +384,8 @@ export function useCodexNeo() {
     clearValidityDateMutation,
     refreshSelectedMutation,
     syncAccountsMutation,
+    autoDeleteFreeReauthAccountsMutation,
+    autoDeleteQuotaExceededAccountsMutation,
     switchAccountMutation,
     deleteAccountsMutation,
     setAccountLocationMutation,

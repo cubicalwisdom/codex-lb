@@ -17,6 +17,8 @@ class CodexNeoSettingsResponse(DashboardModel):
     codex_home_auto_sync_enabled: bool
     minimize_to_tray_enabled: bool
     start_with_windows_enabled: bool
+    auto_delete_free_reauth_accounts_enabled: bool
+    auto_delete_quota_exceeded_accounts_enabled: bool
     buyer_token_saved: bool
 
 
@@ -32,6 +34,8 @@ class CodexNeoSettingsUpdateRequest(DashboardModel):
     codex_home_auto_sync_enabled: bool | None = None
     minimize_to_tray_enabled: bool | None = None
     start_with_windows_enabled: bool | None = None
+    auto_delete_free_reauth_accounts_enabled: bool | None = None
+    auto_delete_quota_exceeded_accounts_enabled: bool | None = None
     buyer_token: str | None = None
     clear_buyer_token: bool = False
 

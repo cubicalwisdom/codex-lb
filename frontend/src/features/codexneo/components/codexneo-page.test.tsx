@@ -25,9 +25,11 @@ function renderCodexNeoPage({
   canWrite = true,
   mutationErrors = {},
   healthOverride,
+  settingsOverride = {},
 }: {
   canWrite?: boolean;
   mutationErrors?: Record<string, Error>;
+  settingsOverride?: Partial<Record<string, unknown>>;
   healthOverride?: Partial<{
     overallStatus: string;
     items: Array<{
@@ -52,7 +54,10 @@ function renderCodexNeoPage({
     codexHomeAutoSyncEnabled: false,
     minimizeToTrayEnabled: false,
     startWithWindowsEnabled: false,
+    autoDeleteFreeReauthAccountsEnabled: false,
+    autoDeleteQuotaExceededAccountsEnabled: false,
     buyerTokenSaved: true,
+    ...settingsOverride,
   };
   const accounts = {
     accounts: [
@@ -164,6 +169,8 @@ function renderCodexNeoPage({
     markAvailableMutation: createMutationMock(),
     refreshSelectedMutation: createMutationMock(),
     syncAccountsMutation: createMutationMock(),
+    autoDeleteFreeReauthAccountsMutation: createMutationMock(),
+    autoDeleteQuotaExceededAccountsMutation: createMutationMock(),
     setValidityDateMutation: createMutationMock(),
     clearValidityDateMutation: createMutationMock(),
     switchAccountMutation: createMutationMock(),
@@ -554,6 +561,48 @@ describe("CodexNeoPage", () => {
     expect(mutations.updateSettingsMutation.mutateAsync).toHaveBeenCalledWith(
       expect.objectContaining({ codexHomeAutoSyncEnabled: true }),
     );
+  });
+
+  it("persists the free/auth-required auto-delete toggle", async () => {
+    const user = userEvent.setup();
+    const { mutations } = renderCodexNeoPage();
+
+    await user.click(screen.getByLabelText("Auto delete free/auth required"));
+
+    expect(mutations.updateSettingsMutation.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ autoDeleteFreeReauthAccountsEnabled: true }),
+    );
+  });
+
+  it("runs free/auth-required auto-delete when the persisted toggle is enabled", async () => {
+    const { mutations } = renderCodexNeoPage({
+      settingsOverride: { autoDeleteFreeReauthAccountsEnabled: true },
+    });
+
+    await waitFor(() => {
+      expect(mutations.autoDeleteFreeReauthAccountsMutation.mutateAsync).toHaveBeenCalledWith();
+    });
+  });
+
+  it("persists the quota-exceeded auto-delete toggle", async () => {
+    const user = userEvent.setup();
+    const { mutations } = renderCodexNeoPage();
+
+    await user.click(screen.getByLabelText("Auto delete quota exceeded"));
+
+    expect(mutations.updateSettingsMutation.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ autoDeleteQuotaExceededAccountsEnabled: true }),
+    );
+  });
+
+  it("runs quota-exceeded auto-delete when the persisted toggle is enabled", async () => {
+    const { mutations } = renderCodexNeoPage({
+      settingsOverride: { autoDeleteQuotaExceededAccountsEnabled: true },
+    });
+
+    await waitFor(() => {
+      expect(mutations.autoDeleteQuotaExceededAccountsMutation.mutateAsync).toHaveBeenCalledWith();
+    });
   });
 
   it("renders a persisted minimize to tray preference and sends an Electron minimize request", async () => {

@@ -327,3 +327,19 @@
 - [x] Wire the CodexNeo accounts API to the reconciled read-only path.
 - [x] Verify focused backend tests, OpenSpec validation, and the mirrored portable-data mapper response.
 - [x] Restart the portable app/backend when approved and verify the live portable API response loads the mirrored modules.
+
+## 39. Auto Delete Free Re-auth Plan Drift Accounts
+
+- [x] Add failing backend setting coverage for a persisted CodexNeo auto-delete toggle.
+- [x] Add failing backend cleanup coverage proving only previous pro/plus snapshots that now match a free or `reauth_required` Codex IB account are deleted.
+- [x] Add failing frontend coverage for the toggle in the marked Codex Home account toolbar area.
+- [x] Implement the persisted setting, write endpoint, backend cleanup rule, and frontend auto-run wiring.
+- [x] Verify focused backend/frontend tests, OpenSpec validation, portable runtime mirror, handover, and implementation list.
+
+## 40. Auto Delete Quota-exceeded Weekly-exhausted Accounts
+
+- [x] Add failing backend setting and cleanup coverage for a persisted quota-exceeded auto-delete toggle.
+- [x] Prove the cleanup deletes only non-backed-up `quota_exceeded` accounts whose weekly remaining usage is `2%` or lower.
+- [x] Prove accounts with weekly remaining usage above `2%` are kept even when 5-hour remaining usage is `0%`.
+- [x] Add failing frontend coverage for the new toggle and automatic write action.
+- [x] Implement the persisted setting, write endpoint, backend cleanup rule, and frontend auto-run wiring.

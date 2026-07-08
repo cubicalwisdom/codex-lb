@@ -81,6 +81,8 @@ export function CodexNeoPage() {
     exportSelectedMutation,
     refreshSelectedMutation,
     syncAccountsMutation,
+    autoDeleteFreeReauthAccountsMutation,
+    autoDeleteQuotaExceededAccountsMutation,
     switchAccountMutation,
     deleteAccountsMutation,
     setAccountLocationMutation,
@@ -106,6 +108,10 @@ export function CodexNeoPage() {
   const [codexHomeAutoRefreshEnabledOverride, setCodexHomeAutoRefreshEnabledOverride] = useState<boolean | null>(null);
   const [codexHomeRefreshSecondsOverride, setCodexHomeRefreshSecondsOverride] = useState<number | null>(null);
   const [codexHomeAutoSyncEnabledOverride, setCodexHomeAutoSyncEnabledOverride] = useState<boolean | null>(null);
+  const [autoDeleteFreeReauthEnabledOverride, setAutoDeleteFreeReauthEnabledOverride] = useState<boolean | null>(null);
+  const [autoDeleteQuotaExceededEnabledOverride, setAutoDeleteQuotaExceededEnabledOverride] = useState<boolean | null>(
+    null,
+  );
   const [minimizeToTrayEnabledOverride, setMinimizeToTrayEnabledOverride] = useState<boolean | null>(null);
   const [startWithWindowsEnabledOverride, setStartWithWindowsEnabledOverride] = useState<boolean | null>(null);
   const [autoSyncFeedback, setAutoSyncFeedback] = useState<string | null>(null);
@@ -114,6 +120,8 @@ export function CodexNeoPage() {
   const lastSelectedAccountKeyRef = useRef<string | null>(null);
   const shiftRangeSelectActiveRef = useRef(false);
   const autoSyncSignatureRef = useRef<string | null>(null);
+  const autoDeleteSignatureRef = useRef<string | null>(null);
+  const autoDeleteQuotaExceededSignatureRef = useRef<string | null>(null);
   const codexApiBaseUrl = codexApiBaseUrlOverride ?? settings?.codexApiBaseUrl ?? "";
   const codexgoApiBaseUrl = codexgoApiBaseUrlOverride ?? settings?.codexgoApiBaseUrl ?? "";
   const codexHomePath = codexHomePathOverride ?? codexHome?.codexHome ?? "";
@@ -130,6 +138,10 @@ export function CodexNeoPage() {
     settings?.codexHomeAutoRefreshIntervalSeconds ??
     DEFAULT_CODEX_HOME_REFRESH_SECONDS;
   const codexHomeAutoSyncEnabled = codexHomeAutoSyncEnabledOverride ?? settings?.codexHomeAutoSyncEnabled ?? false;
+  const autoDeleteFreeReauthEnabled =
+    autoDeleteFreeReauthEnabledOverride ?? settings?.autoDeleteFreeReauthAccountsEnabled ?? false;
+  const autoDeleteQuotaExceededEnabled =
+    autoDeleteQuotaExceededEnabledOverride ?? settings?.autoDeleteQuotaExceededAccountsEnabled ?? false;
   const minimizeToTrayEnabled = minimizeToTrayEnabledOverride ?? settings?.minimizeToTrayEnabled ?? false;
   const startWithWindowsEnabled = startWithWindowsEnabledOverride ?? settings?.startWithWindowsEnabled ?? false;
 
@@ -159,6 +171,8 @@ export function CodexNeoPage() {
     exportSelectedMutation.isPending ||
     refreshSelectedMutation.isPending ||
     syncAccountsMutation.isPending ||
+    autoDeleteFreeReauthAccountsMutation.isPending ||
+    autoDeleteQuotaExceededAccountsMutation.isPending ||
     switchAccountMutation.isPending ||
     deleteAccountsMutation.isPending ||
     setAccountLocationMutation.isPending ||
@@ -180,6 +194,8 @@ export function CodexNeoPage() {
       codexHomeAutoRefreshEnabled,
       codexHomeAutoRefreshIntervalSeconds: clampCodexHomeRefreshSeconds(codexHomeRefreshSeconds),
       codexHomeAutoSyncEnabled,
+      autoDeleteFreeReauthAccountsEnabled: autoDeleteFreeReauthEnabled,
+      autoDeleteQuotaExceededAccountsEnabled: autoDeleteQuotaExceededEnabled,
       minimizeToTrayEnabled,
       startWithWindowsEnabled,
     };
@@ -193,6 +209,8 @@ export function CodexNeoPage() {
     codexApiBaseUrl,
     codexHomeAutoRefreshEnabled,
     codexHomeAutoSyncEnabled,
+    autoDeleteFreeReauthEnabled,
+    autoDeleteQuotaExceededEnabled,
     codexHomeRefreshSeconds,
     codexgoApiBaseUrl,
     intervalMinutes,
@@ -233,6 +251,14 @@ export function CodexNeoPage() {
     setCodexHomeAutoSyncEnabledOverride(checked);
     persistCodexNeoSetting({ codexHomeAutoSyncEnabled: checked });
   };
+  const setPersistentAutoDeleteFreeReauthEnabled = (checked: boolean) => {
+    setAutoDeleteFreeReauthEnabledOverride(checked);
+    persistCodexNeoSetting({ autoDeleteFreeReauthAccountsEnabled: checked });
+  };
+  const setPersistentAutoDeleteQuotaExceededEnabled = (checked: boolean) => {
+    setAutoDeleteQuotaExceededEnabledOverride(checked);
+    persistCodexNeoSetting({ autoDeleteQuotaExceededAccountsEnabled: checked });
+  };
   const saveCodexHomeRefreshSeconds = () => {
     const clamped = clampCodexHomeRefreshSeconds(codexHomeRefreshSeconds);
     setCodexHomeRefreshSecondsOverride(clamped);
@@ -258,6 +284,25 @@ export function CodexNeoPage() {
   const sortedAccountRows = useMemo(
     () => sortAccountRows(accountRows, accountSort),
     [accountRows, accountSort],
+  );
+  const autoDeleteSignature = useMemo(
+    () =>
+      (accounts?.accounts ?? [])
+        .map((account) => `${account.accountKey}:${account.plan ?? ""}:${account.codexIbStatus ?? ""}`)
+        .sort()
+        .join("|"),
+    [accounts?.accounts],
+  );
+  const autoDeleteQuotaExceededSignature = useMemo(
+    () =>
+      (accounts?.accounts ?? [])
+        .map((account) => {
+          const weeklyRemaining = account.usage.secondary?.remainingPercent ?? "";
+          return `${account.accountKey}:${account.codexIbStatus ?? ""}:${account.backup}:${weeklyRemaining}`;
+        })
+        .sort()
+        .join("|"),
+    [accounts?.accounts],
   );
   const visibleAccountKeys = useMemo(
     () => sortedAccountRows.map(({ account }) => account.accountKey),
@@ -373,6 +418,50 @@ export function CodexNeoPage() {
     canWrite,
     codexHomeAutoSyncEnabled,
     syncAccountsMutation,
+  ]);
+  useEffect(() => {
+    if (
+      !autoDeleteFreeReauthEnabled ||
+      autoDeleteFreeReauthAccountsMutation.isPending ||
+      !canWrite ||
+      !accounts ||
+      !autoDeleteSignature
+    ) {
+      return;
+    }
+    if (autoDeleteSignatureRef.current === autoDeleteSignature) {
+      return;
+    }
+    autoDeleteSignatureRef.current = autoDeleteSignature;
+    void autoDeleteFreeReauthAccountsMutation.mutateAsync();
+  }, [
+    accounts,
+    autoDeleteFreeReauthAccountsMutation,
+    autoDeleteFreeReauthEnabled,
+    autoDeleteSignature,
+    canWrite,
+  ]);
+  useEffect(() => {
+    if (
+      !autoDeleteQuotaExceededEnabled ||
+      autoDeleteQuotaExceededAccountsMutation.isPending ||
+      !canWrite ||
+      !accounts ||
+      !autoDeleteQuotaExceededSignature
+    ) {
+      return;
+    }
+    if (autoDeleteQuotaExceededSignatureRef.current === autoDeleteQuotaExceededSignature) {
+      return;
+    }
+    autoDeleteQuotaExceededSignatureRef.current = autoDeleteQuotaExceededSignature;
+    void autoDeleteQuotaExceededAccountsMutation.mutateAsync();
+  }, [
+    accounts,
+    autoDeleteQuotaExceededAccountsMutation,
+    autoDeleteQuotaExceededEnabled,
+    autoDeleteQuotaExceededSignature,
+    canWrite,
   ]);
   const toggleAccountSort = (key: AccountSortKey) => {
     setAccountSort((current) => {
@@ -788,6 +877,28 @@ export function CodexNeoPage() {
           >
             {allVisibleAccountsSelected ? "Unselect all" : "Select all"}
           </Button>
+          <div className="flex h-9 items-center gap-2">
+            <Switch
+              id="codexneo-auto-delete-free-reauth"
+              checked={autoDeleteFreeReauthEnabled}
+              disabled={controlsDisabled}
+              onCheckedChange={setPersistentAutoDeleteFreeReauthEnabled}
+            />
+            <Label htmlFor="codexneo-auto-delete-free-reauth" className="whitespace-nowrap text-sm">
+              Auto delete free/auth required
+            </Label>
+          </div>
+          <div className="flex h-9 items-center gap-2">
+            <Switch
+              id="codexneo-auto-delete-quota-exceeded"
+              checked={autoDeleteQuotaExceededEnabled}
+              disabled={controlsDisabled}
+              onCheckedChange={setPersistentAutoDeleteQuotaExceededEnabled}
+            />
+            <Label htmlFor="codexneo-auto-delete-quota-exceeded" className="whitespace-nowrap text-sm">
+              Auto delete quota exceeded
+            </Label>
+          </div>
         </div>
         <div data-testid="codexneo-account-actions" className="flex flex-wrap items-end gap-2">
           <Button

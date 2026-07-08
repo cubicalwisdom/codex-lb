@@ -149,6 +149,8 @@ class CodexNeoService:
         codex_home_auto_sync_enabled: bool | None = None,
         minimize_to_tray_enabled: bool | None = None,
         start_with_windows_enabled: bool | None = None,
+        auto_delete_free_reauth_accounts_enabled: bool | None = None,
+        auto_delete_quota_exceeded_accounts_enabled: bool | None = None,
         buyer_token: str | None = None,
         clear_buyer_token: bool = False,
     ) -> CodexNeoSettingsResponse:
@@ -179,6 +181,12 @@ class CodexNeoService:
             data["minimize_to_tray_enabled"] = bool(minimize_to_tray_enabled)
         if start_with_windows_enabled is not None:
             data["start_with_windows_enabled"] = bool(start_with_windows_enabled)
+        if auto_delete_free_reauth_accounts_enabled is not None:
+            data["auto_delete_free_reauth_accounts_enabled"] = bool(auto_delete_free_reauth_accounts_enabled)
+        if auto_delete_quota_exceeded_accounts_enabled is not None:
+            data["auto_delete_quota_exceeded_accounts_enabled"] = bool(
+                auto_delete_quota_exceeded_accounts_enabled
+            )
         if clear_buyer_token:
             data["buyer_token_encrypted"] = None
         elif buyer_token is not None:
@@ -296,6 +304,8 @@ class CodexNeoService:
             "codex_home_auto_sync_enabled": False,
             "minimize_to_tray_enabled": False,
             "start_with_windows_enabled": False,
+            "auto_delete_free_reauth_accounts_enabled": False,
+            "auto_delete_quota_exceeded_accounts_enabled": False,
             "codex_home_path": None,
             "buyer_token_encrypted": None,
         }
@@ -321,6 +331,10 @@ class CodexNeoService:
         data["codex_home_auto_sync_enabled"] = bool(data["codex_home_auto_sync_enabled"])
         data["minimize_to_tray_enabled"] = bool(data["minimize_to_tray_enabled"])
         data["start_with_windows_enabled"] = bool(data["start_with_windows_enabled"])
+        data["auto_delete_free_reauth_accounts_enabled"] = bool(data["auto_delete_free_reauth_accounts_enabled"])
+        data["auto_delete_quota_exceeded_accounts_enabled"] = bool(
+            data["auto_delete_quota_exceeded_accounts_enabled"]
+        )
         if data.get("buyer_token_encrypted") is not None:
             data["buyer_token_encrypted"] = str(data["buyer_token_encrypted"])
         return data
@@ -338,6 +352,10 @@ class CodexNeoService:
             "codex_home_auto_sync_enabled": data["codex_home_auto_sync_enabled"],
             "minimize_to_tray_enabled": data["minimize_to_tray_enabled"],
             "start_with_windows_enabled": data["start_with_windows_enabled"],
+            "auto_delete_free_reauth_accounts_enabled": data["auto_delete_free_reauth_accounts_enabled"],
+            "auto_delete_quota_exceeded_accounts_enabled": data[
+                "auto_delete_quota_exceeded_accounts_enabled"
+            ],
             "codex_home_path": data.get("codex_home_path"),
             "buyer_token_encrypted": data.get("buyer_token_encrypted"),
         }
@@ -356,6 +374,8 @@ class CodexNeoService:
             codex_home_auto_sync_enabled=data["codex_home_auto_sync_enabled"],
             minimize_to_tray_enabled=data["minimize_to_tray_enabled"],
             start_with_windows_enabled=data["start_with_windows_enabled"],
+            auto_delete_free_reauth_accounts_enabled=data["auto_delete_free_reauth_accounts_enabled"],
+            auto_delete_quota_exceeded_accounts_enabled=data["auto_delete_quota_exceeded_accounts_enabled"],
             buyer_token_saved=bool(data.get("buyer_token_encrypted")),
         )
 

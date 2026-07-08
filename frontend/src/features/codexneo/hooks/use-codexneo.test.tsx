@@ -7,6 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import { useCodexNeo } from "@/features/codexneo/hooks/use-codexneo";
 
 const apiMocks = vi.hoisted(() => ({
+  autoDeleteCodexNeoFreeReauthAccounts: vi.fn(),
+  autoDeleteCodexNeoQuotaExceededAccounts: vi.fn(),
   clearCodexNeoActivityLog: vi.fn(),
   clearCodexNeoValidityDate: vi.fn(),
   deleteCodexNeoAccounts: vi.fn(),
@@ -79,6 +81,13 @@ function setupApiMocks() {
     codexgoAutoRefreshIntervalMinutes: 30,
     openaiActivityLogEnabled: false,
     managementActivityLogEnabled: false,
+    codexHomeAutoRefreshEnabled: false,
+    codexHomeAutoRefreshIntervalSeconds: 30,
+    codexHomeAutoSyncEnabled: false,
+    minimizeToTrayEnabled: false,
+    startWithWindowsEnabled: false,
+    autoDeleteFreeReauthAccountsEnabled: false,
+    autoDeleteQuotaExceededAccountsEnabled: false,
     buyerTokenSaved: false,
   });
   apiMocks.getCodexNeoActivityLog.mockResolvedValue({ contents: "" });
@@ -105,6 +114,11 @@ function setupApiMocks() {
   apiMocks.refreshCodexGoAuth.mockResolvedValue({ success: true, message: "refresh ok" });
   apiMocks.refreshCodexNeoSelected.mockResolvedValue({ success: true, message: "selected refresh ok" });
   apiMocks.syncCodexNeoAccounts.mockResolvedValue({ success: true, message: "sync ok" });
+  apiMocks.autoDeleteCodexNeoFreeReauthAccounts.mockResolvedValue({ success: true, message: "auto delete ok" });
+  apiMocks.autoDeleteCodexNeoQuotaExceededAccounts.mockResolvedValue({
+    success: true,
+    message: "quota auto delete ok",
+  });
   apiMocks.deleteCodexNeoAccounts.mockResolvedValue({ success: true, message: "delete ok" });
 }
 

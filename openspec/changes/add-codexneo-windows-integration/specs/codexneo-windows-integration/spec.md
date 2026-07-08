@@ -192,6 +192,16 @@ The system SHALL discover Codex Home account state for CodexNeo without exposing
 - **AND** sorting SHALL preserve selected account keys and SHALL NOT mutate Codex/Backup location state
 - **AND** sortable headers SHALL NOT render visible helper labels such as `SORT`, `ASC`, or `DESC`
 
+#### Scenario: Quota-exceeded weekly exhaustion auto-delete
+
+- **WHEN** an admin enables the `Auto delete quota exceeded` control
+- **THEN** the CodexNeo page SHALL persist that preference independently from the free/auth-required auto-delete control
+- **AND** the page SHALL call the quota-exceeded auto-delete write action when account data changes while the control is enabled
+- **AND** the backend SHALL delete only matched CodexNeo/Codex IB accounts whose Codex IB status is `quota_exceeded` and whose latest weekly remaining usage is `2%` or lower
+- **AND** the backend SHALL ignore the 5-hour remaining percentage for this rule
+- **AND** accounts with weekly remaining usage above `2%` SHALL NOT be deleted even when 5-hour remaining usage is `0%`
+- **AND** accounts that have a matching Backup snapshot SHALL NOT be deleted
+
 #### Scenario: Registry is missing or invalid
 
 - **WHEN** the Codex Home account registry is missing or invalid
@@ -457,6 +467,17 @@ The CodexNeo account table SHALL mirror CodexNeo Windows app availability and st
 - **THEN** every visible row between the anchor row and clicked row SHALL be selected or unselected with the clicked row
 - **AND** range selection SHALL use the current sorted visible row order
 - **AND** Codex Home and Backup location checkboxes SHALL NOT be changed by selection alone
+
+#### Scenario: Auto delete removes previous paid accounts that are now free or auth-required
+
+- **WHEN** the admin enables `Auto delete free/auth required`
+- **AND** a Codex Home or Backup snapshot still identifies the account as a previous `pro` or `plus` account
+- **AND** the matched Codex IB account has reconciled to plan `free` OR the matched Codex IB account status is `reauth_required`
+- **THEN** the dashboard SHALL automatically delete that matching CodexNeo account and its matching Codex IB Accounts row through a write action
+- **AND** accounts whose matched Codex IB status is `rate_limited` or `paused` SHALL NOT be deleted
+- **AND** accounts whose previous snapshot plan is already `free` SHALL NOT be deleted
+- **AND** `GET /api/codexneo/accounts` SHALL remain read-only; automatic deletion SHALL use a separate write endpoint after the toggle is enabled
+- **AND** clients SHALL treat a missing persisted auto-delete setting as disabled so an older running backend response does not block the page
 
 #### Scenario: CodexGO refresh interval unit is visible
 

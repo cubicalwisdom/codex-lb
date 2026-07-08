@@ -150,6 +150,8 @@ async def update_codexneo_settings(
         codex_home_auto_sync_enabled=payload.codex_home_auto_sync_enabled,
         minimize_to_tray_enabled=payload.minimize_to_tray_enabled,
         start_with_windows_enabled=payload.start_with_windows_enabled,
+        auto_delete_free_reauth_accounts_enabled=payload.auto_delete_free_reauth_accounts_enabled,
+        auto_delete_quota_exceeded_accounts_enabled=payload.auto_delete_quota_exceeded_accounts_enabled,
         buyer_token=payload.buyer_token,
         clear_buyer_token=payload.clear_buyer_token,
     )
@@ -359,6 +361,32 @@ async def sync_accounts(
     service: CodexNeoAccountsSyncService = Depends(get_account_sync_service),
 ) -> CodexNeoActionResponse:
     result = await service.sync_all_accounts()
+    return CodexNeoActionResponse(success=result.success, message=result.message)
+
+
+@router.post("/accounts/auto-delete-free-reauth", response_model=CodexNeoActionResponse)
+async def auto_delete_free_reauth_accounts(
+    _write_access=Depends(require_dashboard_write_access),
+    settings_service: CodexNeoService = Depends(get_codexneo_service),
+    service: CodexNeoAccountsSyncService = Depends(get_account_sync_service),
+) -> CodexNeoActionResponse:
+    settings = await settings_service.get_settings()
+    if not settings.auto_delete_free_reauth_accounts_enabled:
+        return CodexNeoActionResponse(success=True, message="Auto delete free/auth required is disabled")
+    result = await service.auto_delete_free_reauth_plan_drift_accounts()
+    return CodexNeoActionResponse(success=result.success, message=result.message)
+
+
+@router.post("/accounts/auto-delete-quota-exceeded", response_model=CodexNeoActionResponse)
+async def auto_delete_quota_exceeded_accounts(
+    _write_access=Depends(require_dashboard_write_access),
+    settings_service: CodexNeoService = Depends(get_codexneo_service),
+    service: CodexNeoAccountsSyncService = Depends(get_account_sync_service),
+) -> CodexNeoActionResponse:
+    settings = await settings_service.get_settings()
+    if not settings.auto_delete_quota_exceeded_accounts_enabled:
+        return CodexNeoActionResponse(success=True, message="Auto delete quota exceeded is disabled")
+    result = await service.auto_delete_quota_exceeded_weekly_exhausted_accounts()
     return CodexNeoActionResponse(success=result.success, message=result.message)
 
 
