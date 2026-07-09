@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
@@ -40,6 +41,127 @@ class FakeAccountSync:
         return Result()
 
 
+class _FakeApiResponse:
+    def __init__(self, payload: Any, *, status: int = 200, json_error: Exception | None = None) -> None:
+        self.status = status
+        self._payload = payload
+        self._json_error = json_error
+
+    async def __aenter__(self) -> _FakeApiResponse:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def json(self, *_args: object, **_kwargs: object) -> Any:
+        if self._json_error is not None:
+            raise self._json_error
+        return self._payload
+
+    async def text(self) -> str:
+        return json.dumps(self._payload) if self._json_error is None else "not-json"
+
+
+class _FakeApiSession:
+    def __init__(self, response: _FakeApiResponse) -> None:
+        self._response = response
+        self.requested_url: str | None = None
+
+    async def __aenter__(self) -> _FakeApiSession:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    def get(self, url: str, **_kwargs: object) -> _FakeApiResponse:
+        self.requested_url = url
+        return self._response
+
+
+@pytest.mark.asyncio
+async def test_get_settings_defaults_to_native_codex_provider_url(tmp_path) -> None:
+    service = CodexNeoService(
+        settings_path=tmp_path / "codexneo-settings.json",
+        codex_home=tmp_path / ".codex",
+        encryptor=_encryptor(),
+    )
+
+    settings = await service.get_settings()
+
+    assert settings.codex_api_base_url == "http://127.0.0.1:2455/backend-api/codex"
+
+
+@pytest.mark.asyncio
+async def test_get_settings_persists_exact_legacy_local_provider_migration(tmp_path) -> None:
+    settings_path = tmp_path / "codexneo-settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "codex_api_base_url": " http://127.0.0.1:2455/v1/ ",
+                "openai_activity_log_enabled": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = CodexNeoService(
+        settings_path=settings_path,
+        codex_home=tmp_path / ".codex",
+        encryptor=_encryptor(),
+    )
+
+    settings = await service.get_settings()
+    persisted = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    assert settings.codex_api_base_url == "http://127.0.0.1:2455/backend-api/codex"
+    assert persisted["codex_api_base_url"] == "http://127.0.0.1:2455/backend-api/codex"
+    assert persisted["openai_activity_log_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_settings_migration_preserves_unknown_persisted_values(tmp_path) -> None:
+    settings_path = tmp_path / "codexneo-settings.json"
+    future_setting = {"enabled": True, "nested": ["preserve", "me"]}
+    settings_path.write_text(
+        json.dumps(
+            {
+                "codex_api_base_url": "http://127.0.0.1:2455/v1",
+                "future_setting": future_setting,
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = CodexNeoService(
+        settings_path=settings_path,
+        codex_home=tmp_path / ".codex",
+        encryptor=_encryptor(),
+    )
+
+    await service.get_settings()
+
+    assert json.loads(settings_path.read_text(encoding="utf-8")) == {
+        "codex_api_base_url": "http://127.0.0.1:2455/backend-api/codex",
+        "future_setting": future_setting,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_settings_preserves_custom_v1_provider_url(tmp_path) -> None:
+    settings_path = tmp_path / "codexneo-settings.json"
+    settings_path.write_text(
+        json.dumps({"codex_api_base_url": "https://codex.example.test/v1/"}),
+        encoding="utf-8",
+    )
+    service = CodexNeoService(
+        settings_path=settings_path,
+        codex_home=tmp_path / ".codex",
+        encryptor=_encryptor(),
+    )
+
+    settings = await service.get_settings()
+
+    assert settings.codex_api_base_url == "https://codex.example.test/v1"
+
+
 @pytest.mark.asyncio
 async def test_update_settings_encrypts_buyer_token_and_never_returns_plaintext(tmp_path) -> None:
     service = CodexNeoService(
@@ -61,7 +183,7 @@ async def test_update_settings_encrypts_buyer_token_and_never_returns_plaintext(
     raw = (tmp_path / "codexneo-settings.json").read_text(encoding="utf-8")
     saved = json.loads(raw)
 
-    assert settings.codex_api_base_url == "http://127.0.0.1:2455/v1"
+    assert settings.codex_api_base_url == "http://127.0.0.1:2455/backend-api/codex"
     assert settings.codexgo_api_base_url == "https://codexgo.eu/api/codex-auth"
     assert settings.codexgo_auto_refresh_enabled is True
     assert settings.codexgo_auto_refresh_interval_minutes == 5
@@ -144,6 +266,72 @@ def test_normalize_codexgo_provider_base_url_strips_action_suffixes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_provider_test_accepts_native_model_catalog(tmp_path, monkeypatch) -> None:
+    session = _FakeApiSession(_FakeApiResponse({"models": [{"slug": "gpt-5.6-sol"}]}))
+    monkeypatch.setattr("app.modules.codexneo.service.aiohttp.ClientSession", lambda **_kwargs: session)
+    service = CodexNeoService(
+        settings_path=tmp_path / "settings.json",
+        codex_home=tmp_path / ".codex",
+        encryptor=_encryptor(),
+    )
+
+    result = await service.test_api_provider("https://codex.example.test/backend-api/codex")
+
+    assert result.success is True
+    assert session.requested_url == "https://codex.example.test/backend-api/codex/models"
+
+
+@pytest.mark.asyncio
+async def test_api_provider_test_rejects_redirected_native_model_catalog(tmp_path, monkeypatch) -> None:
+    session = _FakeApiSession(_FakeApiResponse({"models": []}, status=302))
+    monkeypatch.setattr("app.modules.codexneo.service.aiohttp.ClientSession", lambda **_kwargs: session)
+    service = CodexNeoService(
+        settings_path=tmp_path / "settings.json",
+        codex_home=tmp_path / ".codex",
+        encryptor=_encryptor(),
+    )
+
+    result = await service.test_api_provider("https://codex.example.test/backend-api/codex")
+
+    assert result.success is False
+    assert "HTTP 302" in result.message
+
+
+@pytest.mark.asyncio
+async def test_api_provider_test_rejects_generic_openai_model_catalog(tmp_path, monkeypatch) -> None:
+    session = _FakeApiSession(_FakeApiResponse({"object": "list", "data": [{"id": "gpt-5.6-sol"}]}))
+    monkeypatch.setattr("app.modules.codexneo.service.aiohttp.ClientSession", lambda **_kwargs: session)
+    service = CodexNeoService(
+        settings_path=tmp_path / "settings.json",
+        codex_home=tmp_path / ".codex",
+        encryptor=_encryptor(),
+    )
+
+    result = await service.test_api_provider("https://codex.example.test/v1")
+
+    assert result.success is False
+    assert "Codex-native model catalog" in result.message
+
+
+@pytest.mark.asyncio
+async def test_api_provider_test_rejects_invalid_json_model_catalog(tmp_path, monkeypatch) -> None:
+    session = _FakeApiSession(
+        _FakeApiResponse(None, json_error=json.JSONDecodeError("invalid", "not-json", 0))
+    )
+    monkeypatch.setattr("app.modules.codexneo.service.aiohttp.ClientSession", lambda **_kwargs: session)
+    service = CodexNeoService(
+        settings_path=tmp_path / "settings.json",
+        codex_home=tmp_path / ".codex",
+        encryptor=_encryptor(),
+    )
+
+    result = await service.test_api_provider("https://codex.example.test/backend-api/codex")
+
+    assert result.success is False
+    assert "valid JSON" in result.message
+
+
+@pytest.mark.asyncio
 async def test_set_api_provider_config_writes_managed_block_and_backup(tmp_path) -> None:
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()
@@ -167,6 +355,26 @@ async def test_set_api_provider_config_writes_managed_block_and_backup(tmp_path)
     assert 'model_provider = "openai"' in updated
     assert 'openai_base_url = "https://codex.local/v1"' in updated
     assert updated.index('openai_base_url = "https://codex.local/v1"') < updated.index("[profiles.default]")
+
+
+@pytest.mark.asyncio
+async def test_set_api_provider_without_override_writes_native_local_default(tmp_path) -> None:
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text('model = "gpt-5.6-sol"\n', encoding="utf-8")
+    service = CodexNeoService(
+        settings_path=tmp_path / "settings.json",
+        codex_home=codex_home,
+        encryptor=_encryptor(),
+        codex_restart_provider=_restart_success,
+    )
+
+    result = await service.set_api_provider()
+
+    updated = config_path.read_text(encoding="utf-8")
+    assert result.success is True
+    assert 'openai_base_url = "http://127.0.0.1:2455/backend-api/codex"' in updated
 
 
 @pytest.mark.asyncio

@@ -107,7 +107,7 @@ async def test_codexneo_health_reports_safe_badges_and_counts(tmp_path) -> None:
     assert by_key["accounts_sync"].detail == "2 CodexNeo account(s), 2 Codex IB account(s)"
     assert by_key["activity_log"].message == "OpenAI log on, Management log off"
     assert by_key["codexgo_auth"].message == "Buyer credential saved, auto-refresh every 30 min"
-    assert by_key["openai_bridge"].copy_value == "http://127.0.0.1:2455/v1"
+    assert by_key["openai_bridge"].copy_value == "http://127.0.0.1:2455/backend-api/codex"
     assert "secret" not in result.model_dump_json()
 
 

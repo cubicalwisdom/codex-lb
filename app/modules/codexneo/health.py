@@ -13,7 +13,7 @@ from app.modules.codexneo.schemas import CodexNeoHealthItem, CodexNeoHealthRespo
 from app.modules.codexneo.service import (
     DEFAULT_CODEX_API_BASE_URL,
     DEFAULT_CODEXGO_API_BASE_URL,
-    normalize_base_url,
+    normalize_codex_api_base_url,
     normalize_codexgo_provider_base_url,
 )
 
@@ -152,7 +152,7 @@ def _read_settings(path: Path) -> dict[str, Any]:
 
 def _safe_normalize_url(value: str) -> str:
     try:
-        return normalize_base_url(value)
+        return normalize_codex_api_base_url(value)
     except Exception:
         return DEFAULT_CODEX_API_BASE_URL
 

@@ -5,7 +5,7 @@ import { CodexNeoSettingsSchema } from "@/features/codexneo/schemas";
 describe("CodexNeoSettingsSchema", () => {
   it("defaults the auto-delete settings when an older backend omits them", () => {
     const parsed = CodexNeoSettingsSchema.parse({
-      codexApiBaseUrl: "http://127.0.0.1:2455/v1",
+      codexApiBaseUrl: "http://127.0.0.1:2455/backend-api/codex",
       codexgoApiBaseUrl: "https://codexgo.eu/api/codex-auth",
       codexgoAutoRefreshEnabled: true,
       codexgoAutoRefreshIntervalMinutes: 15,

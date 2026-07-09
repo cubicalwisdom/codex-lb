@@ -25,7 +25,8 @@ from app.modules.codexneo.home import resolve_configured_codex_home
 from app.modules.codexneo.schemas import CodexNeoActionResponse, CodexNeoSettingsResponse
 from app.modules.codexneo.sync import CodexNeoAccountsSyncService
 
-DEFAULT_CODEX_API_BASE_URL = "http://127.0.0.1:2455/v1"
+DEFAULT_CODEX_API_BASE_URL = "http://127.0.0.1:2455/backend-api/codex"
+LEGACY_LOCAL_CODEX_API_BASE_URL = "http://127.0.0.1:2455/v1"
 DEFAULT_CODEXGO_API_BASE_URL = "https://codexgo.eu/api/codex-auth"
 MIN_REFRESH_INTERVAL_MINUTES = 5
 MAX_REFRESH_INTERVAL_MINUTES = 1440
@@ -70,6 +71,13 @@ def normalize_base_url(value: str) -> str:
     parsed = urlparse(normalized)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise DashboardBadRequestError("URL must be an absolute http(s) URL", code="invalid_codexneo_url")
+    return normalized
+
+
+def normalize_codex_api_base_url(value: str) -> str:
+    normalized = normalize_base_url(value)
+    if normalized == LEGACY_LOCAL_CODEX_API_BASE_URL:
+        return DEFAULT_CODEX_API_BASE_URL
     return normalized
 
 
@@ -156,7 +164,7 @@ class CodexNeoService:
     ) -> CodexNeoSettingsResponse:
         data = self._read_settings_data()
         if codex_api_base_url is not None:
-            data["codex_api_base_url"] = normalize_base_url(codex_api_base_url)
+            data["codex_api_base_url"] = normalize_codex_api_base_url(codex_api_base_url)
         if codexgo_api_base_url is not None:
             data["codexgo_api_base_url"] = normalize_codexgo_provider_base_url(codexgo_api_base_url)
         if codexgo_auto_refresh_enabled is not None:
@@ -197,14 +205,34 @@ class CodexNeoService:
         return self._settings_response(data)
 
     async def test_api_provider(self, codex_api_base_url: str | None = None) -> CodexNeoActionResponse:
-        base_url = normalize_base_url(codex_api_base_url or self._read_settings_data()["codex_api_base_url"])
+        base_url = normalize_codex_api_base_url(
+            codex_api_base_url or self._read_settings_data()["codex_api_base_url"]
+        )
         test_url = f"{base_url}/models"
         timeout = aiohttp.ClientTimeout(total=8)
         try:
             async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                async with session.get(test_url) as response:
-                    if response.status < 400:
-                        return CodexNeoActionResponse(success=True, message=f"Codex API reachable at {base_url}")
+                async with session.get(test_url, allow_redirects=False) as response:
+                    if 200 <= response.status < 300:
+                        try:
+                            payload = await response.json(content_type=None)
+                        except (aiohttp.ContentTypeError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                            return CodexNeoActionResponse(
+                                success=False,
+                                message="Codex API returned HTTP success but the model catalog is not valid JSON",
+                            )
+                        if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+                            return CodexNeoActionResponse(
+                                success=False,
+                                message=(
+                                    "Codex API response is missing the Codex-native model catalog "
+                                    "('models' list); configure the /backend-api/codex base URL"
+                                ),
+                            )
+                        return CodexNeoActionResponse(
+                            success=True,
+                            message=f"Codex API reachable at {base_url} with a native model catalog",
+                        )
                     body = await response.text()
                     return CodexNeoActionResponse(
                         success=False,
@@ -214,7 +242,9 @@ class CodexNeoService:
             return CodexNeoActionResponse(success=False, message=f"Codex API test failed: {exc}")
 
     async def set_api_provider(self, codex_api_base_url: str | None = None) -> CodexNeoActionResponse:
-        base_url = normalize_base_url(codex_api_base_url or self._read_settings_data()["codex_api_base_url"])
+        base_url = normalize_codex_api_base_url(
+            codex_api_base_url or self._read_settings_data()["codex_api_base_url"]
+        )
         config_path = self._codex_home / "config.toml"
         current = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
         _ensure_original_config_backup(config_path, current)
@@ -309,14 +339,18 @@ class CodexNeoService:
             "codex_home_path": None,
             "buyer_token_encrypted": None,
         }
+        loaded_settings: dict[str, Any] | None = None
         if self._settings_path.exists():
             try:
                 loaded = json.loads(self._settings_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
                 raise DashboardBadRequestError("CodexNeo settings file is invalid JSON") from exc
             if isinstance(loaded, dict):
+                loaded_settings = loaded
                 data.update(loaded)
-        data["codex_api_base_url"] = normalize_base_url(str(data["codex_api_base_url"]))
+        stored_codex_api_base_url = normalize_base_url(str(data["codex_api_base_url"]))
+        migrate_legacy_codex_api_base_url = stored_codex_api_base_url == LEGACY_LOCAL_CODEX_API_BASE_URL
+        data["codex_api_base_url"] = normalize_codex_api_base_url(stored_codex_api_base_url)
         data["codexgo_api_base_url"] = normalize_codexgo_provider_base_url(str(data["codexgo_api_base_url"]))
         data["codexgo_auto_refresh_enabled"] = bool(data["codexgo_auto_refresh_enabled"])
         data["codexgo_auto_refresh_interval_minutes"] = _safe_refresh_interval(
@@ -337,6 +371,13 @@ class CodexNeoService:
         )
         if data.get("buyer_token_encrypted") is not None:
             data["buyer_token_encrypted"] = str(data["buyer_token_encrypted"])
+        if migrate_legacy_codex_api_base_url and loaded_settings is not None:
+            migrated_settings = dict(loaded_settings)
+            migrated_settings["codex_api_base_url"] = data["codex_api_base_url"]
+            _write_text_atomic(
+                self._settings_path,
+                json.dumps(migrated_settings, indent=2, sort_keys=True) + "\n",
+            )
         return data
 
     def _write_settings_data(self, data: dict[str, Any]) -> None:

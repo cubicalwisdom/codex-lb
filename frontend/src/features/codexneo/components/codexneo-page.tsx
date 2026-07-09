@@ -563,7 +563,7 @@ export function CodexNeoPage() {
               value={codexApiBaseUrl}
               disabled={controlsDisabled}
               onChange={(event) => setCodexApiBaseUrlOverride(event.target.value)}
-              placeholder="http://127.0.0.1:2455/v1"
+              placeholder="http://127.0.0.1:2455/backend-api/codex"
             />
           </div>
           <Button

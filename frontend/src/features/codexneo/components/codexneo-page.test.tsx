@@ -43,7 +43,7 @@ function renderCodexNeoPage({
   }>;
 } = {}) {
   const settings = {
-    codexApiBaseUrl: "http://127.0.0.1:2455/v1",
+    codexApiBaseUrl: "http://127.0.0.1:2455/backend-api/codex",
     codexgoApiBaseUrl: "https://codexgo.eu/api/codex-auth",
     codexgoAutoRefreshEnabled: true,
     codexgoAutoRefreshIntervalMinutes: 30,
@@ -139,8 +139,8 @@ function renderCodexNeoPage({
         label: "OpenAI bridge",
         status: "ok",
         message: "Configured",
-        detail: "http://127.0.0.1:2455/v1",
-        copyValue: "http://127.0.0.1:2455/v1",
+        detail: "http://127.0.0.1:2455/backend-api/codex",
+        copyValue: "http://127.0.0.1:2455/backend-api/codex",
       },
     ],
     ...healthOverride,
@@ -255,7 +255,9 @@ describe("CodexNeoPage", () => {
     renderCodexNeoPage();
 
     expect(screen.getByRole("heading", { name: "CodexNeo" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Codex API URL")).toHaveValue("http://127.0.0.1:2455/v1");
+    expect(screen.getByLabelText("Codex API URL")).toHaveValue(
+      "http://127.0.0.1:2455/backend-api/codex",
+    );
     expect(screen.getByRole("button", { name: "Auth->API Test" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Auth->API Set" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Auth->API Revert" })).toBeInTheDocument();

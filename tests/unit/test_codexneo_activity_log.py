@@ -57,7 +57,7 @@ def test_activity_log_respects_saved_stream_settings(tmp_path) -> None:
     settings_path.write_text(
         json.dumps(
             {
-                "codex_api_base_url": "http://127.0.0.1:2455/v1",
+                "codex_api_base_url": "http://127.0.0.1:2455/backend-api/codex",
                 "codexgo_api_base_url": "https://codexgo.eu/api/codex-auth",
                 "codexgo_auto_refresh_enabled": False,
                 "codexgo_auto_refresh_interval_minutes": 30,
