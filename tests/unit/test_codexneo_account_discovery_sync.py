@@ -375,6 +375,15 @@ async def test_auto_delete_quota_exceeded_accounts_only_deletes_weekly_exhausted
             False,
         ),
         (
+            "effective-quota-key",
+            "effective-quota@example.com",
+            "acc_effective_quota",
+            AccountStatus.ACTIVE,
+            20.0,
+            100.0,
+            False,
+        ),
+        (
             "five-hour-zero-weekly-available-key",
             "five-hour-zero-weekly-available@example.com",
             "acc_weekly_available",
@@ -417,10 +426,11 @@ async def test_auto_delete_quota_exceeded_accounts_only_deletes_weekly_exhausted
 
     remaining_ids = await _account_ids()
     assert result.success is True
-    assert result.count == 2
-    assert "Auto-deleted 2 quota-exceeded" in result.message
+    assert result.count == 3
+    assert "Auto-deleted 3 quota-exceeded" in result.message
     assert generate_unique_account_id("acc_eligible", "eligible@example.com") not in remaining_ids
     assert generate_unique_account_id("acc_threshold", "threshold@example.com") not in remaining_ids
+    assert generate_unique_account_id("acc_effective_quota", "effective-quota@example.com") not in remaining_ids
     assert (
         generate_unique_account_id("acc_weekly_available", "five-hour-zero-weekly-available@example.com")
         in remaining_ids
@@ -429,6 +439,7 @@ async def test_auto_delete_quota_exceeded_accounts_only_deletes_weekly_exhausted
     assert generate_unique_account_id("acc_rate_limited_quota", "rate-limited-quota@example.com") in remaining_ids
     assert not (codex_home / "accounts" / "eligible-key.auth.json").exists()
     assert not (codex_home / "accounts" / "threshold-key.auth.json").exists()
+    assert not (codex_home / "accounts" / "effective-quota-key.auth.json").exists()
     assert (codex_home / "accounts" / "five-hour-zero-weekly-available-key.auth.json").exists()
     assert (codex_home / "accounts" / "backed-up-key.auth.json").exists()
     assert (data_dir / "account-backups" / "backed-up-key.auth.json").exists()

@@ -98,6 +98,7 @@
 - Backed-up accounts are explicitly skipped so safe copies are not removed.
 - Verification passed for focused/backend frontend tests, Ruff, TypeScript, production frontend build, OpenSpec strict/spec validation, portable runtime mirror/hash checks, and portable backend `py_compile`.
 - Per user instruction, the portable app and Codex Desktop were not restarted during implementation or verification.
+- Follow-up debug found the live endpoint was running but returned `Auto delete found 0 eligible quota-exceeded account(s)` because the highlighted rows were stored as `accounts.status=active` while the CodexNeo table displayed derived `Quota exceeded` from weekly exhaustion. The cleanup rule now also accepts stored-active rows whose shared quota calculation derives `quota_exceeded`, while still skipping rate-limited/paused/other non-active statuses and backed-up accounts. The fixed `sync.py` was mirrored into the portable runtime, but the running portable backend still requires a restart before this loaded-module fix can affect live deletion.
 
 ## Progress Log
 

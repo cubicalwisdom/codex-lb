@@ -10,7 +10,8 @@ from uuid import uuid4
 from app.core.auth import claims_from_auth, parse_auth_json
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.plan_types import normalize_account_plan_type
-from app.db.models import Account, AccountStatus
+from app.core.usage.quota import apply_usage_quota
+from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
@@ -277,15 +278,23 @@ class CodexNeoAccountsSyncService:
             accounts_repo = AccountsRepository(session)
             usage_repo = UsageRepository(session)
             accounts = await accounts_repo.list_accounts(refresh_existing=True, include_generated_copies=True)
+            primary_usage = await usage_repo.latest_by_account(
+                "primary",
+                account_ids=[account.id for account in accounts],
+            )
             secondary_usage = await usage_repo.latest_by_account(
                 "secondary",
                 account_ids=[account.id for account in accounts],
             )
             for account in accounts:
-                if account.status != AccountStatus.QUOTA_EXCEEDED:
-                    continue
                 usage = secondary_usage.get(account.id)
                 if usage is None or usage.used_percent < 98:
+                    continue
+                if not _is_quota_exceeded_for_auto_delete(
+                    account,
+                    primary=primary_usage.get(account.id),
+                    secondary=usage,
+                ):
                     continue
                 if _matching_backup_keys_for_account(self._data_dir, account):
                     continue
@@ -537,6 +546,31 @@ def _matching_backup_keys_for_account(data_dir: Path, account: Account) -> list[
         if _claims_match_account(claims, account):
             _add_unique(keys, account_key_from_snapshot(snapshot))
     return keys
+
+
+def _is_quota_exceeded_for_auto_delete(
+    account: Account,
+    *,
+    primary: UsageHistory | None,
+    secondary: UsageHistory,
+) -> bool:
+    if account.status == AccountStatus.QUOTA_EXCEEDED:
+        return True
+    if account.status != AccountStatus.ACTIVE:
+        return False
+    effective_status, _, _ = apply_usage_quota(
+        status=account.status,
+        primary_used=float(primary.used_percent) if primary is not None else None,
+        primary_reset=primary.reset_at if primary is not None else None,
+        primary_window_minutes=primary.window_minutes if primary is not None else None,
+        runtime_reset=float(account.reset_at) if account.reset_at is not None else None,
+        secondary_used=float(secondary.used_percent),
+        secondary_reset=secondary.reset_at,
+        credits_has=secondary.credits_has,
+        credits_unlimited=secondary.credits_unlimited,
+        credits_balance=secondary.credits_balance,
+    )
+    return effective_status == AccountStatus.QUOTA_EXCEEDED
 
 
 def _matching_account_ids(accounts: list[Account], claims: Any) -> list[str]:
