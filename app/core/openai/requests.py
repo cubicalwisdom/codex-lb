@@ -277,6 +277,8 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     input_value = data.get("input")
     if not is_json_list(input_value):
         return data
+    if _is_responses_lite_input(input_value):
+        return data
 
     instruction_parts: list[str] = []
     input_items: list[JsonValue] = []
@@ -286,8 +288,7 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
         if item_mapping is None:
             input_items.append(item)
             continue
-        role = item_mapping.get("role")
-        if role not in ("system", "developer"):
+        if not _is_responses_instruction_message_item(item_mapping):
             input_items.append(item)
             continue
         instruction_text, preserved_content = _split_responses_instruction_item_content(item_mapping)
@@ -312,6 +313,24 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     normalized["instructions"] = merged_instructions
     normalized["input"] = input_items
     return normalized
+
+
+def _is_responses_lite_input(input_value: list[JsonValue]) -> bool:
+    # Responses Lite deliberately carries both its tool bundle and base
+    # developer instructions inside input. The upstream contract requires the
+    # complete ordered input envelope to survive validation unchanged.
+    return any(
+        (mapping := _json_mapping_or_none(item)) is not None and mapping.get("type") == "additional_tools"
+        for item in input_value
+    )
+
+
+def _is_responses_instruction_message_item(item: Mapping[str, JsonValue]) -> bool:
+    role = item.get("role")
+    if role not in ("system", "developer"):
+        return False
+    item_type = item.get("type")
+    return item_type is None or item_type == "message"
 
 
 def _merge_responses_instructions(existing: str, extra_parts: list[str]) -> str:

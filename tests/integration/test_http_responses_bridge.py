@@ -3837,6 +3837,7 @@ async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_prese
     account = await _get_account(account_id)
     fake_upstream = _FakeBridgeUpstreamWebSocket()
     connect_calls: list[tuple[str | None, str | None]] = []
+    connect_headers_seen: list[dict[str, str]] = []
 
     async def fake_select_account_with_budget(
         self,
@@ -3888,7 +3889,8 @@ async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_prese
         base_url=None,
         session=None,
     ):
-        del headers, access_token, base_url, session
+        del access_token, base_url, session
+        connect_headers_seen.append(dict(headers))
         connect_calls.append((account_id, account_id_header))
         return fake_upstream
 
@@ -3900,20 +3902,72 @@ async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_prese
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
     monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
 
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "exec",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: /.+/",
+                },
+            }
+        ],
+    }
+    developer_message = {
+        "type": "message",
+        "role": "developer",
+        "content": "Use the supplied execution tool.",
+    }
+    user_message = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Show the working directory."}],
+    }
+    custom_tool_call = {
+        "type": "custom_tool_call",
+        "call_id": "call_exec_1",
+        "name": "exec",
+        "input": "pwd",
+    }
+    custom_tool_call_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call_exec_1",
+        "output": "H:/workspace",
+    }
     payload = {
-        "model": "gpt-5.1",
+        "model": "gpt-5.6-sol",
         "instructions": "Return exactly OK.",
-        "input": "hello",
+        "input": [
+            additional_tools,
+            developer_message,
+            user_message,
+            custom_tool_call,
+            custom_tool_call_output,
+        ],
         "prompt_cache_key": "backend-http-bridge-thread-1",
         "stream": True,
     }
-    first_events = await _collect_sse_events(async_client, "/backend-api/codex/responses", json_body=payload)
+    native_headers = {
+        "originator": "Codex Desktop",
+        "x-openai-internal-codex-responses-lite": "true",
+    }
+    first_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body=payload,
+        headers=native_headers,
+    )
     first_response = first_events[-1]["response"]
 
     second_events = await _collect_sse_events(
         async_client,
         "/backend-api/codex/responses",
         json_body={**payload, "previous_response_id": first_response["id"]},
+        headers=native_headers,
     )
     second_response = second_events[-1]["response"]
 
@@ -3922,8 +3976,73 @@ async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_prese
     assert first_response["id"] == "resp_bridge_1"
     assert second_response["id"] == "resp_bridge_2"
     assert connect_calls == [(account_id, account.chatgpt_account_id)]
+    assert len(connect_headers_seen) == 1
+    assert connect_headers_seen[0]["x-openai-internal-codex-responses-lite"] == "true"
     assert len(fake_upstream.sent_text) == 2
+    first_upstream_payload = json.loads(fake_upstream.sent_text[0])
+    assert first_upstream_payload["instructions"] == "Return exactly OK."
+    assert first_upstream_payload["tools"] == []
+    assert first_upstream_payload["input"] == [
+        additional_tools,
+        developer_message,
+        user_message,
+        custom_tool_call,
+        custom_tool_call_output,
+    ]
+    assert first_upstream_payload["client_metadata"][
+        "ws_request_header_x_openai_internal_codex_responses_lite"
+    ] == "true"
     assert json.loads(fake_upstream.sent_text[1])["previous_response_id"] == "resp_bridge_1"
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_omits_lite_header_when_client_omits_marker(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_no_lite_marker",
+        "backend-http-bridge-no-lite-marker@example.com",
+    )
+    account = await _get_account(account_id)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_headers_seen: list[dict[str, str]] = []
+
+    async def fake_select_account_with_budget(*_args, **_kwargs):
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(_self, target, **_kwargs):
+        return target
+
+    async def fake_connect_responses_websocket(headers, *_args, **_kwargs):
+        connect_headers_seen.append(dict(headers))
+        return fake_upstream
+
+    async def fail_legacy_stream(*_args, **_kwargs):
+        raise AssertionError("legacy core_stream_responses path must not be used when HTTP bridge is enabled")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.6-sol",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "stream": True,
+        },
+    )
+
+    _assert_created_text_delta_completed(events)
+    assert len(connect_headers_seen) == 1
+    assert "x-openai-internal-codex-responses-lite" not in connect_headers_seen[0]
+    assert len(fake_upstream.sent_text) == 1
 
 
 @pytest.mark.asyncio

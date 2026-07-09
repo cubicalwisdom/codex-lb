@@ -73,6 +73,9 @@ from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 
+CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
+CODEX_RESPONSES_LITE_WS_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite"
+
 IGNORE_INBOUND_HEADERS = {
     "authorization",
     "chatgpt-account-id",
@@ -82,6 +85,7 @@ IGNORE_INBOUND_HEADERS = {
     "x-real-ip",
     "true-client-ip",
 }
+INTERNAL_OPENAI_UPSTREAM_HEADERS = frozenset({CODEX_RESPONSES_LITE_HEADER})
 
 _ERROR_TYPE_CODE_MAP = {
     "rate_limit_exceeded": "rate_limit_exceeded",
@@ -142,6 +146,15 @@ _NATIVE_CODEX_ORIGINATORS = frozenset(
         "codex_exec",
         "codex_vscode",
     }
+)
+_NATIVE_CODEX_USER_AGENT_PREFIXES: tuple[str, ...] = (
+    "codex_cli_rs",
+    "codex-tui",
+    "codex_exec",
+    "codex_sdk_ts",
+    "codex_vscode",
+    "codex desktop",
+    "codex ",
 )
 _NATIVE_CODEX_STREAM_HEADER_KEYS = frozenset(
     {
@@ -427,9 +440,47 @@ class CodexControlResponse:
     headers: Mapping[str, str]
 
 
-def _should_drop_inbound_header(name: str) -> bool:
+def _truthy_header_value(value: str | None) -> bool:
+    return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def responses_lite_requested_from_headers(headers: Mapping[str, str]) -> bool:
+    return any(
+        key.lower() == CODEX_RESPONSES_LITE_HEADER and _truthy_header_value(value)
+        for key, value in headers.items()
+    )
+
+
+def responses_lite_requested_from_native_headers(headers: Mapping[str, str]) -> bool:
+    return _is_native_codex_request(headers) and responses_lite_requested_from_headers(headers)
+
+
+def responses_lite_requested_from_payload(payload: Mapping[str, JsonValue]) -> bool:
+    raw_metadata = payload.get("client_metadata")
+    if not is_json_mapping(raw_metadata):
+        return False
+    value = raw_metadata.get(CODEX_RESPONSES_LITE_WS_METADATA_KEY)
+    return isinstance(value, str) and _truthy_header_value(value)
+
+
+def responses_lite_requested(payload: Mapping[str, JsonValue], headers: Mapping[str, str]) -> bool:
+    return responses_lite_requested_from_headers(headers) or responses_lite_requested_from_payload(payload)
+
+
+def apply_responses_lite_client_metadata(payload: dict[str, JsonValue]) -> None:
+    raw_metadata = payload.get("client_metadata")
+    client_metadata = dict(raw_metadata) if is_json_mapping(raw_metadata) else {}
+    client_metadata[CODEX_RESPONSES_LITE_WS_METADATA_KEY] = "true"
+    payload["client_metadata"] = client_metadata
+
+
+def _should_drop_inbound_header(name: str, *, preserve_responses_lite: bool = False) -> bool:
     normalized = name.lower()
     if normalized in IGNORE_INBOUND_HEADERS:
+        return True
+    if normalized in INTERNAL_OPENAI_UPSTREAM_HEADERS and not (
+        preserve_responses_lite and normalized == CODEX_RESPONSES_LITE_HEADER
+    ):
         return True
     if normalized.startswith("x-forwarded-"):
         return True
@@ -438,8 +489,17 @@ def _should_drop_inbound_header(name: str) -> bool:
     return False
 
 
-def filter_inbound_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    return {key: value for key, value in headers.items() if not _should_drop_inbound_header(key)}
+def filter_inbound_headers(
+    headers: Mapping[str, str],
+    *,
+    preserve_responses_lite: bool = False,
+) -> dict[str, str]:
+    preserve_responses_lite = preserve_responses_lite and _is_native_codex_request(headers)
+    return {
+        key: value
+        for key, value in headers.items()
+        if not _should_drop_inbound_header(key, preserve_responses_lite=preserve_responses_lite)
+    }
 
 
 def _build_upstream_headers(
@@ -447,8 +507,10 @@ def _build_upstream_headers(
     access_token: str,
     account_id: str | None,
     accept: str = "text/event-stream",
+    *,
+    responses_lite: bool = False,
 ) -> dict[str, str]:
-    headers = dict(inbound)
+    headers = filter_inbound_headers(inbound)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
@@ -457,6 +519,8 @@ def _build_upstream_headers(
     headers["Authorization"] = f"Bearer {access_token}"
     headers["Accept"] = accept
     headers["Content-Type"] = "application/json"
+    if responses_lite:
+        headers[CODEX_RESPONSES_LITE_HEADER] = "true"
     if account_id:
         headers["chatgpt-account-id"] = account_id
     return headers
@@ -499,7 +563,8 @@ def _build_upstream_websocket_headers(
             token.strip().lower() for token in value.split(",") if isinstance(value, str) and token.strip()
         )
     blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
-    headers = {key: value for key, value in inbound.items() if key.lower() not in blocked_header_names}
+    filtered = filter_inbound_headers(inbound)
+    headers = {key: value for key, value in filtered.items() if key.lower() not in blocked_header_names}
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
@@ -1118,6 +1183,25 @@ def _is_native_codex_originator(originator: str | None) -> bool:
     if not stripped:
         return False
     return stripped in _NATIVE_CODEX_ORIGINATORS
+
+
+def _is_native_codex_user_agent(user_agent: str | None) -> bool:
+    if not user_agent:
+        return False
+    lowered = user_agent.strip().lower()
+    return any(lowered.startswith(prefix) for prefix in _NATIVE_CODEX_USER_AGENT_PREFIXES)
+
+
+def _is_native_codex_request(headers: Mapping[str, str]) -> bool:
+    user_agent = None
+    originator = None
+    for key, value in headers.items():
+        lowered = key.lower()
+        if lowered == "user-agent":
+            user_agent = value
+        elif lowered == "originator":
+            originator = value
+    return _is_native_codex_user_agent(user_agent) or _is_native_codex_originator(originator)
 
 
 def _payload_uses_image_generation_tool(payload: Mapping[str, JsonValue]) -> bool:
@@ -2191,6 +2275,9 @@ async def _stream_responses_with_session(
     error_message: str | None = None
     client_session = session
     payload_dict = payload.to_payload()
+    use_responses_lite = _is_native_codex_request(headers) and responses_lite_requested(payload_dict, headers)
+    if use_responses_lite:
+        apply_responses_lite_client_metadata(payload_dict)
     if settings.image_inline_fetch_enabled:
         payload_dict = await _inline_input_image_urls(
             payload_dict,
@@ -2216,7 +2303,12 @@ async def _stream_responses_with_session(
         upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
         method = "GET"
     else:
-        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_headers(
+            headers,
+            access_token,
+            account_id,
+            responses_lite=use_responses_lite,
+        )
         method = "POST"
     remaining_request_timeout = _remaining_total_timeout(
         request_total_timeout,
@@ -2442,7 +2534,12 @@ async def _stream_responses_with_session(
         )
 
         transport = "http"
-        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_headers(
+            headers,
+            access_token,
+            account_id,
+            responses_lite=use_responses_lite,
+        )
         method = "POST"
         remaining_request_timeout = _remaining_total_timeout(
             request_total_timeout,
@@ -2847,16 +2944,21 @@ class _CompactCommandTransport:
         )
         if self.route is None and self.route_trace is not None:
             self.route_trace.record_direct()
+        payload_dict = self.payload.to_payload()
+        use_responses_lite = _is_native_codex_request(self.headers) and responses_lite_requested(
+            payload_dict,
+            self.headers,
+        )
         upstream_headers = _build_upstream_headers(
             self.headers,
             self.access_token,
             self.account_id,
             accept="application/json",
+            responses_lite=use_responses_lite,
         )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
-        payload_dict = self.payload.to_payload()
         if settings.image_inline_fetch_enabled:
             payload_dict = await _inline_input_image_urls(
                 payload_dict,

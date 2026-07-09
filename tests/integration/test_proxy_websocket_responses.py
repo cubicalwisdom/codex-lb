@@ -639,14 +639,59 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "exec",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: /.+/",
+                },
+            }
+        ],
+    }
+    developer_message = {
+        "type": "message",
+        "role": "developer",
+        "content": "Use the supplied execution tool.",
+    }
+    user_message = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Show the working directory."}],
+    }
+    custom_tool_call = {
+        "type": "custom_tool_call",
+        "call_id": "call_exec_1",
+        "name": "exec",
+        "input": "pwd",
+    }
+    custom_tool_call_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call_exec_1",
+        "output": "H:/workspace",
+    }
     request_payload = {
         "type": "response.create",
-        "model": "gpt-5.4",
+        "model": "gpt-5.6-sol",
         "instructions": "",
-        "client_metadata": {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
+        "client_metadata": {
+            "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
+            "ws_request_header_x_openai_internal_codex_responses_lite": "true",
+        },
         "service_tier": "fast",
         "reasoning": {"effort": "high"},
-        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "input": [
+            additional_tools,
+            developer_message,
+            user_message,
+            custom_tool_call,
+            custom_tool_call_output,
+        ],
         "stream": True,
     }
 
@@ -658,6 +703,8 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
                 "chatgpt-account-id": "external-account",
                 "session_id": "thread-ws-1",
                 "openai-beta": "responses_websockets=2026-02-06",
+                "originator": "Codex Desktop",
+                "x-openai-internal-codex-responses-lite": "true",
             },
         ) as websocket:
             websocket.send_text(json.dumps(request_payload))
@@ -669,19 +716,23 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     seen_headers = cast(dict[str, str], seen["headers"])
     assert seen_headers["session_id"] == "thread-ws-1"
     assert seen_headers["openai-beta"] == "responses_websockets=2026-02-06"
+    assert "x-openai-internal-codex-responses-lite" not in seen_headers
     assert seen_headers["x-codex-turn-state"] == cast(str, seen["sticky_key"])
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert seen["prefer_earlier_reset"] is False
     assert seen["routing_strategy"] == "usage_weighted"
-    assert seen["model"] == "gpt-5.4"
+    assert seen["model"] == "gpt-5.6-sol"
     assert [json.loads(message) for message in fake_upstream.sent_text] == [
         {
-            "model": "gpt-5.4",
+            "model": "gpt-5.6-sol",
             "instructions": "",
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "input": [additional_tools, developer_message, user_message, custom_tool_call, custom_tool_call_output],
             "tools": [],
             "reasoning": {"effort": "high"},
-            "client_metadata": {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
+            "client_metadata": {
+                "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
+                "ws_request_header_x_openai_internal_codex_responses_lite": "true",
+            },
             "service_tier": "priority",
             "store": False,
             "include": [],
@@ -692,7 +743,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     log = log_calls[0]
     assert log["account_id"] == "acct_ws_proxy"
     assert log["request_id"] == "resp_ws_1"
-    assert log["model"] == "gpt-5.4"
+    assert log["model"] == "gpt-5.6-sol"
     assert log["service_tier"] == "priority"
     assert log["transport"] == "websocket"
     assert log["status"] == "success"
@@ -1075,6 +1126,7 @@ def test_backend_responses_websocket_accepts_and_reuses_generated_turn_state(app
 
     seen_headers = cast(dict[str, str], seen["headers"])
     assert turn_state
+    assert "x-openai-internal-codex-responses-lite" not in seen_headers
     assert seen_headers["x-codex-turn-state"] == turn_state
     assert seen["sticky_key"] == turn_state
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION

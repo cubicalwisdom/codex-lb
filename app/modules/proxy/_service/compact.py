@@ -381,7 +381,7 @@ class _CompactMixin:
     ) -> CompactResponsePayload:
         proxy = cast(_CompactServiceProtocol, self)
         _maybe_log_proxy_request_payload("compact", payload, headers)
-        filtered = filter_inbound_headers(headers)
+        filtered = filter_inbound_headers(headers, preserve_responses_lite=True)
         useragent, useragent_group = _request_log_useragent_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = _service_time().monotonic()

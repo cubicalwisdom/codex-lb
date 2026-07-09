@@ -11,6 +11,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - **Responses as canonical wire format:** Internally we treat Responses as the source of truth to avoid divergent streaming semantics.
 - **Strict validation:** Required fields and mutually exclusive fields are enforced up front to match official client expectations.
 - **Cursor alias compatibility:** Cursor UI model labels may append reasoning or speed suffixes to GPT-5 slugs; those are normalized to canonical upstream fields before forwarding.
+- **Responses Lite input envelope:** Codex GPT-5.6 Responses Lite sends custom tool declarations as `additional_tools` followed by a developer instruction message inside `input`. The complete ordered envelope is the protocol, so request normalization skips instruction lifting whenever `additional_tools` is present.
 - **No truncation support:** Requests that include `truncation` are rejected because upstream does not support it.
 - **Compact as a separate contract:** Standalone compact is treated as a canonical opaque context-window contract, not as a variant of buffered normal `/responses`.
 
@@ -32,6 +33,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - `/v1/responses/compact` is supported only when the upstream implements it.
 - `prompt_cache_key` affinity on OpenAI-style routes is intentionally bounded by a dashboard-managed freshness window, unlike durable backend `session_id` or dashboard sticky-thread routing.
 - Codex-native direct websocket `/backend-api/codex/responses` treats upstream `previous_response_id` as an ephemeral anchor. If that anchor goes stale, the proxy must mask raw `previous_response_not_found` details and emit a sanitized `codex_previous_response_stale` classifier so compatible Codex clients can soft-reset and retry without `previous_response_id`.
+- The Responses Lite marker is native Codex transport metadata. Direct and fallback HTTP/compact requests emit `x-openai-internal-codex-responses-lite: true`; HTTP-bridge and native WebSocket requests encode the equivalent marker in `response.create.client_metadata`, and upstream WebSocket handshakes omit the HTTP-only header. Non-native clients cannot opt into the internal contract by supplying the header themselves.
 
 ## Fast Mode and Service Tiers
 

@@ -1353,6 +1353,7 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         seen["access_token"] = access_token
         seen["account_id"] = account_id
+        seen["headers"] = dict(headers)
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_1","usage":'
             '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
@@ -1375,6 +1376,7 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
     assert event["type"] == "response.completed"
     assert seen["access_token"] == "access-token"
     assert seen["account_id"] == raw_account_id
+    assert "x-openai-internal-codex-responses-lite" not in cast(dict[str, str], seen["headers"])
 
     async with SessionLocal() as session:
         result = await session.execute(
@@ -1389,7 +1391,7 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_forwards_native_codex_headers(async_client, monkeypatch):
+async def test_proxy_responses_forwards_native_codex_responses_lite_payload_and_headers(async_client, monkeypatch):
     email = "stream-headers@example.com"
     raw_account_id = "acc_stream_headers"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -1398,20 +1400,70 @@ async def test_proxy_responses_forwards_native_codex_headers(async_client, monke
     assert response.status_code == 200
 
     seen_headers: dict[str, str] = {}
+    seen_payload: dict[str, object] = {}
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
-        del payload, access_token, account_id, base_url, raise_for_status
+        del access_token, account_id, base_url, raise_for_status
+        seen_payload.update(payload.to_payload())
         seen_headers.update(headers)
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
-    payload = {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "exec",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: /.+/",
+                },
+            }
+        ],
+    }
+    developer_message = {
+        "type": "message",
+        "role": "developer",
+        "content": "Use the supplied execution tool.",
+    }
+    user_message = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Show the working directory."}],
+    }
+    custom_tool_call = {
+        "type": "custom_tool_call",
+        "call_id": "call_exec_1",
+        "name": "exec",
+        "input": "pwd",
+    }
+    custom_tool_call_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call_exec_1",
+        "output": "H:/workspace",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "hi",
+        "input": [
+            additional_tools,
+            developer_message,
+            user_message,
+            custom_tool_call,
+            custom_tool_call_output,
+        ],
+        "stream": True,
+    }
     native_headers = {
         "originator": "Codex Desktop",
         "session_id": "sid-native",
         "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"none"}',
         "x-codex-beta-features": "js_repl,multi_agent",
+        "x-openai-internal-codex-responses-lite": "true",
         "x-request-id": "req_native_headers_123",
     }
 
@@ -1428,7 +1480,17 @@ async def test_proxy_responses_forwards_native_codex_headers(async_client, monke
     assert seen_headers["session_id"] == native_headers["session_id"]
     assert seen_headers["x-codex-turn-metadata"] == native_headers["x-codex-turn-metadata"]
     assert seen_headers["x-codex-beta-features"] == native_headers["x-codex-beta-features"]
+    assert seen_headers["x-openai-internal-codex-responses-lite"] == "true"
     assert seen_headers["x-request-id"] == native_headers["x-request-id"]
+    assert seen_payload["instructions"] == "hi"
+    assert seen_payload["tools"] == []
+    assert seen_payload["input"] == [
+        additional_tools,
+        developer_message,
+        user_message,
+        custom_tool_call,
+        custom_tool_call_output,
+    ]
 
 
 @pytest.mark.asyncio

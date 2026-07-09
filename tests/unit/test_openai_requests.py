@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Mapping, cast
 
 import pytest
@@ -15,6 +16,80 @@ from app.core.openai.requests import (
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
+
+
+def _responses_lite_input_items() -> tuple[list[JsonValue], list[JsonValue]]:
+    additional_tools_before: JsonValue = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "exec",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: /.+/",
+                },
+            }
+        ],
+    }
+    developer_message: JsonValue = {
+        "type": "message",
+        "role": "developer",
+        "content": "Use the supplied execution tool.",
+    }
+    additional_tools_after: JsonValue = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "apply_patch",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": 'start: "PATCH"',
+                },
+            }
+        ],
+    }
+    user_message: JsonValue = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Show the working directory."}],
+    }
+    custom_tool_call: JsonValue = {
+        "type": "custom_tool_call",
+        "call_id": "call_exec_1",
+        "name": "exec",
+        "input": "pwd",
+    }
+    custom_tool_call_output: JsonValue = {
+        "type": "custom_tool_call_output",
+        "call_id": "call_exec_1",
+        "output": "H:/workspace",
+    }
+    return (
+        [
+            additional_tools_before,
+            developer_message,
+            additional_tools_after,
+            user_message,
+            custom_tool_call,
+            custom_tool_call_output,
+        ],
+        deepcopy(
+            [
+                additional_tools_before,
+                developer_message,
+                additional_tools_after,
+                user_message,
+                custom_tool_call,
+                custom_tool_call_output,
+            ]
+        ),
+    )
 
 
 def test_responses_requires_instructions():
@@ -579,6 +654,23 @@ def test_responses_input_system_message_moves_to_instructions():
     assert request.input == [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
+def test_responses_preserves_responses_lite_input_shape_untouched():
+    input_items, expected_input = _responses_lite_input_items()
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "primary",
+            "input": input_items,
+        }
+    )
+
+    dumped = request.to_payload()
+
+    assert dumped["instructions"] == "primary"
+    assert dumped["tools"] == []
+    assert dumped["input"] == expected_input
+
+
 def test_responses_input_system_message_keeps_user_text_parts():
     payload = {
         "model": "gpt-5.1",
@@ -687,6 +779,23 @@ def test_responses_compact_input_system_message_moves_to_instructions():
 
     assert request.instructions == "primary\nsys"
     assert request.input == [{"role": "user", "content": "compact me"}]
+
+
+def test_responses_compact_preserves_responses_lite_input_shape_untouched():
+    input_items, expected_input = _responses_lite_input_items()
+    request = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "primary",
+            "input": input_items,
+        }
+    )
+
+    dumped = request.to_payload()
+
+    assert dumped["instructions"] == "primary"
+    assert "tools" not in dumped
+    assert dumped["input"] == expected_input
 
 
 def test_v1_instructions_merge():
