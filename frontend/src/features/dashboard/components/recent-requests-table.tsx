@@ -85,8 +85,11 @@ function formatRequestCostSummary(request: RequestLog | null): string | null {
   const totalUsd = request.costBreakdown?.totalUsd ?? request.costUsd;
   const segments: string[] = [];
   const cachedInputTokens = request.cachedInputTokens ?? 0;
+  const cacheWriteTokens = request.cacheWriteTokens ?? 0;
   const nonCachedInputTokens =
-    request.inputTokens == null ? null : Math.max(0, request.inputTokens - cachedInputTokens);
+    request.inputTokens == null
+      ? null
+      : Math.max(0, request.inputTokens - cachedInputTokens - cacheWriteTokens);
 
   if (nonCachedInputTokens != null && request.costBreakdown?.inputUsd != null) {
     segments.push(
@@ -97,6 +100,12 @@ function formatRequestCostSummary(request: RequestLog | null): string | null {
   if (request.cachedInputTokens != null && request.costBreakdown?.cachedInputUsd != null) {
     segments.push(
       `${formatCompactNumber(request.cachedInputTokens)} Cached (${formatCurrency(request.costBreakdown.cachedInputUsd)})`,
+    );
+  }
+
+  if (request.cacheWriteTokens != null && request.costBreakdown?.cacheWriteInputUsd != null) {
+    segments.push(
+      `${formatCompactNumber(request.cacheWriteTokens)} Cache write (${formatCurrency(request.costBreakdown.cacheWriteInputUsd)})`,
     );
   }
 
@@ -266,6 +275,11 @@ export function RecentRequestsTable({
                       {request.cachedInputTokens != null && request.cachedInputTokens > 0 && (
                         <div className="text-[11px] text-muted-foreground">
                           {formatCompactNumber(request.cachedInputTokens)} Cached
+                        </div>
+                      )}
+                      {request.cacheWriteTokens != null && request.cacheWriteTokens > 0 && (
+                        <div className="text-[11px] text-muted-foreground">
+                          {formatCompactNumber(request.cacheWriteTokens)} Cache write
                         </div>
                       )}
                     </div>

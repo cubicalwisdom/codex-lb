@@ -681,10 +681,11 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         "instructions": "",
         "client_metadata": {
             "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
-            "ws_request_header_x_openai_internal_codex_responses_lite": "true",
+            "ws_request_header_x_openai_internal_codex_responses_lite": "stale",
         },
         "service_tier": "fast",
         "reasoning": {"effort": "high"},
+        "parallel_tool_calls": True,
         "input": [
             additional_tools,
             developer_message,
@@ -734,6 +735,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
                 "ws_request_header_x_openai_internal_codex_responses_lite": "true",
             },
             "service_tier": "priority",
+            "parallel_tool_calls": False,
             "store": False,
             "include": [],
             "type": "response.create",
@@ -1580,7 +1582,6 @@ def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instanc
         "model": "gpt-5.4",
         "input": "cache me",
         "promptCacheKey": "thread_alias",
-        "promptCacheRetention": "12h",
         "tools": [{"type": "web_search_preview"}],
         "service_tier": "priority",
         "stream": True,
@@ -1755,6 +1756,186 @@ def test_backend_responses_websocket_forwards_previous_response_id(app_instance,
             "previous_response_id": "resp_prev_123",
             "type": "response.create",
         }
+    ]
+
+
+def test_backend_responses_websocket_keeps_interrupted_tool_state_after_zero_input_turn(
+    app_instance,
+    monkeypatch,
+):
+    first_response_id = "resp_ws_zero_input_interrupt"
+    followup_response_id = "resp_ws_zero_input_followup"
+    pending_call_id = "call_custom_zero_input"
+    fake_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": first_response_id, "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.output_item.done",
+                            "item": {
+                                "id": "ctc_zero_input",
+                                "type": "custom_tool_call",
+                                "status": "completed",
+                                "call_id": pending_call_id,
+                                "name": "shell",
+                                "input": "pwd",
+                            },
+                            "output_index": 0,
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": first_response_id,
+                                "status": "completed",
+                                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": followup_response_id, "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": followup_response_id,
+                                "status": "completed",
+                                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+        ],
+    )
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+    ):
+        del self, headers, sticky_key, sticky_kind, prefer_earlier_reset, routing_strategy, model
+        del request_state, api_key, client_send_lock, websocket, reallocate_sticky, sticky_max_age_seconds
+        return SimpleNamespace(id="acct_ws_zero_input_interrupt"), fake_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    interrupted_user_message = {
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>",
+            }
+        ],
+    }
+    first_request = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [],
+        "stream": True,
+    }
+    followup_request = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "previous_response_id": first_response_id,
+        "input": [interrupted_user_message],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers={
+                "Authorization": "Bearer external-token",
+                "session_id": "thread-ws-zero-input-interrupt",
+                "openai-beta": "responses_websockets=2026-02-06",
+            },
+        ) as websocket:
+            websocket.send_text(json.dumps(first_request))
+            first_events = [json.loads(websocket.receive_text()) for _ in range(3)]
+            websocket.send_text(json.dumps(followup_request))
+            second_events = [json.loads(websocket.receive_text()) for _ in range(2)]
+
+    assert [event["type"] for event in first_events] == [
+        "response.created",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
+    upstream_payloads = [json.loads(message) for message in fake_upstream.sent_text]
+    assert upstream_payloads[0]["input"] == []
+    assert upstream_payloads[1]["previous_response_id"] == first_response_id
+    assert upstream_payloads[1]["input"] == [
+        {
+            "type": "custom_tool_call_output",
+            "call_id": pending_call_id,
+            "output": (
+                "Tool call was not executed because the previous turn was interrupted before tool output was "
+                "available."
+            ),
+        },
+        interrupted_user_message,
     ]
 
 

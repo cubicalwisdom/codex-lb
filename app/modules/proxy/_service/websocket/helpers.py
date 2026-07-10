@@ -350,6 +350,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
         request_state.previous_response_id = None
         request_state.proxy_injected_previous_response_id = False
         request_state.fresh_upstream_request_is_retry_safe = False
+        request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
         _refresh_websocket_request_input_fingerprint_from_text(request_state)
     request_text = request_state.request_text
     if not isinstance(request_text, str):
@@ -429,16 +430,35 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
-    if response_id is None or request_state.input_item_count <= 0 or request_state.input_full_fingerprint is None:
+    if response_id is None:
         continuity_state.last_completed_response_id = None
         continuity_state.last_completed_input_count = 0
         continuity_state.last_completed_input_prefix_fingerprint = None
         continuity_state.last_pending_function_call_ids = []
+        continuity_state.last_pending_tool_call_output_types = {}
         return
     continuity_state.last_completed_response_id = response_id
-    continuity_state.last_completed_input_count = request_state.input_item_count
-    continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
+    if request_state.input_item_count > 0 and request_state.input_full_fingerprint is not None:
+        continuity_state.last_completed_input_count = request_state.input_item_count
+        continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
+    else:
+        continuity_state.last_completed_input_count = 0
+        continuity_state.last_completed_input_prefix_fingerprint = None
     continuity_state.last_pending_function_call_ids = list(request_state.pending_function_call_ids)
+    continuity_state.last_pending_tool_call_output_types = dict(request_state.pending_tool_call_output_types)
+
+
+def _record_websocket_responses_lite_acceptance(
+    continuity_state: _WebSocketContinuityState,
+    *,
+    request_state: _WebSocketRequestState,
+) -> None:
+    if request_state.responses_lite_model is None:
+        return
+    continuity_state.responses_lite_model = request_state.responses_lite_model
+    continuity_state.responses_lite_response_id = (
+        request_state.replay_downstream_response_id or request_state.response_id
+    )
 
 
 def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
@@ -581,6 +601,8 @@ def _websocket_precreated_retry_error_code(
         param=error_param,
         message=error_message,
     ):
+        if request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text:
+            return "stream_incomplete"
         return None
     if error_code not in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
         return None
@@ -659,6 +681,7 @@ def _prepare_websocket_request_state_for_auth_replay(
         request_state.preferred_account_id = None
         request_state.proxy_injected_previous_response_id = False
         request_state.fresh_upstream_request_is_retry_safe = False
+        request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
         _refresh_websocket_request_input_fingerprint_from_text(request_state)
     request_text = request_state.request_text
     if not isinstance(request_text, str):

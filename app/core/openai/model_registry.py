@@ -70,9 +70,25 @@ _REASONING_LEVELS_EXTENDED = (
 )
 
 _REASONING_LEVELS_MAX = (
-    *_REASONING_LEVELS_EXTENDED,
-    ReasoningLevel(effort="max", description="Maximum reasoning effort"),
+    ReasoningLevel(effort="low", description="Fast responses with lighter reasoning"),
+    ReasoningLevel(effort="medium", description="Balances speed and reasoning depth for everyday tasks"),
+    ReasoningLevel(effort="high", description="Greater reasoning depth for complex problems"),
+    ReasoningLevel(effort="xhigh", description="Extra high reasoning depth for complex problems"),
+    ReasoningLevel(effort="max", description="Maximum reasoning depth for the hardest problems"),
 )
+
+_REASONING_LEVELS_ULTRA = (
+    *_REASONING_LEVELS_MAX,
+    ReasoningLevel(effort="ultra", description="Maximum reasoning with automatic task delegation"),
+)
+
+_BOOTSTRAP_FAST_SERVICE_TIERS: list[JsonValue] = [
+    {
+        "id": "priority",
+        "name": "Fast",
+        "description": "1.5x speed, increased usage",
+    }
+]
 
 _BOOTSTRAP_AVAILABLE_IN_PLANS = frozenset(
     {
@@ -100,6 +116,27 @@ _BOOTSTRAP_CORE_AVAILABLE_IN_PLANS = frozenset(
     plan for plan in _BOOTSTRAP_AVAILABLE_IN_PLANS if plan not in {"free", "free_workspace", "k12"}
 )
 
+# GPT-5.6 ships to four additional plan tiers upstream
+# (codex-rs/models-manager/models.json at rust-v0.144.1).
+_BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS = frozenset(
+    {
+        *_BOOTSTRAP_AVAILABLE_IN_PLANS,
+        "edu_plus",
+        "edu_pro",
+        "enterprise_cbp_automation",
+        "sci",
+    }
+)
+
+_GPT56_SOL_AVAILABILITY_NUX: dict[str, JsonValue] = {
+    "message": (
+        "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, "
+        "dig into research, produce polished documents, and take on your most "
+        "ambitious work. Sol is highly capable at lower reasoning efforts—try "
+        "starting lower, then turn it up for harder jobs."
+    )
+}
+
 
 def _bootstrap_model(
     slug: str,
@@ -107,6 +144,7 @@ def _bootstrap_model(
     *,
     prefer_websockets: bool,
     minimal_client_version: str | None,
+    description: str | None = None,
     reasoning_levels: tuple[ReasoningLevel, ...] = _REASONING_LEVELS_EXTENDED,
     context_window: int = 272_000,
     input_modalities: tuple[str, ...] = ("text", "image"),
@@ -116,6 +154,7 @@ def _bootstrap_model(
     available_in_plans: frozenset[str] = _BOOTSTRAP_AVAILABLE_IN_PLANS,
     visibility: str = "list",
     shell_type: str = "shell_command",
+    priority: int = 0,
     raw: dict[str, JsonValue] | None = None,
 ) -> UpstreamModel:
     raw_fields: dict[str, JsonValue] = {
@@ -129,7 +168,7 @@ def _bootstrap_model(
     return UpstreamModel(
         slug=slug,
         display_name=display_name,
-        description=display_name,
+        description=description or display_name,
         context_window=context_window,
         input_modalities=input_modalities,
         supported_reasoning_levels=reasoning_levels,
@@ -141,39 +180,93 @@ def _bootstrap_model(
         supports_parallel_tool_calls=True,
         supported_in_api=supported_in_api,
         minimal_client_version=minimal_client_version,
-        priority=0,
+        priority=priority,
         available_in_plans=available_in_plans,
         raw=raw_fields,
     )
+
+
+def _gpt56_raw(
+    *,
+    multi_agent_version: str,
+    availability_nux: dict[str, JsonValue] | None = None,
+) -> dict[str, JsonValue]:
+    """Return Codex 0.144.1 compatibility fields for a GPT-5.6 fallback model.
+
+    The large ``base_instructions`` string and personality-templated
+    ``model_messages`` object are deliberately supplied by the live refresh.
+    """
+    return {
+        "apply_patch_tool_type": "freeform",
+        "web_search_tool_type": "text_and_image",
+        "supports_image_detail_original": True,
+        "truncation_policy": {"mode": "tokens", "limit": 10_000},
+        "tool_mode": "code_mode_only",
+        "multi_agent_version": multi_agent_version,
+        "use_responses_lite": True,
+        "include_skills_usage_instructions": False,
+        "auto_review_model_override": None,
+        "auto_compact_token_limit": None,
+        "comp_hash": "3000",
+        "reasoning_summary_format": "experimental",
+        "default_reasoning_summary": "none",
+        "availability_nux": availability_nux,
+        "upgrade": None,
+        "experimental_supported_tools": [],
+        "supports_search_tool": True,
+        "default_service_tier": None,
+        "service_tiers": _BOOTSTRAP_FAST_SERVICE_TIERS,
+        "additional_speed_tiers": ["fast"],
+    }
 
 
 # Static bundled fallback models used before the first upstream registry refresh.
 # This mirrors Codex's model-manager pattern: ship a conservative catalog so
 # startup/offline paths have usable metadata, then treat the live upstream
 # registry as authoritative once a refresh succeeds. Keep compatibility fields
-# explicit rather than inherited from helper defaults; every slug must exist
-# upstream, and live upstream data always takes precedence once available.
+# explicit rather than inherited from helper defaults; every slug must be a
+# real upstream slug. ``gpt-5.3-codex`` and ``gpt-5.3-codex-spark`` were
+# dropped from the 0.144.x bundled catalog but remain here for older pinned
+# clients; the upstream backend still serves them.
 _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
     _bootstrap_model(
         "gpt-5.6-sol",
-        "GPT-5.6 Sol",
+        "GPT-5.6-Sol",
+        description="Latest frontier agentic coding model.",
         prefer_websockets=True,
-        minimal_client_version="0.124.0",
-        reasoning_levels=_REASONING_LEVELS_MAX,
+        minimal_client_version="0.144.0",
+        reasoning_levels=_REASONING_LEVELS_ULTRA,
+        context_window=372_000,
+        default_reasoning_level="low",
+        priority=1,
+        available_in_plans=_BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS,
+        raw=_gpt56_raw(multi_agent_version="v2", availability_nux=_GPT56_SOL_AVAILABILITY_NUX),
     ),
     _bootstrap_model(
         "gpt-5.6-terra",
-        "GPT-5.6 Terra",
+        "GPT-5.6-Terra",
+        description="Balanced agentic coding model for everyday work.",
         prefer_websockets=True,
-        minimal_client_version="0.124.0",
-        reasoning_levels=_REASONING_LEVELS_MAX,
+        minimal_client_version="0.144.0",
+        reasoning_levels=_REASONING_LEVELS_ULTRA,
+        context_window=372_000,
+        default_reasoning_level="medium",
+        priority=2,
+        available_in_plans=_BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS,
+        raw=_gpt56_raw(multi_agent_version="v2"),
     ),
     _bootstrap_model(
         "gpt-5.6-luna",
-        "GPT-5.6 Luna",
+        "GPT-5.6-Luna",
+        description="Fast and affordable agentic coding model.",
         prefer_websockets=True,
-        minimal_client_version="0.124.0",
+        minimal_client_version="0.144.0",
         reasoning_levels=_REASONING_LEVELS_MAX,
+        context_window=372_000,
+        default_reasoning_level="medium",
+        priority=3,
+        available_in_plans=_BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS,
+        raw=_gpt56_raw(multi_agent_version="v1"),
     ),
     _bootstrap_model(
         "gpt-5.5",

@@ -479,49 +479,7 @@ async def asyncio_to_thread(func: Callable[[], CodexRestartResult]) -> CodexRest
 
 
 def _restart_codex_desktop_sync() -> CodexRestartResult:
-    script = r'''
-$ErrorActionPreference = "Continue"
-$output = New-Object System.Collections.Generic.List[string]
-$targets = @(Get-Process -Name "Codex" -ErrorAction SilentlyContinue | Where-Object {
-    try {
-        ($_.Path -like "*\WindowsApps\OpenAI.Codex_*") -or ($_.ProcessName -ieq "Codex")
-    } catch {
-        $_.ProcessName -ieq "Codex"
-    }
-})
-if ($targets.Count -eq 0) {
-    $output.Add("No running Codex Desktop processes found.")
-} else {
-    $output.Add("Closing $($targets.Count) Codex Desktop process(es)...")
-}
-foreach ($target in $targets) {
-    try {
-        if ($target.MainWindowHandle -ne 0) {
-            [void]$target.CloseMainWindow()
-        }
-    } catch {}
-}
-Start-Sleep -Milliseconds 1500
-foreach ($target in $targets) {
-    try {
-        if (-not $target.HasExited) {
-            Stop-Process -Id $target.Id -Force -ErrorAction Stop
-        }
-    } catch {
-        $output.Add("Could not close process $($target.Id): $($_.Exception.Message)")
-    }
-}
-try {
-    Start-Process "shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App"
-    $output.Add("Codex Desktop launch requested.")
-    $output -join [Environment]::NewLine
-    exit 0
-} catch {
-    $output.Add("Could not relaunch Codex Desktop: $($_.Exception.Message)")
-    $output -join [Environment]::NewLine
-    exit 1
-}
-'''
+    script = _build_codex_desktop_restart_script()
     completed = subprocess.run(
         [
             "powershell.exe",
@@ -539,6 +497,64 @@ try {
     )
     output = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
     return CodexRestartResult(success=completed.returncode == 0, message=output or "Codex Desktop restart completed")
+
+
+def _build_codex_desktop_restart_script() -> str:
+    return r'''
+$ErrorActionPreference = "Continue"
+$output = New-Object System.Collections.Generic.List[string]
+
+function Get-CodexPackageProcesses {
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $path = [string]$_.ExecutablePath
+        $path -like "*\WindowsApps\OpenAI.Codex_*"
+    })
+}
+
+$targets = @(Get-CodexPackageProcesses)
+$shellTargets = @($targets | Where-Object { $_.Name -ieq "ChatGPT.exe" })
+if ($targets.Count -eq 0) {
+    $output.Add("No running Codex Desktop processes found.")
+} else {
+    $output.Add("Closing Codex Desktop package with $($targets.Count) process(es)...")
+}
+foreach ($target in $shellTargets) {
+    try {
+        $shell = Get-Process -Id $target.ProcessId -ErrorAction Stop
+        if ($shell.MainWindowHandle -ne 0) {
+            [void]$shell.CloseMainWindow()
+            $output.Add("Close requested for ChatGPT.exe shell $($target.ProcessId).")
+        }
+    } catch {
+        $output.Add("Could not request shell close for process $($target.ProcessId): $($_.Exception.Message)")
+    }
+}
+Start-Sleep -Milliseconds 2000
+
+$remaining = @(
+    Get-CodexPackageProcesses | Sort-Object @{
+        Expression = { if ($_.Name -ieq "ChatGPT.exe") { 1 } else { 0 } }
+    }
+)
+foreach ($target in $remaining) {
+    try {
+        Stop-Process -Id $target.ProcessId -Force -ErrorAction Stop
+        $output.Add("Stopped remaining package process $($target.Name) $($target.ProcessId).")
+    } catch {
+        $output.Add("Could not close package process $($target.ProcessId): $($_.Exception.Message)")
+    }
+}
+try {
+    Start-Process "shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App"
+    $output.Add("Codex Desktop launch requested.")
+    $output -join [Environment]::NewLine
+    exit 0
+} catch {
+    $output.Add("Could not relaunch Codex Desktop: $($_.Exception.Message)")
+    $output -join [Environment]::NewLine
+    exit 1
+}
+'''
 
 
 def _validate_auth_json(data: dict[str, Any]) -> None:

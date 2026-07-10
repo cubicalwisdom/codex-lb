@@ -48,7 +48,13 @@ class ResponseUsageDetails(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     cached_tokens: StrictInt | None = None
+    cache_write_tokens: StrictInt | None = None
     reasoning_tokens: StrictInt | None = None
+
+    @field_validator("cache_write_tokens")
+    @classmethod
+    def _clamp_cache_write_tokens(cls, value: int | None) -> int | None:
+        return max(0, value) if value is not None else None
 
 
 class ResponseUsage(BaseModel):

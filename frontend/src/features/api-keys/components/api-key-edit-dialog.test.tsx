@@ -426,6 +426,28 @@ describe("ApiKeyEditDialog", () => {
     expect(onSubmit.mock.calls[0][0].trafficClass).toBe("opportunistic");
   });
 
+  it("offers and submits max reasoning", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey()}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: /enforced reasoning/i }));
+    await user.click(await screen.findByRole("option", { name: "Max" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].enforcedReasoningEffort).toBe("max");
+  });
+
   it("shows the stored traffic class value", () => {
     renderWithProviders(
       <ApiKeyEditDialog

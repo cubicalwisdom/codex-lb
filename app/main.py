@@ -126,6 +126,7 @@ async def lifespan(app: FastAPI):
     ring_service = None
     heartbeat_task: asyncio.Task[None] | None = None
     instance_id = None
+    background_response_manager = None
 
     startup_module._startup_complete = False
     startup_module.reset_bridge_registration()
@@ -141,6 +142,16 @@ async def lifespan(app: FastAPI):
         init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint, app=app)
     await init_db()
     init_background_db()
+    from app.modules.responses_lifecycle.runtime import get_background_response_manager
+    from app.modules.responses_lifecycle.service import mark_stranded_responses_failed
+
+    background_response_manager = get_background_response_manager()
+    recovered_background_responses = await mark_stranded_responses_failed()
+    if recovered_background_responses:
+        logger.warning(
+            "Marked stranded background responses failed during startup count=%d",
+            recovered_background_responses,
+        )
     _auto_bootstrap_token = await ensure_auto_bootstrap_token()
     if _auto_bootstrap_token:
         log_bootstrap_token(logger, _auto_bootstrap_token)
@@ -274,6 +285,10 @@ async def lifespan(app: FastAPI):
         drained = await shutdown_state.wait_for_in_flight_drain(timeout_seconds=settings.shutdown_drain_timeout_seconds)
         if not drained:
             logger.warning("Drain timeout reached, proceeding with shutdown")
+
+        if background_response_manager is not None:
+            await background_response_manager.stop()
+            await mark_stranded_responses_failed()
 
         proxy_service = getattr(app.state, "proxy_service", None)
         if proxy_service is not None and hasattr(proxy_service, "mark_http_bridge_draining"):

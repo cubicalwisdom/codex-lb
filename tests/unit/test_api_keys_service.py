@@ -1600,6 +1600,35 @@ async def test_record_usage_cost_limit_uses_service_tier_pricing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_usage_cost_limit_prices_gpt_5_6_cache_writes() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="cache-write-cost-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=100_000_000),
+            ],
+        )
+    )
+
+    await service.record_usage(
+        created.id,
+        model="gpt-5.6",
+        input_tokens=1_000_000,
+        output_tokens=0,
+        cached_input_tokens=200_000,
+        cache_write_tokens=100_000,
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    cost_limit = next(lim for lim in limits if lim.limit_type == LimitType.COST_USD)
+    assert cost_limit.current_value == 4_225_000
+
+
+@pytest.mark.asyncio
 async def test_record_usage_cost_limit_uses_legacy_gpt_5_priority_pricing() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)

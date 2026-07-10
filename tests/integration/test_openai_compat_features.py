@@ -223,7 +223,7 @@ async def test_v1_responses_forwards_include_logprobs(async_client, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_preserves_prompt_cache_controls(async_client, monkeypatch):
+async def test_v1_responses_preserves_prompt_cache_key(async_client, monkeypatch):
     await _import_account(async_client, "acc_prompt_cache_v1", "prompt-cache-v1@example.com")
 
     seen = {}
@@ -238,7 +238,6 @@ async def test_v1_responses_preserves_prompt_cache_controls(async_client, monkey
         "model": "gpt-5.2",
         "input": "cache me",
         "prompt_cache_key": "thread_123",
-        "prompt_cache_retention": "4h",
     }
     resp = await async_client.post("/v1/responses", json=payload)
     assert resp.status_code == 200
@@ -262,7 +261,6 @@ async def test_v1_responses_normalizes_prompt_cache_aliases(async_client, monkey
         "model": "gpt-5.2",
         "input": "cache me",
         "promptCacheKey": "thread_alias",
-        "promptCacheRetention": "12h",
     }
     resp = await async_client.post("/v1/responses", json=payload)
     assert resp.status_code == 200
@@ -326,22 +324,76 @@ async def test_v1_responses_rejects_invalid_include(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_coerces_store_true_to_false(async_client):
-    """store=true should be silently coerced to false (not rejected) so the
-    bridge path can later override it on the upstream payload."""
-    payload = {"model": "gpt-5.2", "input": "hi", "store": True}
+@pytest.mark.parametrize("truncation", ["auto", "disabled"])
+async def test_v1_responses_rejects_unavailable_truncation(async_client, truncation):
+    payload = {"model": "gpt-5.2", "input": "hi", "truncation": truncation}
     resp = await async_client.post("/v1/responses", json=payload)
-    # 503 means it passed validation (no 400) but there are no upstream accounts in test
-    assert resp.status_code != 400
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "unsupported_parameter"
+    assert resp.json()["error"]["param"] == "truncation"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("truncation", ["auto", "disabled"])
-async def test_v1_responses_accepts_truncation(async_client, truncation):
-    payload = {"model": "gpt-5.2", "input": "hi", "truncation": truncation}
-    resp = await async_client.post("/v1/responses", json=payload)
-    # 503 means it passed validation (no 400) but there are no upstream accounts in test
-    assert resp.status_code != 400
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize(
+    ("continuity_field", "continuity_value"),
+    [("previous_response_id", "resp_1"), ("conversation", "conv_1")],
+)
+async def test_responses_accepts_continuation_without_new_input(
+    async_client, path, continuity_field, continuity_value
+):
+    response = await async_client.post(
+        path,
+        json={"model": "gpt-5.2", continuity_field: continuity_value},
+    )
+
+    assert response.status_code != 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("background", True),
+        ("store", True),
+        ("max_output_tokens", 1024),
+        ("promptCacheRetention", "24h"),
+        ("temperature", 0.2),
+        ("truncation", "auto"),
+    ],
+)
+async def test_responses_rejects_unavailable_controls_with_exact_parameter(
+    async_client, path, field, value
+):
+    response = await async_client.post(path, json={"model": "gpt-5.2", "input": "hi", field: value})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_parameter"
+    assert response.json()["error"]["param"] == field
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_output_tokens", 1024),
+        ("promptCacheRetention", "24h"),
+        ("temperature", 0.2),
+        ("truncation", "auto"),
+    ],
+)
+async def test_v1_responses_still_rejects_unavailable_generation_controls(
+    async_client, field, value
+):
+    response = await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.2", "input": "hi", field: value},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_parameter"
+    assert response.json()["error"]["param"] == field
 
 
 @pytest.mark.asyncio

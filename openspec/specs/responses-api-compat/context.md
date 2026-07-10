@@ -10,15 +10,18 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
 - **Responses as canonical wire format:** Internally we treat Responses as the source of truth to avoid divergent streaming semantics.
 - **Strict validation:** Required fields and mutually exclusive fields are enforced up front to match official client expectations.
-- **Cursor alias compatibility:** Cursor UI model labels may append reasoning or speed suffixes to GPT-5 slugs; those are normalized to canonical upstream fields before forwarding.
-- **Responses Lite input envelope:** Codex GPT-5.6 Responses Lite sends custom tool declarations as `additional_tools` followed by a developer instruction message inside `input`. The complete ordered envelope is the protocol, so request normalization skips instruction lifting whenever `additional_tools` is present.
+- **Cursor alias compatibility:** Cursor UI model labels may append recognized reasoning or speed suffixes to GPT-5 slugs, including Sol/Terra/Luna; those are normalized to canonical upstream fields before forwarding. `max` and `ultra` are reasoning values, not model-suffix tokens.
+- **Responses Lite input envelope:** Codex GPT-5.6 Responses Lite sends custom tool declarations as `additional_tools` followed by a developer instruction message inside `input`. The body is authoritative, so request normalization preserves the complete ordered envelope and derives the reserved transport marker after model/API-key policy. Marker-only reuse requires the most recently accepted downstream-visible Lite response id for the same effective model. Every selected Lite wire payload forces `parallel_tool_calls=false`, including owner-forward, reconnect, fresh full-resend, and replay bodies; a non-Lite payload keeps the client's value.
+- **Future protocol directives:** Typed non-message system/developer objects stay in `input` byte-identically, bypass message sanitization, and remain compact-trim anchors. Only typeless or `type: message` instruction messages are hoisted.
+- **Interrupted tool continuity:** Function, custom, and apply-patch calls retain their required output type. Missing outputs are synthesized before bridge preparation so size, fingerprint, stored-context, and budget accounting match the forwarded payload. Remote-owner failover can recover from local pending state; when call ids exist only in remote memory, the local retry remains unchanged and any rejection is masked as retryable continuity loss.
+- **GPT-5.6 ultra is client-plane metadata:** Sol and Terra may advertise and persist `ultra`, but outbound Responses policy sends upstream `max`. Direct `max` and `xhigh` remain unchanged.
 - **No truncation support:** Requests that include `truncation` are rejected because upstream does not support it.
-- **Compact as a separate contract:** Standalone compact is treated as a canonical opaque context-window contract, not as a variant of buffered normal `/responses`.
+- **Compact as a separate contract:** Standalone compact is treated as a canonical opaque context-window contract, not as a variant of buffered normal `/responses`. Compact serialization removes full-response `tools` and `tool_choice`, but explicitly sends `parallel_tool_calls=false` because the upstream Responses Lite compact validator rejects the older missing-field shape.
 
 ## Constraints
 
 - Upstream limitations determine available modalities, tool output, and overflow handling.
-- `store=true` is rejected; responses are not persisted.
+- Public `/v1` routes support locally persisted stored/background Responses and Conversations; the private native route remains constrained to the upstream-native request contract.
 - `include` values must be on the documented allowlist.
 - `truncation` is rejected.
 - `previous_response_id` is forwarded when `conversation` is absent, but the `conversation + previous_response_id` conflict remains rejected.
@@ -33,7 +36,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - `/v1/responses/compact` is supported only when the upstream implements it.
 - `prompt_cache_key` affinity on OpenAI-style routes is intentionally bounded by a dashboard-managed freshness window, unlike durable backend `session_id` or dashboard sticky-thread routing.
 - Codex-native direct websocket `/backend-api/codex/responses` treats upstream `previous_response_id` as an ephemeral anchor. If that anchor goes stale, the proxy must mask raw `previous_response_not_found` details and emit a sanitized `codex_previous_response_stale` classifier so compatible Codex clients can soft-reset and retry without `previous_response_id`.
-- The Responses Lite marker is native Codex transport metadata. Direct and fallback HTTP/compact requests emit `x-openai-internal-codex-responses-lite: true`; HTTP-bridge and native WebSocket requests encode the equivalent marker in `response.create.client_metadata`, and upstream WebSocket handshakes omit the HTTP-only header. Non-native clients cannot opt into the internal contract by supplying the header themselves.
+- The Responses Lite marker is native Codex transport metadata. Direct and fallback HTTP/compact requests emit `x-openai-internal-codex-responses-lite: true`; HTTP-bridge and native WebSocket requests encode the equivalent marker in `response.create.client_metadata`, and upstream WebSocket handshakes omit the HTTP-only header. Non-native clients cannot opt in by supplying the header. Fresh full-resend replay drops marker-only trust unless its own body still contains `additional_tools`; transparent suppressed-created replay keeps continuity on the downstream-visible response id. Final request-frame serializers reapply the Lite `parallel_tool_calls=false` invariant so recovery cannot restore a client's incompatible `true` value.
 
 ## Fast Mode and Service Tiers
 
@@ -86,6 +89,60 @@ To verify a completed Fast Mode request:
 This distinction matters for quota and cost accounting: codex-lb prices the
 request from the effective billable `serviceTier`, not from the requested tier
 when upstream reports a different actual tier.
+
+## Stored Responses and Conversations
+
+The public `/v1` surface locally implements the OpenAI resource lifecycle that
+the ChatGPT-backed Codex upstream does not expose. `store=true` persists a
+terminal synchronous or streamed response, while `background=true` creates a
+durable queued record and runs the existing Codex-LB execution path in an
+application-owned task. The response can then be retrieved, cancelled while
+active, deleted after it is terminal, and inspected through its input-items
+list.
+
+Resources are scoped to the downstream Codex-LB API key. Knowing an id from a
+different key does not allow retrieval, deletion, cancellation, input-item
+listing, or continuation through that local record. When API-key enforcement
+is disabled, resources share the explicit local-anonymous scope.
+
+Conversations are also local durable resources. Existing ordered conversation
+items are expanded before new input for the private upstream request. A
+successful response then appends its new input and output items to the local
+conversation. The local `conv_*` id is not forwarded to ChatGPT as though it
+were an upstream conversation resource.
+
+Background tasks do not survive a process restart. Startup recovery converts
+stranded `queued` or `in_progress` records to a retrievable failed response
+with `background_worker_restarted`. Graceful shutdown cancels and awaits owned
+tasks before database and HTTP-client teardown. In a multi-replica deployment,
+cancellation must reach the instance that owns the active task; the portable
+single-instance deployment does this naturally.
+
+`POST /v1/responses/input_tokens` uses a deterministic local tokenizer for
+visible text/tool JSON and identifies the result with
+`x-codex-lb-token-count: local-compatible`. It is a context-sizing aid, not an
+upstream billing claim. File/image references and unresolved upstream
+`previous_response_id` context return an explicit 400 because exact local
+counting would be false precision.
+
+Current limitations remain explicit:
+
+- `background=true` uses polling and therefore requires `stream=false`.
+- stored-response retrieval with `stream=true` is not replayed as SSE.
+- sampling, output-token-limit, safety identifier, user, and prompt-cache
+  retention controls that the private upstream cannot honor still return
+  `unsupported_parameter`.
+- hosted tool availability remains model/upstream dependent even when the
+  request schema accepts the tool declaration.
+
+Example background flow:
+
+```text
+POST /v1/responses {"model":"gpt-5.6-sol","input":"work","background":true}
+-> {"id":"resp_local...","status":"queued","background":true}
+GET /v1/responses/resp_local...
+-> {"id":"resp_local...","status":"completed",...}
+```
 
 ## Include Allowlist (Reference)
 

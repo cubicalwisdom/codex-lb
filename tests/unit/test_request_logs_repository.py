@@ -66,6 +66,54 @@ async def test_add_log_persists_request_kind(db_setup) -> None:
 
 
 @pytest.mark.asyncio
+async def test_add_log_persists_cache_write_tokens_and_prices_them(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        saved = await repo.add_log(
+            account_id=None,
+            request_id="req_cache_write",
+            model="gpt-5.6-sol",
+            input_tokens=1_000,
+            output_tokens=500,
+            cached_input_tokens=200,
+            cache_write_tokens=100,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+        )
+
+        persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
+        assert persisted is not None
+        assert persisted.cache_write_tokens == 100
+        assert persisted.cost_usd == pytest.approx(0.019225)
+
+
+@pytest.mark.asyncio
+async def test_add_log_clamps_negative_cache_write_tokens_before_persisting(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        saved = await repo.add_log(
+            account_id=None,
+            request_id="req_negative_cache_write",
+            model="gpt-5.6-sol",
+            input_tokens=1_000,
+            output_tokens=0,
+            cache_write_tokens=-7,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+        )
+
+        persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
+        assert persisted is not None
+        assert persisted.cache_write_tokens == 0
+
+
+@pytest.mark.asyncio
 async def test_find_latest_account_id_for_response_id_prefers_session_then_falls_back_to_api_key_scope() -> None:
     session = AsyncMock()
     repo = RequestLogsRepository(session)

@@ -206,6 +206,7 @@ class RequestLog(Base):
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_write_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -1016,6 +1017,70 @@ class HttpBridgeSessionAlias(Base):
             "api_key_scope",
             name="uq_http_bridge_session_aliases_alias",
         ),
+    )
+
+
+class StoredResponse(Base):
+    __tablename__ = "stored_responses"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    upstream_response_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    background: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    request_json: Mapped[str] = mapped_column(Text, nullable=False)
+    input_items_json: Mapped[str] = mapped_column(Text, nullable=False)
+    response_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    completed_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        Index("idx_stored_responses_scope_created", "api_key_scope", "created_at"),
+        Index("idx_stored_responses_scope_upstream", "api_key_scope", "upstream_response_id"),
+    )
+
+
+class StoredConversation(Base):
+    __tablename__ = "stored_conversations"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default=text("'{}'"))
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    items: Mapped[list["StoredConversationItem"]] = relationship(
+        "StoredConversationItem",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (Index("idx_stored_conversations_scope_created", "api_key_scope", "created_at"),)
+
+
+class StoredConversationItem(Base):
+    __tablename__ = "stored_conversation_items"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("stored_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    item_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    conversation: Mapped[StoredConversation] = relationship(
+        "StoredConversation",
+        back_populates="items",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "sequence", name="uq_stored_conversation_items_sequence"),
+        Index("idx_stored_conversation_items_conversation_sequence", "conversation_id", "sequence"),
     )
 
 

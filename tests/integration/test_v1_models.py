@@ -8,6 +8,9 @@ from app.core.types import JsonValue
 pytestmark = pytest.mark.integration
 
 BOOTSTRAP_MODEL_SLUGS = {
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
@@ -35,6 +38,9 @@ EXPECTED_CORE_MODEL_PLANS = {
 }
 
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.6-sol": "0.144.0",
+    "gpt-5.6-terra": "0.144.0",
+    "gpt-5.6-luna": "0.144.0",
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -42,6 +48,122 @@ EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
     "gpt-5.3-codex-spark": "0.100.0",
     "gpt-5.2": "0.0.1",
     "codex-auto-review": "0.98.0",
+}
+
+EXPECTED_GPT56_AVAILABLE_IN_PLANS = [
+    "business",
+    "edu",
+    "edu_plus",
+    "edu_pro",
+    "education",
+    "enterprise",
+    "enterprise_cbp_automation",
+    "enterprise_cbp_usage_based",
+    "finserv",
+    "free",
+    "free_workspace",
+    "go",
+    "hc",
+    "k12",
+    "plus",
+    "pro",
+    "prolite",
+    "quorum",
+    "sci",
+    "self_serve_business_usage_based",
+    "team",
+]
+
+EXPECTED_GPT56_REASONING_LEVELS_MAX = [
+    {"effort": "low", "description": "Fast responses with lighter reasoning"},
+    {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
+    {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+    {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
+    {"effort": "max", "description": "Maximum reasoning depth for the hardest problems"},
+]
+EXPECTED_GPT56_REASONING_LEVELS_ULTRA = [
+    *EXPECTED_GPT56_REASONING_LEVELS_MAX,
+    {"effort": "ultra", "description": "Maximum reasoning with automatic task delegation"},
+]
+
+EXPECTED_GPT56_COMMON_ENTRY: dict[str, JsonValue] = {
+    "base_instructions": "",
+    "supported_in_api": True,
+    "minimal_client_version": "0.144.0",
+    "supports_reasoning_summaries": True,
+    "support_verbosity": True,
+    "default_verbosity": "low",
+    "supports_parallel_tool_calls": True,
+    "context_window": 372_000,
+    "input_modalities": ["text", "image"],
+    "available_in_plans": EXPECTED_GPT56_AVAILABLE_IN_PLANS,
+    "prefer_websockets": True,
+    "visibility": "list",
+    "shell_type": "shell_command",
+    "max_context_window": 372_000,
+    "apply_patch_tool_type": "freeform",
+    "web_search_tool_type": "text_and_image",
+    "supports_image_detail_original": True,
+    "truncation_policy": {"mode": "tokens", "limit": 10_000},
+    "tool_mode": "code_mode_only",
+    "use_responses_lite": True,
+    "include_skills_usage_instructions": False,
+    "auto_review_model_override": None,
+    "auto_compact_token_limit": None,
+    "comp_hash": "3000",
+    "reasoning_summary_format": "experimental",
+    "default_reasoning_summary": "none",
+    "upgrade": None,
+    "experimental_supported_tools": [],
+    "supports_search_tool": True,
+    "default_service_tier": None,
+    "service_tiers": [
+        {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
+    ],
+    "additional_speed_tiers": ["fast"],
+}
+
+EXPECTED_GPT56_MODEL_ENTRIES: dict[str, dict[str, JsonValue]] = {
+    "gpt-5.6-sol": {
+        **EXPECTED_GPT56_COMMON_ENTRY,
+        "slug": "gpt-5.6-sol",
+        "display_name": "GPT-5.6-Sol",
+        "description": "Latest frontier agentic coding model.",
+        "default_reasoning_level": "low",
+        "supported_reasoning_levels": EXPECTED_GPT56_REASONING_LEVELS_ULTRA,
+        "priority": 1,
+        "multi_agent_version": "v2",
+        "availability_nux": {
+            "message": (
+                "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, "
+                "dig into research, produce polished documents, and take on your most "
+                "ambitious work. Sol is highly capable at lower reasoning efforts—try "
+                "starting lower, then turn it up for harder jobs."
+            )
+        },
+    },
+    "gpt-5.6-terra": {
+        **EXPECTED_GPT56_COMMON_ENTRY,
+        "slug": "gpt-5.6-terra",
+        "display_name": "GPT-5.6-Terra",
+        "description": "Balanced agentic coding model for everyday work.",
+        "default_reasoning_level": "medium",
+        "supported_reasoning_levels": EXPECTED_GPT56_REASONING_LEVELS_ULTRA,
+        "priority": 2,
+        "multi_agent_version": "v2",
+        "availability_nux": None,
+    },
+    "gpt-5.6-luna": {
+        **EXPECTED_GPT56_COMMON_ENTRY,
+        "slug": "gpt-5.6-luna",
+        "display_name": "GPT-5.6-Luna",
+        "description": "Fast and affordable agentic coding model.",
+        "default_reasoning_level": "medium",
+        "supported_reasoning_levels": EXPECTED_GPT56_REASONING_LEVELS_MAX,
+        "priority": 3,
+        "multi_agent_version": "v1",
+        "availability_nux": None,
+    },
 }
 
 
@@ -120,6 +242,39 @@ async def test_v1_models_list(async_client):
 
 
 @pytest.mark.asyncio
+async def test_v1_models_with_client_version_returns_codex_catalog(async_client):
+    await _populate_test_registry()
+
+    response = await async_client.get("/v1/models", params={"client_version": "0.144.1"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["object"] == "list"
+    model_slugs = {entry["slug"] for entry in payload["models"]}
+    data_ids = {entry["id"] for entry in payload["data"]}
+    assert model_slugs == data_ids == {"gpt-5.2", "gpt-5.3-codex"}
+    assert all(entry["object"] == "model" for entry in payload["data"])
+    assert all(entry["owned_by"] == "codex-lb" for entry in payload["data"])
+
+    codex_response = await async_client.get("/backend-api/codex/models")
+    assert codex_response.status_code == 200
+    assert payload == codex_response.json()
+
+
+@pytest.mark.asyncio
+async def test_v1_models_with_empty_client_version_keeps_openai_shape(async_client):
+    await _populate_test_registry()
+
+    response = await async_client.get("/v1/models?client_version=")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["object"] == "list"
+    assert "data" in payload
+    assert "models" not in payload
+
+
+@pytest.mark.asyncio
 async def test_v1_models_uses_bootstrap_models_when_registry_not_populated(async_client):
     registry = get_model_registry()
     registry._snapshot = None
@@ -144,6 +299,9 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     assert set(entries) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
     for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
         assert entries[slug]["minimal_client_version"] == expected_version
+
+    for slug, expected in EXPECTED_GPT56_MODEL_ENTRIES.items():
+        assert entries[slug] == expected
 
     gpt54 = entries["gpt-5.4"]
     assert gpt54["minimal_client_version"] == "0.98.0"
@@ -312,6 +470,50 @@ async def test_backend_codex_models_filters_disallowed_models(async_client):
 
 
 @pytest.mark.asyncio
+async def test_v1_models_codex_negotiation_preserves_api_key_filtering(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model("gpt-5.2", base_instructions="allowed"),
+        _make_upstream_model("gpt-5.3-codex", base_instructions="blocked"),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "codex-negotiated-restricted",
+            "allowedModels": ["gpt-5.2"],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.get(
+        "/v1/models",
+        params={"client_version": "0.144.1"},
+        headers={"Authorization": f"Bearer {key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    entries = payload["models"]
+    assert [entry["slug"] for entry in entries] == ["gpt-5.2"]
+    assert entries[0]["base_instructions"] == "allowed"
+    assert [entry["id"] for entry in payload["data"]] == ["gpt-5.2"]
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_rewrites_visibility_when_opted_in(async_client):
     registry = get_model_registry()
     models = [
@@ -357,10 +559,12 @@ async def test_backend_codex_models_rewrites_visibility_when_opted_in(async_clie
     resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
     assert resp.status_code == 200
 
-    entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+    payload = resp.json()
+    entries = {entry["slug"]: entry for entry in payload["models"]}
     assert set(entries) == {"gpt-5.2", "gpt-5.3-codex"}
     assert entries["gpt-5.2"]["visibility"] == "list"
     assert entries["gpt-5.3-codex"]["visibility"] == "hide"
+    assert [entry["id"] for entry in payload["data"]] == ["gpt-5.2"]
 
 
 @pytest.mark.asyncio
@@ -410,10 +614,12 @@ async def test_backend_codex_models_visibility_allowlist_respects_enforced_model
     resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
     assert resp.status_code == 200
 
-    entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+    payload = resp.json()
+    entries = {entry["slug"]: entry for entry in payload["models"]}
     assert set(entries) == {"gpt-5.2", "gpt-5.3-codex"}
     assert entries["gpt-5.2"]["visibility"] == "hide"
     assert entries["gpt-5.3-codex"]["visibility"] == "list"
+    assert [entry["id"] for entry in payload["data"]] == ["gpt-5.3-codex"]
 
 
 @pytest.mark.asyncio
@@ -524,6 +730,30 @@ async def test_backend_codex_models_preserves_original_flow_without_allowlist(as
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_models_preserves_upstream_extension_fields(async_client):
+    registry = get_model_registry()
+    model_messages: dict[str, JsonValue] = {"pragmatic": "Use the pragmatic personality."}
+    future_capability: dict[str, JsonValue] = {"enabled": True, "modes": ["next"]}
+    model = _make_upstream_model(
+        "gpt-5.6-sol",
+        raw={
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "model_messages": model_messages,
+            "future_capability": future_capability,
+        },
+    )
+    await registry.update({"plus": [model], "pro": [model]})
+
+    response = await async_client.get("/backend-api/codex/models")
+
+    assert response.status_code == 200
+    entry = response.json()["models"][0]
+    assert entry["model_messages"] == model_messages
+    assert entry["future_capability"] == future_capability
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_includes_supported_in_api_false_models(async_client):
     registry = get_model_registry()
     models = [
@@ -572,8 +802,10 @@ async def test_model_sets_are_consistent_across_api_endpoints(async_client):
 
     dashboard_ids = {item["id"] for item in dashboard.json()["models"]}
     v1_ids = {item["id"] for item in v1.json()["data"]}
-    codex_slugs = {item["slug"] for item in codex.json()["models"]}
-    assert dashboard_ids == v1_ids == codex_slugs
+    codex_payload = codex.json()
+    codex_slugs = {item["slug"] for item in codex_payload["models"]}
+    codex_data_ids = {item["id"] for item in codex_payload["data"]}
+    assert dashboard_ids == v1_ids == codex_slugs == codex_data_ids
 
 
 @pytest.mark.asyncio

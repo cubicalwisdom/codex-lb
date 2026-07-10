@@ -1372,6 +1372,24 @@ export const handlers = [
   http.get("/api/models", () => {
     return HttpResponse.json({
       models: [
+        {
+          id: "gpt-5.6-sol",
+          name: "GPT-5.6-Sol",
+          supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+          defaultReasoningEffort: "low",
+        },
+        {
+          id: "gpt-5.6-terra",
+          name: "GPT-5.6-Terra",
+          supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+          defaultReasoningEffort: "medium",
+        },
+        {
+          id: "gpt-5.6-luna",
+          name: "GPT-5.6-Luna",
+          supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+          defaultReasoningEffort: "medium",
+        },
         { id: "gpt-5.1", name: "GPT 5.1" },
         { id: "gpt-5.1-codex-mini", name: "GPT 5.1 Codex Mini" },
         { id: "gpt-4o-mini", name: "GPT 4o Mini" },

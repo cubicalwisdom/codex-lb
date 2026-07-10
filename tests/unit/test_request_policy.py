@@ -22,12 +22,15 @@ from app.modules.proxy.request_policy import apply_api_key_enforcement, validate
         ("gpt-5.4-mini-high", "gpt-5.4-mini", "high", None),
         ("gpt-5.3-codex-fast", "gpt-5.3-codex", None, "priority"),
         ("gpt-5.1-codex-mini-extra-fast", "gpt-5.1-codex-mini", "high", "priority"),
-        ("gpt-5.6-sol-max-fast", "gpt-5.6-sol", "max", "priority"),
-        ("gpt-5.6-terra-ultra-fast", "gpt-5.6-terra", "max", "priority"),
-        ("gpt-5.6-sol-xhigh-fast", "gpt-5.6-sol", "high", "priority"),
-        ("gpt-5.6-luna-fast", "gpt-5.6-luna", None, "priority"),
+        ("gpt-5.1-codex-max-fast", "gpt-5.1-codex-max", None, "priority"),
         ("gpt-5.5-extra", "gpt-5.5", "high", None),
         ("gpt-5.5-extra-high-fast", "gpt-5.5", "high", "priority"),
+        ("gpt-5.6-sol-extra-high-fast", "gpt-5.6-sol", "high", "priority"),
+        ("gpt-5.6-sol-xhigh", "gpt-5.6-sol", "high", None),
+        ("gpt-5.6-terra-extra-high-fast", "gpt-5.6-terra", "high", "priority"),
+        ("gpt-5.6-terra-medium", "gpt-5.6-terra", "medium", None),
+        ("gpt-5.6-luna-extra-high-fast", "gpt-5.6-luna", "high", "priority"),
+        ("gpt-5.6-luna-low-fast", "gpt-5.6-luna", "low", "priority"),
     ],
 )
 def test_gpt5_cursor_aliases_target_canonical_models(
@@ -84,6 +87,71 @@ def test_unknown_gpt5_suffix_is_not_rewritten() -> None:
     assert request.model == "gpt-5.5-preview"
     assert request.reasoning is None
     assert request.service_tier is None
+
+
+def test_gpt56_max_and_ultra_suffixes_are_not_rewritten() -> None:
+    for model in ("gpt-5.6-sol-ultra", "gpt-5.6-sol-max"):
+        request = ResponsesRequest.model_validate(
+            {
+                "model": model,
+                "instructions": "",
+                "input": [],
+            }
+        )
+
+        apply_api_key_enforcement(request, None)
+
+        assert request.model == model
+        assert request.reasoning is None
+        assert request.service_tier is None
+
+
+@pytest.mark.parametrize(
+    ("requested_effort", "expected_effort"),
+    [("ultra", "max"), ("max", "max"), ("xhigh", "xhigh")],
+)
+def test_reasoning_effort_is_normalized_for_upstream_wire(
+    requested_effort: str,
+    expected_effort: str,
+) -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "reasoning": {"effort": requested_effort},
+        }
+    )
+
+    apply_api_key_enforcement(request, None)
+
+    assert request.reasoning is not None
+    assert request.reasoning.effort == expected_effort
+
+
+def test_api_key_enforced_ultra_is_normalized_for_upstream_wire() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "reasoning": {"effort": "low"},
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-ultra",
+            enforced_model=None,
+            enforced_reasoning_effort="ultra",
+            enforced_service_tier=None,
+        ),
+    )
+
+    apply_api_key_enforcement(request, api_key)
+
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "max"
 
 
 def test_model_access_accepts_allowed_canonical_model_alias() -> None:

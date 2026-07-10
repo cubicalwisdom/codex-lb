@@ -14,6 +14,7 @@ class ModelPrice:
     input_per_1m: float
     output_per_1m: float
     cached_input_per_1m: float | None = None
+    cache_write_input_per_1m: float | None = None
     priority_multiplier: float | None = None
     priority_input_per_1m: float | None = None
     priority_output_per_1m: float | None = None
@@ -32,12 +33,14 @@ class UsageTokens:
     input_tokens: float
     output_tokens: float
     cached_input_tokens: float = 0.0
+    cache_write_tokens: float = 0.0
 
 
 @dataclass(frozen=True)
 class UsageCostBreakdown:
     input_usd: float | None
     cached_input_usd: float | None
+    cache_write_input_usd: float | None
     output_usd: float | None
     total_usd: float | None
 
@@ -60,13 +63,19 @@ def _normalize_usage(usage: UsageTokens | ResponseUsage | None) -> UsageTokens |
         input_tokens = _as_number(usage.input_tokens)
         output_tokens = _as_number(usage.output_tokens)
         cached_tokens = _as_number(usage.cached_input_tokens)
+        cache_write_tokens = _as_number(usage.cache_write_tokens)
         if input_tokens is None or output_tokens is None:
             return None
         cached_tokens = max(0.0, min(cached_tokens or 0.0, input_tokens))
+        cache_write_tokens = max(
+            0.0,
+            min(cache_write_tokens or 0.0, input_tokens - cached_tokens),
+        )
         return UsageTokens(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_input_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
         )
     if not usage:
         return None
@@ -77,13 +86,17 @@ def _normalize_usage(usage: UsageTokens | ResponseUsage | None) -> UsageTokens |
     if input_tokens is None or output_tokens is None:
         return None
     cached_tokens = 0.0
+    cache_write_tokens = 0.0
     if usage.input_tokens_details is not None:
         cached_tokens = _as_number(usage.input_tokens_details.cached_tokens) or 0.0
+        cache_write_tokens = _as_number(usage.input_tokens_details.cache_write_tokens) or 0.0
     cached_tokens = max(0.0, min(cached_tokens, input_tokens))
+    cache_write_tokens = max(0.0, min(cache_write_tokens, input_tokens - cached_tokens))
     return UsageTokens(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=cached_tokens,
+        cache_write_tokens=cache_write_tokens,
     )
 
 
@@ -91,16 +104,19 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
     "gpt-5.6-sol": ModelPrice(
         input_per_1m=5.0,
         cached_input_per_1m=0.5,
+        cache_write_input_per_1m=6.25,
         output_per_1m=30.0,
     ),
     "gpt-5.6-terra": ModelPrice(
         input_per_1m=2.5,
         cached_input_per_1m=0.25,
+        cache_write_input_per_1m=3.125,
         output_per_1m=15.0,
     ),
     "gpt-5.6-luna": ModelPrice(
         input_per_1m=1.0,
         cached_input_per_1m=0.1,
+        cache_write_input_per_1m=1.25,
         output_per_1m=6.0,
     ),
     "gpt-5.5": ModelPrice(
@@ -296,6 +312,7 @@ DEFAULT_MODEL_ALIASES: dict[str, str] = {
     "gpt-5.6-terra*": "gpt-5.6-terra",
     "gpt-5.6-luna*": "gpt-5.6-luna",
     "gpt-5.6-sol*": "gpt-5.6-sol",
+    "gpt-5.6*": "gpt-5.6-sol",
     "gpt-5.5-pro*": "gpt-5.5-pro",
     "gpt-5.5*": "gpt-5.5",
     "gpt-5.4-pro*": "gpt-5.4-pro",
@@ -386,7 +403,7 @@ def _effective_rates(
     price: ModelPrice,
     *,
     service_tier: str | None,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, float]:
     is_long_context = (
         price.long_context_threshold_tokens is not None
         and usage.input_tokens > price.long_context_threshold_tokens
@@ -395,6 +412,9 @@ def _effective_rates(
     )
     input_rate = price.input_per_1m
     cached_rate = price.cached_input_per_1m if price.cached_input_per_1m is not None else input_rate
+    cache_write_rate = (
+        price.cache_write_input_per_1m if price.cache_write_input_per_1m is not None else input_rate
+    )
     output_rate = price.output_per_1m
 
     if _uses_priority_tier(service_tier):
@@ -404,22 +424,30 @@ def _effective_rates(
                 if price.priority_cached_input_per_1m is not None
                 else price.priority_input_per_1m
             )
-            return price.priority_input_per_1m, priority_cached, price.priority_output_per_1m
+            return (
+                price.priority_input_per_1m,
+                priority_cached,
+                price.priority_input_per_1m,
+                price.priority_output_per_1m,
+            )
         if price.priority_multiplier is not None:
             input_rate *= price.priority_multiplier
             cached_rate *= price.priority_multiplier
+            cache_write_rate *= price.priority_multiplier
             output_rate *= price.priority_multiplier
-            return input_rate, cached_rate, output_rate
+            return input_rate, cached_rate, cache_write_rate, output_rate
 
     if _uses_flex_tier(service_tier) and price.flex_input_per_1m is not None and price.flex_output_per_1m is not None:
         input_rate = price.flex_input_per_1m
         cached_rate = price.flex_cached_input_per_1m if price.flex_cached_input_per_1m is not None else input_rate
+        cache_write_rate = input_rate
         output_rate = price.flex_output_per_1m
         if is_long_context:
             input_rate *= 2.0
             cached_rate *= 2.0
+            cache_write_rate *= 2.0
             output_rate *= 1.5
-        return input_rate, cached_rate, output_rate
+        return input_rate, cached_rate, cache_write_rate, output_rate
 
     if is_long_context:
         assert price.long_context_input_per_1m is not None
@@ -428,9 +456,10 @@ def _effective_rates(
         cached_rate = (
             price.long_context_cached_input_per_1m if price.long_context_cached_input_per_1m is not None else input_rate
         )
+        cache_write_rate = input_rate
         output_rate = price.long_context_output_per_1m
 
-    return input_rate, cached_rate, output_rate
+    return input_rate, cached_rate, cache_write_rate, output_rate
 
 
 def calculate_cost_from_usage(
@@ -455,9 +484,12 @@ def calculate_cost_breakdown_from_usage(
     normalized = _normalize_usage(usage)
     if not normalized:
         return None
-    billable_input = max(0.0, normalized.input_tokens - normalized.cached_input_tokens)
+    billable_input = max(
+        0.0,
+        normalized.input_tokens - normalized.cached_input_tokens - normalized.cache_write_tokens,
+    )
 
-    input_rate, cached_rate, output_rate = _effective_rates(
+    input_rate, cached_rate, cache_write_rate, output_rate = _effective_rates(
         normalized,
         price,
         service_tier=service_tier,
@@ -465,14 +497,16 @@ def calculate_cost_breakdown_from_usage(
 
     input_usd = (billable_input / 1_000_000) * input_rate
     cached_input_usd = (normalized.cached_input_tokens / 1_000_000) * cached_rate
+    cache_write_input_usd = (normalized.cache_write_tokens / 1_000_000) * cache_write_rate
     output_usd = (normalized.output_tokens / 1_000_000) * output_rate
 
     if precision is not None:
         input_usd = round(input_usd, precision)
         cached_input_usd = round(cached_input_usd, precision)
+        cache_write_input_usd = round(cache_write_input_usd, precision)
         output_usd = round(output_usd, precision)
 
-    total_usd = input_usd + cached_input_usd + output_usd
+    total_usd = input_usd + cached_input_usd + cache_write_input_usd + output_usd
 
     if precision is not None:
         total_usd = round(total_usd, precision)
@@ -480,6 +514,7 @@ def calculate_cost_breakdown_from_usage(
     return UsageCostBreakdown(
         input_usd=input_usd,
         cached_input_usd=cached_input_usd,
+        cache_write_input_usd=cache_write_input_usd,
         output_usd=output_usd,
         total_usd=total_usd,
     )

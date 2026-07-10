@@ -204,11 +204,13 @@ describe("RequestLogsResponseSchema", () => {
           inputTokens: 8,
           outputTokens: 2,
           cachedInputTokens: 0,
+          cacheWriteTokens: 1,
           reasoningEffort: null,
           costUsd: 0.001,
           costBreakdown: {
             inputUsd: 0.0004,
             cachedInputUsd: 0,
+            cacheWriteInputUsd: 0.0001,
             outputUsd: 0.0006,
             totalUsd: 0.001,
           },
@@ -234,6 +236,8 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.bridgeStage).toBe("owner_forward_status");
     expect(parsed.requests[0]?.inputTokens).toBe(8);
     expect(parsed.requests[0]?.outputTokens).toBe(2);
+    expect(parsed.requests[0]?.cacheWriteTokens).toBe(1);
+    expect(parsed.requests[0]?.costBreakdown?.cacheWriteInputUsd).toBe(0.0001);
     expect(parsed.requests[0]?.costBreakdown?.totalUsd).toBe(0.001);
   });
 
@@ -296,6 +300,7 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.inputTokens).toBeNull();
     expect(parsed.requests[0]?.outputTokens).toBeNull();
+    expect(parsed.requests[0]?.cacheWriteTokens).toBeNull();
     expect(parsed.requests[0]?.failurePhase).toBeNull();
     expect(parsed.requests[0]?.upstreamStatusCode).toBeNull();
     expect(parsed.requests[0]?.costBreakdown).toBeNull();
@@ -370,6 +375,7 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.costBreakdown?.inputUsd).toBe(0.0004);
     expect(parsed.requests[0]?.costBreakdown?.cachedInputUsd).toBeNull();
+    expect(parsed.requests[0]?.costBreakdown?.cacheWriteInputUsd).toBeNull();
     expect(parsed.requests[0]?.costBreakdown?.outputUsd).toBeNull();
     expect(parsed.requests[0]?.costBreakdown?.totalUsd).toBe(0.001);
   });

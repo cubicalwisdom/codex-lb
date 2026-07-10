@@ -264,6 +264,10 @@ def extract_input_image_file_references(input_value: JsonValue) -> list[InputIma
 def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     sanitized_input: list[JsonValue] = []
     for item in input_items:
+        item_mapping = _json_mapping_or_none(item)
+        if item_mapping is not None and _is_preserved_non_message_directive(item_mapping):
+            sanitized_input.append(item)
+            continue
         sanitized_item = _sanitize_interleaved_reasoning_input_item(item)
         if sanitized_item is None:
             continue
@@ -278,7 +282,11 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     if not is_json_list(input_value):
         return data
     if _is_responses_lite_input(input_value):
-        return data
+        if "instructions" in data:
+            return data
+        normalized = dict(data)
+        normalized["instructions"] = ""
+        return normalized
 
     instruction_parts: list[str] = []
     input_items: list[JsonValue] = []
@@ -287,6 +295,10 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
         item_mapping = _json_mapping_or_none(item)
         if item_mapping is None:
             input_items.append(item)
+            continue
+        if _is_preserved_non_message_directive(item_mapping):
+            input_items.append(item)
+            changed = True
             continue
         if not _is_responses_instruction_message_item(item_mapping):
             input_items.append(item)
@@ -331,6 +343,13 @@ def _is_responses_instruction_message_item(item: Mapping[str, JsonValue]) -> boo
         return False
     item_type = item.get("type")
     return item_type is None or item_type == "message"
+
+
+def _is_preserved_non_message_directive(item: Mapping[str, JsonValue]) -> bool:
+    if item.get("role") not in ("system", "developer"):
+        return False
+    item_type = item.get("type")
+    return item_type is not None and item_type != "message"
 
 
 def _merge_responses_instructions(existing: str, extra_parts: list[str]) -> str:
@@ -716,6 +735,7 @@ class ResponsesCompactRequest(BaseModel):
 
 
 _UNSUPPORTED_UPSTREAM_FIELDS = {
+    "background",
     "max_output_tokens",
     "metadata",
     "prompt_cache_retention",
@@ -725,9 +745,6 @@ _UNSUPPORTED_UPSTREAM_FIELDS = {
     "truncation",
     "user",
 }
-
-_REASONING_EFFORT_WIRE_ALIASES = {"ultra": "max"}
-
 
 def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _normalize_openai_compatible_aliases(payload)
@@ -779,7 +796,7 @@ def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJson
     payload.pop("store", None)
     payload.pop("tools", None)
     payload.pop("tool_choice", None)
-    payload.pop("parallel_tool_calls", None)
+    payload["parallel_tool_calls"] = False
     return payload
 
 
@@ -831,11 +848,8 @@ def _normalize_thinking_alias(
         return {"effort": "medium"} if thinking else None
     if isinstance(thinking, str):
         normalized = thinking.strip().lower()
-        if normalized in {"low", "medium", "high", "xhigh", "max"}:
+        if normalized in {"low", "medium", "high", "xhigh", "max", "ultra"}:
             return {"effort": normalized}
-        alias = _REASONING_EFFORT_WIRE_ALIASES.get(normalized)
-        if alias is not None:
-            return {"effort": alias}
         if normalized in {"enabled", "true", "on"}:
             return {"effort": "medium"}
         if normalized in {"disabled", "false", "off"}:
@@ -868,8 +882,7 @@ def _normalize_thinking_alias(
 
 
 def _normalize_reasoning_effort_alias(effort: str) -> str:
-    normalized = effort.strip().lower()
-    return _REASONING_EFFORT_WIRE_ALIASES.get(normalized, normalized)
+    return effort.strip().lower()
 
 
 def _normalize_openai_compatible_aliases(payload: MutableJsonObject) -> None:

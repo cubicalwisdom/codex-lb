@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 
 from app.core.clients.proxy import UpstreamProxyRouteTrace
+from app.core.openai.models import ResponseUsage, ResponseUsageDetails
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
@@ -163,6 +164,7 @@ class FakeRequestLogsRepo:
         error_message: str | None = None,
         requested_at: datetime | None = None,
         cached_input_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         reasoning_effort: str | None = None,
         service_tier: str | None = None,
@@ -202,6 +204,7 @@ class FakeRequestLogsRepo:
                 "error_message": error_message,
                 "requested_at": requested_at,
                 "cached_input_tokens": cached_input_tokens,
+                "cache_write_tokens": cache_write_tokens,
                 "reasoning_tokens": reasoning_tokens,
                 "reasoning_effort": reasoning_effort,
                 "service_tier": service_tier,
@@ -261,6 +264,7 @@ async def test_fake_request_logs_repo_accepts_useragent_fields() -> None:
             "error_message": None,
             "requested_at": None,
             "cached_input_tokens": None,
+            "cache_write_tokens": None,
             "reasoning_tokens": None,
             "reasoning_effort": None,
             "service_tier": None,
@@ -287,6 +291,34 @@ async def test_fake_request_logs_repo_accepts_useragent_fields() -> None:
             "useragent_group": "internal",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_limit_warmup_request_log_preserves_cache_write_tokens() -> None:
+    logs = FakeRequestLogsRepo()
+    service = LimitWarmupService(FakeWarmupRepo(), logs, sender=FakeSender())
+    result = LimitWarmupSendResult(
+        request_id="warmup-cache-write",
+        success=True,
+        latency_ms=12,
+        usage=ResponseUsage(
+            input_tokens=10,
+            output_tokens=2,
+            input_tokens_details=ResponseUsageDetails(
+                cached_tokens=3,
+                cache_write_tokens=2,
+            ),
+        ),
+    )
+
+    await service._record_request_log(
+        account=_account(),
+        model="gpt-5.6-sol",
+        result=result,
+    )
+
+    assert logs.logs[0]["cached_input_tokens"] == 3
+    assert logs.logs[0]["cache_write_tokens"] == 2
 
 
 class FakeSender:

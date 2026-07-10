@@ -54,15 +54,38 @@ async def _reset_db_state():
 
 
 @pytest_asyncio.fixture
-async def app_instance(_reset_db_state, monkeypatch):
+async def isolated_codexneo_sync_service(tmp_path):
+    from app.modules.codexneo.sync import CodexNeoAccountsSyncService
+
+    async def _disabled_codex_auth_command(
+        args: list[str],
+        *,
+        codex_home: str,
+    ) -> tuple[bool, str]:
+        del args, codex_home
+        return False, "Codex auth CLI is disabled in tests"
+
+    return CodexNeoAccountsSyncService(
+        codex_home=tmp_path / "codex-home",
+        data_dir=tmp_path / "codexneo-data",
+        command_runner=_disabled_codex_auth_command,
+    )
+
+
+@pytest_asyncio.fixture
+async def app_instance(_reset_db_state, monkeypatch, isolated_codexneo_sync_service):
     del _reset_db_state
     import app.main as main_module
+    from app.modules.accounts import api as accounts_api
 
     async def _noop_init_db() -> None:
         return None
 
     monkeypatch.setattr(main_module, "init_db", _noop_init_db)
     app = create_app()
+    app.dependency_overrides[accounts_api.get_codexneo_account_sync_service] = (
+        lambda: isolated_codexneo_sync_service
+    )
     return app
 
 

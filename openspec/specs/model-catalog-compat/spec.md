@@ -5,35 +5,23 @@ TBD - created by archiving change populate-bootstrap-model-metadata. Update Purp
 ## Requirements
 ### Requirement: Bootstrap model catalog is available before refresh
 
-Before the first successful upstream model-registry refresh, the system MUST
-serve a conservative static catalog of known Codex model slugs from both
-`GET /v1/models` and `GET /backend-api/codex/models`. This static catalog is a
-bundled fallback for startup/offline paths; refreshed upstream model-registry
-data remains the authoritative source once available. The bootstrap catalog MUST
-include `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
-`gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`,
-`gpt-5.2`, and `codex-auto-review`, and MUST NOT invent unverified variant
-slugs such as `gpt-5.5-pro`.
+Before the first successful upstream model-registry refresh, the system MUST serve a conservative static catalog of known Codex model slugs from both `GET /v1/models` and `GET /backend-api/codex/models`. This static catalog is a bundled fallback for startup/offline paths; refreshed upstream model-registry data remains the authoritative source once available. The bootstrap catalog MUST include `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2`, and `codex-auto-review`, and MUST NOT invent unverified variant slugs such as `gpt-5.5-pro` or a bare `gpt-5.6`. `gpt-5.3-codex` and `gpt-5.3-codex-spark` remain available for older pinned clients even though upstream removed them from the bundled rust-v0.144.x catalog, because the upstream backend still serves them.
 
 #### Scenario: OpenAI-compatible models endpoint serves bootstrap slugs
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **WHEN** a client calls `GET /v1/models`
 - **THEN** the response contains exactly the bootstrap model slugs
-- **AND** the response does not include `gpt-5.5-pro`
+- **AND** the response includes `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`
+- **AND** the response does not include `gpt-5.5-pro` or bare `gpt-5.6`
 
-#### Scenario: Codex-native models endpoint serves bootstrap metadata
-
-- **GIVEN** the model registry has no refreshed upstream snapshot
-- **WHEN** a client calls `GET /backend-api/codex/models`
-- **THEN** entries such as `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `codex-auto-review` include representative upstream metadata including client version, context-window, visibility, modality, plan-availability, and reasoning/verbosity fields where known
-
-#### Scenario: GPT-5.6 bootstrap entries expose current metadata
+#### Scenario: Codex-native models endpoint serves GPT-5.6 bootstrap metadata
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **WHEN** a client calls `GET /backend-api/codex/models`
-- **THEN** `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` are present with websocket-preferred metadata
-- **AND** each entry exposes the known 272000-token backend context window and reasoning levels including `max`
+- **THEN** the GPT-5.6 Sol, Terra, and Luna entries include representative upstream context-window, visibility, speed-tier, and reasoning metadata
+- **AND** Sol and Terra advertise `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`
+- **AND** Luna advertises `low`, `medium`, `high`, `xhigh`, and `max`
 
 ### Requirement: Refreshed upstream model data remains authoritative
 
@@ -110,3 +98,83 @@ When serving `GET /backend-api/codex/models`, the system MUST keep Codex-native 
 - **THEN** `GET /backend-api/codex/models` returns `gpt-5.5.context_window=272000`
 - **AND** it does not replace that field with `400000`
 
+### Requirement: Refreshed Codex model metadata is lossless
+
+When the model fetcher stores a refreshed upstream model entry, it MUST retain every JSON-compatible field supplied by upstream. `GET /backend-api/codex/models` MUST return upstream extension fields that are not replaced by an explicit local typed value or operator override. The service MUST NOT maintain a denylist that removes `model_messages`.
+
+#### Scenario: Personality messages are supplied upstream
+
+- **WHEN** an upstream model entry contains `model_messages` and an otherwise unknown future capability field
+- **THEN** the refreshed registry retains both fields unchanged
+- **AND** `GET /backend-api/codex/models` returns both fields unchanged
+
+### Requirement: GPT-5.6 models remain in bootstrap contract coverage
+
+Bootstrap catalogue regression coverage MUST include `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` with the minimal client versions configured by the runtime.
+
+#### Scenario: Registry has not refreshed
+
+- **WHEN** either model catalogue endpoint uses the bootstrap snapshot
+- **THEN** all three GPT-5.6 model slugs are present
+- **AND** the native entries expose their configured minimal client version
+
+### Requirement: GPT-5.6 bootstrap metadata matches the upstream bundled catalog
+
+The GPT-5.6 bootstrap entries MUST match the metadata codex-lb serves from the Codex rust-v0.144.1 bundled catalog. Each entry MUST carry `context_window` and `max_context_window` of `372000`; `minimal_client_version: "0.144.0"`; `tool_mode: "code_mode_only"`; `use_responses_lite: true`; `apply_patch_tool_type: "freeform"`; `web_search_tool_type: "text_and_image"`; `supports_image_detail_original: true`; `truncation_policy: {"mode": "tokens", "limit": 10000}`; `comp_hash: "3000"`; `reasoning_summary_format: "experimental"`; `default_reasoning_summary: "none"`; `include_skills_usage_instructions: false`; `experimental_supported_tools: []`; `supports_search_tool: true`; `additional_speed_tiers: ["fast"]`; the `priority`/Fast service tier; `shell_type: "shell_command"`; `prefer_websockets: true`; and the upstream plan set including `edu_plus`, `edu_pro`, `enterprise_cbp_automation`, and `sci`. `multi_agent_version` MUST be `v2` for Sol and Terra and `v1` for Luna. Only Sol MUST carry the upstream non-null `availability_nux` message. Sol MUST default to `low` reasoning, while Terra and Luna MUST default to `medium`.
+
+The large upstream `base_instructions` prompt and personality-templated `model_messages` object MUST NOT be bundled in the fallback; the first successful live registry refresh supplies them. Live refreshed data MUST remain authoritative and preserve `model_messages` plus unknown JSON-compatible fields losslessly.
+
+#### Scenario: GPT-5.6 entries expose tool and multi-agent metadata
+
+- **GIVEN** the model registry has no refreshed upstream snapshot
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** all three GPT-5.6 entries carry `tool_mode: "code_mode_only"`, `use_responses_lite: true`, `experimental_supported_tools: []`, and `minimal_client_version: "0.144.0"`
+- **AND** `multi_agent_version` is `v2` for Sol and Terra and `v1` for Luna
+
+#### Scenario: GPT-5.6 entries expose reasoning-summary and plan metadata
+
+- **GIVEN** the model registry has no refreshed upstream snapshot
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** every GPT-5.6 entry carries `default_reasoning_summary: "none"`, `reasoning_summary_format: "experimental"`, and `comp_hash: "3000"`
+- **AND** every GPT-5.6 entry's plans include `edu_plus`, `edu_pro`, `enterprise_cbp_automation`, and `sci`
+- **AND** only Sol carries a non-null `availability_nux` message
+
+### Requirement: Fallback client version covers the bootstrap catalog
+
+The configured fallback Codex client version MUST be greater than or equal to the highest `minimal_client_version` in the bootstrap catalog, so a degraded-startup registry refresh still requests the newest bootstrap models.
+
+#### Scenario: Degraded-startup refresh still requests GPT-5.6
+
+- **GIVEN** live Codex release lookup fails and no version is cached
+- **WHEN** model refresh requests the upstream catalog with the fallback client version
+- **THEN** that version is at least `0.144.0`
+
+### Requirement: Dashboard model metadata exposes supported reasoning efforts
+
+`GET /api/models` MUST expose the supported and default reasoning efforts advertised by each public catalog entry, including `max` and `ultra` when upstream advertises them.
+
+#### Scenario: Dashboard model list exposes GPT-5.6 reasoning efforts
+
+- **GIVEN** Sol advertises `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`
+- **WHEN** a client calls `GET /api/models`
+- **THEN** Sol's `supportedReasoningEfforts` includes `max` and `ultra`
+- **AND** `defaultReasoningEffort` reflects the catalog default
+
+### Requirement: `/v1/models` negotiates the Codex catalog
+
+`GET /v1/models` MUST return the same catalog payload as `GET /backend-api/codex/models` when `client_version` is non-empty, including native `models` entries, `object: "list"`, and OpenAI-compatible `data` entries. Each visible native model admitted by the local compatibility contract MUST have a corresponding `data` item with the same model id; when Codex visibility rewriting is enabled, hidden native entries MUST be absent from `data`. Stable model metadata MUST determine `data[].created` so separate native and negotiated requests remain equal across wall-clock boundaries. Requests without that parameter or with an empty value MUST retain the unchanged OpenAI-compatible list shape. API-key model filtering and visibility rules MUST apply in both negotiated and ordinary shapes.
+
+#### Scenario: Codex client negotiates native metadata through `/v1`
+
+- **WHEN** a client requests `/v1/models?client_version=0.144.1`
+- **THEN** the response equals `/backend-api/codex/models`
+- **AND** it contains `models`, `object: "list"`, and `data`
+- **AND** every visible admitted native slug has a corresponding `data[].id`
+- **AND** a bare or empty-parameter request still contains `object: "list"` and `data` without `models`
+
+#### Scenario: API-key visibility applies to both catalog halves
+
+- **GIVEN** an API key restricts the negotiated catalog to a subset of models
+- **WHEN** it requests `/v1/models?client_version=0.144.1`
+- **THEN** `models` follows the existing Codex filter or list/hide visibility contract
+- **AND** `data` contains only the effectively visible allowed model ids

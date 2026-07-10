@@ -80,6 +80,7 @@ The Accounts page SHALL also allow exporting a selected account as an OpenCode-c
 - **THEN** the dashboard requests a per-account export from the backend
 - **AND** shows copy/download controls for the official OpenCode `auth.json` payload
 - **AND** warns that the payload contains raw account tokens
+
 ### Requirement: Request logs display account plan tier
 When a request log entry is associated with an account, the dashboard request-log API response MUST expose the persisted request-log `planType` snapshot, and the recent-requests table MUST render the plan tier in a visible request-log column or badge.
 
@@ -667,3 +668,36 @@ The reports `ChartTooltip` component SHALL type its props as `Partial<TooltipCon
 - **WHEN** a reports chart passes `<ChartTooltip names={...} formatValue={...} />` via the recharts `<Tooltip content={...}>` prop
 - **THEN** TypeScript compilation succeeds without errors about missing `payload`, `active`, `label`, or `coordinate`
 - **AND** recharts injects those properties at runtime before calling the component
+
+### Requirement: Request detail identifies cache-write usage and cost
+
+The dashboard request-log contract MUST accept nullable cache-write token counts and cache-write dollar cost. Recent-request detail SHALL show cache writes as a category separate from ordinary input and cache reads when the value is present and positive.
+
+#### Scenario: Request contains cache writes
+
+- **WHEN** a request-log row contains positive `cacheWriteTokens` and `cacheWriteInputUsd`
+- **THEN** the recent-request token detail identifies the cache-write token count
+- **AND** the cost summary identifies the cache-write cost separately
+
+#### Scenario: Historical request has no cache-write value
+
+- **WHEN** a historical request-log row has a null cache-write token count
+- **THEN** the request detail remains valid
+- **AND** it does not render a misleading cache-write segment
+
+#### Scenario: Cache-write detail exists without cache-read detail
+
+- **WHEN** a request log contains positive cache-write usage but omits the cache-read counter
+- **THEN** the cost breakdown still identifies ordinary input and cache-write cost separately
+- **AND** the cache-read cost remains zero rather than suppressing the cache-write category
+
+### Requirement: Reasoning controls expose model-supported max and ultra levels
+
+Dashboard model data MUST expose supported and default reasoning efforts. API-key create/edit controls MUST offer `max` and `ultra` when supported and MUST validate those values through the shared frontend schema.
+
+#### Scenario: Operator selects an extended GPT-5.6 effort
+
+- **GIVEN** the model catalog advertises `max` or `ultra`
+- **WHEN** the operator configures an API key in the create or edit dialog
+- **THEN** the advertised effort appears as a selectable option
+- **AND** the submitted schema retains that exact configured value

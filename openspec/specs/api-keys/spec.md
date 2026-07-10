@@ -226,6 +226,7 @@ For fixed-model endpoints such as `/v1/audio/transcriptions` and `/backend-api/t
 - **WHEN** a key has `allowed_models: null` and `apply_to_codex_model: true`
 - **AND** the key calls `GET /backend-api/codex/models`
 - **THEN** the response preserves the original `/backend-api/codex/models` behavior because there is no allowlist to apply
+
 ### Requirement: Weekly token usage tracking
 
 The system SHALL atomically increment `weekly_tokens_used` on the API key record when a proxy request completes with token usage data. The token count MUST be `input_tokens + output_tokens`. If token usage is unavailable (error response), the counter MUST NOT be incremented.
@@ -310,6 +311,7 @@ The create and edit dialogs SHALL expose an `Apply to codex /model` checkbox dir
 #### Scenario: Edit key with stored codex model visibility option
 - **WHEN** an admin opens the edit API key dialog for a key with `apply_to_codex_model: true`
 - **THEN** the `Apply to codex /model` checkbox is shown as checked
+
 ### Requirement: Cost accounting uses model and service-tier pricing
 When computing API key `cost_usd` usage, the system MUST price requests using the resolved model pricing and the authoritative `service_tier` reported by the upstream response when available, falling back to the forwarded request `service_tier` only when the response omits it. Requests sent with non-standard service tiers MUST use the published pricing for the tier actually used instead of falling back to standard-tier pricing.
 
@@ -768,3 +770,51 @@ omit alias-only synthetic IDs so clients see stable model names.
 - **WHEN** a key with `allowed_models: ["gpt-5.4-mini-high"]`, `enforced_model: "gpt-5.4-mini-high"`, and `apply_to_codex_model=true` calls `GET /backend-api/codex/models`
 - **THEN** the canonical `gpt-5.4-mini` entry is visible with `visibility: "list"`
 - **AND** other entries are hidden according to the API key allowlist policy
+
+### Requirement: GPT-5.6 Standard pricing accounts for cache writes
+
+GPT-5.6 Standard short-context pricing MUST separate ordinary input, cache-read input, cache-write input, and output tokens. Cache-write prices per one million tokens MUST be `$6.25` for Sol, `$3.125` for Terra, and `$1.25` for Luna. Long-context, Flex, and API Priority rates are outside this change.
+
+#### Scenario: Sol usage contains reads and writes
+
+- **WHEN** one million `gpt-5.6-sol` input tokens contain 200,000 cache-read tokens and 100,000 cache-write tokens
+- **THEN** 700,000 tokens are charged at the ordinary `$5/M` input rate
+- **AND** 200,000 tokens are charged at the `$0.50/M` cache-read rate
+- **AND** 100,000 tokens are charged at the `$6.25/M` cache-write rate
+
+#### Scenario: Detail counters exceed total input
+
+- **WHEN** cache-read and cache-write detail counters together exceed total input tokens
+- **THEN** each category is clamped so their sum does not exceed total input
+- **AND** ordinary billable input never becomes negative
+
+### Requirement: Generic GPT-5.6 pricing resolves to Sol
+
+The pricing resolver MUST map the exact official `gpt-5.6` alias to `gpt-5.6-sol` and MUST preserve explicit Sol, Terra, and Luna variant resolution.
+
+#### Scenario: Generic alias is priced
+
+- **WHEN** cost accounting receives model `gpt-5.6`
+- **THEN** it uses the `gpt-5.6-sol` Standard price record
+- **AND** it does not fall through to legacy `gpt-5` pricing
+
+### Requirement: GPT-5.6 Codex Fast accounting avoids stacked premiums
+
+For ChatGPT-authenticated GPT-5.6 traffic, cost accounting MUST retain literal token counts and MUST NOT combine API Priority prices with a separate Codex subscription-Fast multiplier. Until an authoritative GPT-5.6 subscription-Fast factor is available, API-equivalent dollar cost MUST use the configured GPT-5.6 Standard price record exactly once; upstream account credit windows remain authoritative for subscription consumption.
+
+#### Scenario: Fast alias is estimated without double-counting
+
+- **WHEN** a `gpt-5.6-sol-fast` request is normalized to the upstream priority service tier
+- **AND** the request contains one million ordinary input tokens
+- **THEN** the API-equivalent input estimate is `$5.00`
+- **AND** the stored input token count remains one million
+
+### Requirement: API-key reasoning policies accept GPT-5.6 max and ultra
+
+API-key creation and update MUST accept `max` and `ultra` reasoning efforts in addition to existing values. An enforced `ultra` request MUST be represented to the user as `ultra` and normalized to the upstream `max` wire value where required by GPT-5.6.
+
+#### Scenario: API key enforces ultra reasoning
+
+- **WHEN** an operator creates or updates an API key with reasoning effort `ultra`
+- **THEN** validation succeeds and the policy is stored
+- **AND** a compatible GPT-5.6 request forwards `max` upstream without losing the configured display value

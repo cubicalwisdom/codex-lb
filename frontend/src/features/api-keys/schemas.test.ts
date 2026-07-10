@@ -6,6 +6,7 @@ import {
   ApiKeySchema,
   ApiKeyUpdateRequestSchema,
   LimitRuleCreateSchema,
+  ModelItemSchema,
 } from "@/features/api-keys/schemas";
 
 const ISO = "2026-01-01T00:00:00+00:00";
@@ -102,6 +103,20 @@ describe("ApiKeyCreateResponseSchema", () => {
   });
 });
 
+describe("ModelItemSchema", () => {
+  it("accepts extended GPT-5.6 reasoning metadata", () => {
+    const parsed = ModelItemSchema.parse({
+      id: "gpt-5.6-sol",
+      name: "GPT-5.6-Sol",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      defaultReasoningEffort: "low",
+    });
+
+    expect(parsed.supportedReasoningEfforts).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(parsed.defaultReasoningEffort).toBe("low");
+  });
+});
+
 describe("ApiKeyCreateRequestSchema", () => {
   it("accepts optional assigned accounts", () => {
     const parsed = ApiKeyCreateRequestSchema.parse({
@@ -119,6 +134,15 @@ describe("ApiKeyCreateRequestSchema", () => {
     });
 
     expect(parsed.trafficClass).toBe("opportunistic");
+  });
+
+  it("accepts extended GPT-5.6 enforced reasoning in create payload", () => {
+    const parsed = ApiKeyCreateRequestSchema.parse({
+      name: "Extended reasoning key",
+      enforcedReasoningEffort: "ultra",
+    });
+
+    expect(parsed.enforcedReasoningEffort).toBe("ultra");
   });
 
   it("rejects invalid traffic class in create payload", () => {
@@ -180,6 +204,14 @@ describe("ApiKeyUpdateRequestSchema", () => {
     });
 
     expect(parsed.trafficClass).toBe("opportunistic");
+  });
+
+  it("accepts extended GPT-5.6 enforced reasoning in update payload", () => {
+    const parsed = ApiKeyUpdateRequestSchema.parse({
+      enforcedReasoningEffort: "max",
+    });
+
+    expect(parsed.enforcedReasoningEffort).toBe("max");
   });
 });
 

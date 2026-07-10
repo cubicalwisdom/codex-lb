@@ -977,6 +977,9 @@ class _StreamingMixin(_StreamingRetryMixin):
             cached_input_tokens = (
                 usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
             )
+            cache_write_tokens = (
+                usage.input_tokens_details.cache_write_tokens if usage and usage.input_tokens_details else None
+            )
             reasoning_tokens = (
                 usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
             )
@@ -986,6 +989,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             settlement.input_tokens = input_tokens
             settlement.output_tokens = output_tokens
             settlement.cached_input_tokens = cached_input_tokens
+            settlement.cache_write_tokens = cache_write_tokens
             settlement.error_code = error_code
             settlement.error_message = error_message
             upstream_proxy_route_mode = route_trace.mode or (route.mode if route is not None else None)
@@ -1008,6 +1012,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cached_input_tokens=cached_input_tokens,
+                cache_write_tokens=cache_write_tokens,
                 reasoning_tokens=reasoning_tokens,
                 reasoning_effort=reasoning_effort,
                 transport=request_transport,

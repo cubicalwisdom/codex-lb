@@ -75,6 +75,7 @@ from app.core.utils.sse import format_sse_event
 
 CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
 CODEX_RESPONSES_LITE_WS_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite"
+CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY = CODEX_RESPONSES_LITE_WS_METADATA_KEY
 
 IGNORE_INBOUND_HEADERS = {
     "authorization",
@@ -440,47 +441,84 @@ class CodexControlResponse:
     headers: Mapping[str, str]
 
 
-def _truthy_header_value(value: str | None) -> bool:
-    return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
+def _payload_uses_responses_lite(payload: Mapping[str, JsonValue]) -> bool:
+    input_value = payload.get("input")
+    if not isinstance(input_value, list):
+        return False
+    return any(is_json_mapping(item) and item.get("type") == "additional_tools" for item in input_value)
 
 
-def responses_lite_requested_from_headers(headers: Mapping[str, str]) -> bool:
+def _client_metadata_uses_responses_lite(client_metadata: Mapping[str, JsonValue]) -> bool:
     return any(
-        key.lower() == CODEX_RESPONSES_LITE_HEADER and _truthy_header_value(value)
-        for key, value in headers.items()
+        key.lower() == CODEX_RESPONSES_LITE_WS_METADATA_KEY
+        and isinstance(value, str)
+        and value.strip().lower() == "true"
+        for key, value in client_metadata.items()
     )
 
 
-def responses_lite_requested_from_native_headers(headers: Mapping[str, str]) -> bool:
-    return _is_native_codex_request(headers) and responses_lite_requested_from_headers(headers)
-
-
-def responses_lite_requested_from_payload(payload: Mapping[str, JsonValue]) -> bool:
+def _payload_has_responses_lite_websocket_marker(payload: Mapping[str, JsonValue]) -> bool:
     raw_metadata = payload.get("client_metadata")
-    if not is_json_mapping(raw_metadata):
-        return False
-    value = raw_metadata.get(CODEX_RESPONSES_LITE_WS_METADATA_KEY)
-    return isinstance(value, str) and _truthy_header_value(value)
+    return is_json_mapping(raw_metadata) and _client_metadata_uses_responses_lite(raw_metadata)
 
 
-def responses_lite_requested(payload: Mapping[str, JsonValue], headers: Mapping[str, str]) -> bool:
-    return responses_lite_requested_from_headers(headers) or responses_lite_requested_from_payload(payload)
+def _enforce_responses_lite_parallel_tool_calls(payload: dict[str, JsonValue]) -> None:
+    if _payload_uses_responses_lite(payload) or _payload_has_responses_lite_websocket_marker(payload):
+        payload["parallel_tool_calls"] = False
 
 
-def apply_responses_lite_client_metadata(payload: dict[str, JsonValue]) -> None:
+def _normalize_responses_lite_websocket_client_metadata(
+    payload: Mapping[str, JsonValue],
+    client_metadata: Mapping[str, JsonValue],
+    *,
+    preserve_existing: bool = False,
+) -> dict[str, JsonValue]:
+    normalized = dict(client_metadata)
+    existing_marker = _client_metadata_uses_responses_lite(normalized)
+    for key in tuple(normalized):
+        if key.lower() == CODEX_RESPONSES_LITE_WS_METADATA_KEY:
+            del normalized[key]
+    if _payload_uses_responses_lite(payload) or (preserve_existing and existing_marker):
+        normalized[CODEX_RESPONSES_LITE_WS_METADATA_KEY] = "true"
+    return normalized
+
+
+def _strip_responses_lite_websocket_client_metadata(payload: dict[str, JsonValue]) -> None:
     raw_metadata = payload.get("client_metadata")
     client_metadata = dict(raw_metadata) if is_json_mapping(raw_metadata) else {}
-    client_metadata[CODEX_RESPONSES_LITE_WS_METADATA_KEY] = "true"
-    payload["client_metadata"] = client_metadata
+    for key in tuple(client_metadata):
+        if key.lower() == CODEX_RESPONSES_LITE_WS_METADATA_KEY:
+            del client_metadata[key]
+    if client_metadata:
+        payload["client_metadata"] = client_metadata
+    else:
+        payload.pop("client_metadata", None)
+
+
+def _set_responses_lite_websocket_client_metadata(payload: dict[str, JsonValue]) -> None:
+    raw_metadata = payload.get("client_metadata")
+    client_metadata = dict(raw_metadata) if is_json_mapping(raw_metadata) else {}
+    normalized = _normalize_responses_lite_websocket_client_metadata(payload, client_metadata)
+    if normalized:
+        payload["client_metadata"] = normalized
+    else:
+        payload.pop("client_metadata", None)
+
+
+def _apply_responses_lite_http_header(
+    headers: dict[str, str],
+    payload: Mapping[str, JsonValue],
+) -> None:
+    if _payload_uses_responses_lite(payload):
+        headers[CODEX_RESPONSES_LITE_HEADER] = "true"
 
 
 def _should_drop_inbound_header(name: str, *, preserve_responses_lite: bool = False) -> bool:
+    del preserve_responses_lite
     normalized = name.lower()
     if normalized in IGNORE_INBOUND_HEADERS:
         return True
-    if normalized in INTERNAL_OPENAI_UPSTREAM_HEADERS and not (
-        preserve_responses_lite and normalized == CODEX_RESPONSES_LITE_HEADER
-    ):
+    if normalized in INTERNAL_OPENAI_UPSTREAM_HEADERS:
         return True
     if normalized.startswith("x-forwarded-"):
         return True
@@ -494,7 +532,6 @@ def filter_inbound_headers(
     *,
     preserve_responses_lite: bool = False,
 ) -> dict[str, str]:
-    preserve_responses_lite = preserve_responses_lite and _is_native_codex_request(headers)
     return {
         key: value
         for key, value in headers.items()
@@ -507,8 +544,6 @@ def _build_upstream_headers(
     access_token: str,
     account_id: str | None,
     accept: str = "text/event-stream",
-    *,
-    responses_lite: bool = False,
 ) -> dict[str, str]:
     headers = filter_inbound_headers(inbound)
     lower_keys = {key.lower() for key in headers}
@@ -519,8 +554,6 @@ def _build_upstream_headers(
     headers["Authorization"] = f"Bearer {access_token}"
     headers["Accept"] = accept
     headers["Content-Type"] = "application/json"
-    if responses_lite:
-        headers[CODEX_RESPONSES_LITE_HEADER] = "true"
     if account_id:
         headers["chatgpt-account-id"] = account_id
     return headers
@@ -2275,16 +2308,19 @@ async def _stream_responses_with_session(
     error_message: str | None = None
     client_session = session
     payload_dict = payload.to_payload()
-    use_responses_lite = _is_native_codex_request(headers) and responses_lite_requested(payload_dict, headers)
-    if use_responses_lite:
-        apply_responses_lite_client_metadata(payload_dict)
     if settings.image_inline_fetch_enabled:
         payload_dict = await _inline_input_image_urls(
             payload_dict,
             _as_image_fetch_session(client_session),
             effective_connect_timeout,
         )
-    payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+    http_payload_dict = dict(payload_dict)
+    _strip_responses_lite_websocket_client_metadata(http_payload_dict)
+    _enforce_responses_lite_parallel_tool_calls(http_payload_dict)
+    websocket_payload_dict = dict(payload_dict)
+    _set_responses_lite_websocket_client_metadata(websocket_payload_dict)
+    _enforce_responses_lite_parallel_tool_calls(websocket_payload_dict)
+    payload_json = json.dumps(websocket_payload_dict, ensure_ascii=True, separators=(",", ":"))
     payload_size_estimate_bytes = len(payload_json.encode("utf-8"))
     transport_mode = _configured_stream_transport(
         transport=settings.upstream_stream_transport,
@@ -2299,16 +2335,14 @@ async def _stream_responses_with_session(
         has_image_generation_tool=_payload_uses_image_generation_tool(payload_dict),
         payload_size_estimate_bytes=payload_size_estimate_bytes,
     )
+    payload_dict = websocket_payload_dict if transport == "websocket" else http_payload_dict
+    payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
     if transport == "websocket":
         upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
         method = "GET"
     else:
-        upstream_headers = _build_upstream_headers(
-            headers,
-            access_token,
-            account_id,
-            responses_lite=use_responses_lite,
-        )
+        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        _apply_responses_lite_http_header(upstream_headers, payload_dict)
         method = "POST"
     remaining_request_timeout = _remaining_total_timeout(
         request_total_timeout,
@@ -2514,7 +2548,8 @@ async def _stream_responses_with_session(
         rejection_status: int | None,
         rejection_message: str,
     ) -> AsyncIterator[str]:
-        nonlocal transport, upstream_headers, method, remaining_request_timeout, timeout, started_at
+        nonlocal transport, upstream_headers, method, remaining_request_timeout, timeout, started_at, payload_dict
+        nonlocal payload_json
 
         logger.warning(
             "upstream_websocket_handshake_rejected request_id=%s status=%s target=%s retrying_transport=http",
@@ -2534,12 +2569,10 @@ async def _stream_responses_with_session(
         )
 
         transport = "http"
-        upstream_headers = _build_upstream_headers(
-            headers,
-            access_token,
-            account_id,
-            responses_lite=use_responses_lite,
-        )
+        payload_dict = http_payload_dict
+        payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        _apply_responses_lite_http_header(upstream_headers, payload_dict)
         method = "POST"
         remaining_request_timeout = _remaining_total_timeout(
             request_total_timeout,
@@ -2944,18 +2977,7 @@ class _CompactCommandTransport:
         )
         if self.route is None and self.route_trace is not None:
             self.route_trace.record_direct()
-        payload_dict = self.payload.to_payload()
-        use_responses_lite = _is_native_codex_request(self.headers) and responses_lite_requested(
-            payload_dict,
-            self.headers,
-        )
-        upstream_headers = _build_upstream_headers(
-            self.headers,
-            self.access_token,
-            self.account_id,
-            accept="application/json",
-            responses_lite=use_responses_lite,
-        )
+        payload_dict = dict(self.payload.to_payload())
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
@@ -2965,6 +2987,14 @@ class _CompactCommandTransport:
                 _as_image_fetch_session(self.session),
                 effective_connect_timeout,
             )
+        _strip_responses_lite_websocket_client_metadata(payload_dict)
+        upstream_headers = _build_upstream_headers(
+            self.headers,
+            self.access_token,
+            self.account_id,
+            accept="application/json",
+        )
+        _apply_responses_lite_http_header(upstream_headers, payload_dict)
         now = time.monotonic()
         compact_timeout_seconds = _remaining_total_timeout(
             compact_timeout_seconds,

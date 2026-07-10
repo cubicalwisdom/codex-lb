@@ -167,6 +167,31 @@ async def test_images_generations_no_accounts_returns_5xx(async_client):
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_images_generations_alias_uses_same_validation(async_client):
+    response = await async_client.post(
+        "/backend-api/codex/images/generations",
+        json={"model": "dall-e-3", "prompt": "a red circle"},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_images_generations_trailing_slash_parity_between_v1_and_codex_alias(async_client):
+    payload = {"model": "dall-e-3", "prompt": "a red circle"}
+
+    v1_response = await async_client.post("/v1/images/generations/", json=payload)
+    alias_response = await async_client.post("/backend-api/codex/images/generations/", json=payload)
+
+    assert v1_response.status_code == 405
+    assert alias_response.status_code == 405
+    assert alias_response.json() == v1_response.json()
+
+
+@pytest.mark.asyncio
 async def test_images_generations_returns_envelope_on_success(async_client, monkeypatch):
     await _import_account(async_client, "acc_images_basic", "img-basic@example.com")
 
@@ -374,6 +399,125 @@ async def test_images_generations_failed_image_returns_5xx(async_client, monkeyp
 # ---------------------------------------------------------------------------
 # /v1/images/edits
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [b"{", b"\xff"], ids=["invalid-json", "invalid-utf8"])
+async def test_backend_codex_images_edits_rejects_invalid_json_body(async_client, content):
+    response = await async_client.post(
+        "/backend-api/codex/images/edits",
+        content=content,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_images_edits_requires_native_image_data_urls(async_client):
+    response = await async_client.post(
+        "/backend-api/codex/images/edits",
+        json={"model": "gpt-image-2", "prompt": "make it green", "images": []},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "images"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_images_edits_rejects_malformed_image_data_url(async_client):
+    response = await async_client.post(
+        "/backend-api/codex/images/edits",
+        json={
+            "model": "gpt-image-2",
+            "prompt": "make it green",
+            "images": [{"image_url": "https://example.test/source.png"}],
+        },
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "images"
+
+
+@pytest.mark.asyncio
+async def test_images_edits_trailing_slash_parity_between_v1_and_codex_alias(async_client):
+    payload = {"model": "gpt-image-2", "prompt": "make it green", "images": []}
+
+    v1_response = await async_client.post("/v1/images/edits/", json=payload)
+    alias_response = await async_client.post("/backend-api/codex/images/edits/", json=payload)
+
+    assert v1_response.status_code == 405
+    assert alias_response.status_code == 405
+    assert alias_response.json() == v1_response.json()
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_images_edits_json_data_urls_round_trip(async_client, monkeypatch):
+    await _import_account(async_client, "acc_images_edit_codex", "img-edit-codex@example.com")
+
+    captured: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, base_url, raise_for_status, kwargs
+        captured["input"] = payload.input
+        captured["tools"] = list(payload.tools)
+        captured["account_id"] = account_id
+        yield _sse(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "image_generation_call",
+                    "id": "ig_edit_codex",
+                    "status": "completed",
+                    "result": "EDITED_B64",
+                    "revised_prompt": "edited",
+                    "size": "1024x1024",
+                    "quality": "auto",
+                    "background": "auto",
+                    "output_format": "png",
+                },
+            }
+        )
+        yield _sse({"type": "response.completed", "response": {}})
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    image_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    response = await async_client.post(
+        "/backend-api/codex/images/edits",
+        json={
+            "model": "gpt-image-2",
+            "prompt": "make it green",
+            "images": [{"image_url": image_url}],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["data"] == [{"b64_json": "EDITED_B64", "revised_prompt": "edited"}]
+
+    input_value = cast(list[Any], captured["input"])
+    first_message = cast(dict[str, Any], input_value[0])
+    content = cast(list[Any], first_message["content"])
+    assert cast(dict[str, Any], content[0]) == {"type": "input_text", "text": "make it green"}
+    image_parts = [
+        cast(dict[str, Any], part) for part in content if isinstance(part, dict) and part.get("type") == "input_image"
+    ]
+    assert len(image_parts) == 1
+    assert cast(str, image_parts[0]["image_url"]).startswith("data:image/png;base64,")
 
 
 @pytest.mark.asyncio

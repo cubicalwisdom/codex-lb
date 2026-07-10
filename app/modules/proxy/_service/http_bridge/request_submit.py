@@ -18,6 +18,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     ProxyResponseError,
     UpstreamProxyRouteTrace,
     _as_image_fetch_session,
+    _enforce_responses_lite_parallel_tool_calls,
     _inline_content_images,
     _inline_input_image_urls,
     _ws_transport_payload_budget_bytes,
@@ -180,6 +181,27 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
+    if not headers:
+        return "normal"
+    raw_metadata = headers.get("x-codex-turn-metadata") or headers.get("X-Codex-Turn-Metadata")
+    if not isinstance(raw_metadata, str):
+        return "normal"
+    try:
+        turn_metadata = json.loads(raw_metadata)
+    except json.JSONDecodeError:
+        return "normal"
+    if not isinstance(turn_metadata, dict):
+        return "normal"
+    raw_kind = turn_metadata.get("request_kind")
+    if not isinstance(raw_kind, str):
+        return "normal"
+    request_kind = raw_kind.strip()
+    if request_kind in {"normal", "prewarm"}:
+        return request_kind
+    return "normal"
+
+
 class _HTTPBridgeRequestSubmitMixin:
     def _prepare_http_bridge_request(
         self: Any,
@@ -189,6 +211,7 @@ class _HTTPBridgeRequestSubmitMixin:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         request_id: str | None = None,
+        preserve_responses_lite_client_metadata: bool = False,
     ) -> tuple[_WebSocketRequestState, str]:
         request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
@@ -197,9 +220,14 @@ class _HTTPBridgeRequestSubmitMixin:
             include_type_field=True,
             attach_event_queue=True,
             transport=_REQUEST_TRANSPORT_HTTP,
-            client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
+            client_metadata=_response_create_client_metadata(
+                payload.to_payload(),
+                headers=headers,
+                preserve_existing_responses_lite=preserve_responses_lite_client_metadata,
+            ),
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
+            headers=headers,
         )
         request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
         return request_state, text_data
@@ -217,6 +245,7 @@ class _HTTPBridgeRequestSubmitMixin:
         session_id: str | None = None,
         request_id: str | None = None,
         request_log_id: str | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
@@ -238,6 +267,7 @@ class _HTTPBridgeRequestSubmitMixin:
             upstream_payload["type"] = "response.create"
         if client_metadata:
             upstream_payload["client_metadata"] = client_metadata
+        _enforce_responses_lite_parallel_tool_calls(upstream_payload)
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
         input_item_count = 0
         input_full_fingerprint: str | None = None
@@ -260,6 +290,7 @@ class _HTTPBridgeRequestSubmitMixin:
             awaiting_response_created=True,
             event_queue=asyncio.Queue() if attach_event_queue else None,
             transport=transport,
+            request_kind=_request_kind_from_headers(headers),
             api_key=api_key,
             request_usage_budget=estimate_api_key_request_usage(payload),
             previous_response_id=payload.previous_response_id,
@@ -659,6 +690,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 awaiting_response_created=True,
                 event_queue=asyncio.Queue(),
                 transport=_REQUEST_TRANSPORT_HTTP,
+                request_kind="prewarm",
                 request_text=warmup_text,
                 skip_request_log=True,
             )

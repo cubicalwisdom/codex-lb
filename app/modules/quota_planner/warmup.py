@@ -53,6 +53,7 @@ class WarmupUsage:
     output_tokens: int
     cached_input_tokens: int
     reasoning_tokens: int | None
+    cache_write_tokens: int = 0
 
 
 class QuotaWarmupService:
@@ -211,6 +212,7 @@ class QuotaWarmupService:
                     input_tokens=usage.input_tokens,
                     output_tokens=usage.output_tokens,
                     cached_input_tokens=usage.cached_input_tokens,
+                    cache_write_tokens=usage.cache_write_tokens,
                 )
             await self._request_logs.add_log(
                 account_id=account_id,
@@ -220,6 +222,7 @@ class QuotaWarmupService:
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
                 cached_input_tokens=usage.cached_input_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
                 reasoning_tokens=usage.reasoning_tokens,
                 latency_ms=int((time.monotonic() - started) * 1000),
                 status="success",
@@ -406,7 +409,13 @@ class QuotaWarmupService:
         headers = {"x-request-id": request_id, "user-agent": "codex-lb-quota-planner"}
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         upstream_account_id = account.chatgpt_account_id
-        usage = WarmupUsage(input_tokens=0, output_tokens=0, cached_input_tokens=0, reasoning_tokens=None)
+        usage = WarmupUsage(
+            input_tokens=0,
+            output_tokens=0,
+            cached_input_tokens=0,
+            reasoning_tokens=None,
+            cache_write_tokens=0,
+        )
         async for event_block in stream_responses(
             payload,
             headers,
@@ -423,6 +432,10 @@ class QuotaWarmupService:
                 output_tokens=raw_usage.output_tokens or 0,
                 cached_input_tokens=(
                     raw_usage.input_tokens_details.cached_tokens if raw_usage.input_tokens_details else 0
+                )
+                or 0,
+                cache_write_tokens=(
+                    raw_usage.input_tokens_details.cache_write_tokens if raw_usage.input_tokens_details else 0
                 )
                 or 0,
                 reasoning_tokens=(

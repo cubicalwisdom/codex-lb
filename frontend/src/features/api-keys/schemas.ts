@@ -35,6 +35,9 @@ export type ServiceTierType = (typeof SERVICE_TIERS)[number];
 
 export const TRAFFIC_CLASSES = ["foreground", "opportunistic"] as const;
 export type TrafficClass = (typeof TRAFFIC_CLASSES)[number];
+export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+export type ReasoningEffortType = (typeof REASONING_EFFORTS)[number];
+export const ENFORCED_REASONING_EFFORTS = ["none", ...REASONING_EFFORTS] as const;
 
 export const ApiKeySchema = z.object({
   id: z.string(),
@@ -47,7 +50,7 @@ export const ApiKeySchema = z.object({
     .enum(TRAFFIC_CLASSES)
     .default("foreground"),
   enforcedReasoningEffort: z
-    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
+    .enum(ENFORCED_REASONING_EFFORTS)
     .nullable()
     .default(null),
   enforcedServiceTier: z
@@ -74,7 +77,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   enforcedReasoningEffort: z
-    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
+    .enum(ENFORCED_REASONING_EFFORTS)
     .nullable()
     .optional(),
   enforcedServiceTier: z
@@ -98,7 +101,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   enforcedReasoningEffort: z
-    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
+    .enum(ENFORCED_REASONING_EFFORTS)
     .nullable()
     .optional(),
   enforcedServiceTier: z
@@ -122,6 +125,11 @@ export type ApiKeyCreateRequest = z.infer<typeof ApiKeyCreateRequestSchema>;
 export type ApiKeyCreateResponse = z.infer<typeof ApiKeyCreateResponseSchema>;
 export type ApiKeyUpdateRequest = z.infer<typeof ApiKeyUpdateRequestSchema>;
 
-const ModelItemSchema = z.object({ id: z.string(), name: z.string() });
+export const ModelItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  supportedReasoningEfforts: z.array(z.enum(REASONING_EFFORTS)).default([]),
+  defaultReasoningEffort: z.enum(REASONING_EFFORTS).nullable().optional(),
+});
 export const ModelsResponseSchema = z.object({ models: z.array(ModelItemSchema) });
 export type ModelItem = z.infer<typeof ModelItemSchema>;

@@ -764,14 +764,14 @@ async def test_codex_agent_identity_jwks_routes_forward_upstream(async_client, m
 
 
 @pytest.mark.asyncio
-async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, monkeypatch):
+async def test_proxy_stream_records_cached_cache_write_and_reasoning_tokens(async_client, monkeypatch):
     expected_account_id = await _import_account(async_client, "acc_usage", "usage@example.com")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         usage = {
             "input_tokens": 10,
             "output_tokens": 5,
-            "input_tokens_details": {"cached_tokens": 3},
+            "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": 2},
             "output_tokens_details": {"reasoning_tokens": 2},
         }
         event = {"type": "response.completed", "response": {"id": "resp_1", "usage": usage}}
@@ -805,6 +805,7 @@ async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, mo
         assert log.input_tokens == 10
         assert log.output_tokens == 5
         assert log.cached_input_tokens == 3
+        assert log.cache_write_tokens == 2
         assert log.reasoning_tokens == 2
         assert log.status == "success"
 

@@ -5,13 +5,29 @@ from cryptography.fernet import Fernet
 
 from app.core.crypto import TokenEncryptor
 from app.modules.codexneo.activity_log import CodexNeoActivityLogService
-from app.modules.codexneo.service import CodexNeoService, CodexRestartResult
+from app.modules.codexneo.service import (
+    CodexNeoService,
+    CodexRestartResult,
+    _build_codex_desktop_restart_script,
+)
 
 pytestmark = pytest.mark.unit
 
 
 def _encryptor() -> TokenEncryptor:
     return TokenEncryptor(key=Fernet.generate_key())
+
+
+def test_restart_script_targets_packaged_chatgpt_shell_and_process_tree() -> None:
+    script = _build_codex_desktop_restart_script()
+
+    assert "Get-CimInstance Win32_Process" in script
+    assert "*\\WindowsApps\\OpenAI.Codex_*" in script
+    assert '$_.Name -ieq "ChatGPT.exe"' in script
+    assert "CloseMainWindow" in script
+    assert "Stop-Process -Id $target.ProcessId" in script
+    assert 'Get-Process -Name "Codex"' not in script
+    assert 'Get-Process -Name "codex"' not in script
 
 
 @pytest.mark.asyncio

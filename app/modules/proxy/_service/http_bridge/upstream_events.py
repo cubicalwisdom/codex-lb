@@ -59,7 +59,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _pop_terminal_websocket_request_state,
     _previous_response_id_from_not_found_message,
     _release_websocket_response_create_gate,
-    _response_output_item_done_function_call_id,
+    _response_output_item_done_tool_call,
     _rewrite_websocket_continuity_corruption_event,
     _rewrite_websocket_downstream_response_id,
     _rewrite_websocket_previous_response_owner_unavailable_event,
@@ -359,12 +359,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if actual_service_tier is not None:
                     matched_request_state.actual_service_tier = actual_service_tier
                     matched_request_state.service_tier = actual_service_tier
-                completed_function_call_id = _response_output_item_done_function_call_id(payload)
-                if (
-                    completed_function_call_id is not None
-                    and completed_function_call_id not in matched_request_state.pending_function_call_ids
-                ):
-                    matched_request_state.pending_function_call_ids.append(completed_function_call_id)
+                completed_tool_call = _response_output_item_done_tool_call(payload)
+                if completed_tool_call is not None:
+                    completed_function_call_id, output_type = completed_tool_call
+                    if completed_function_call_id not in matched_request_state.pending_function_call_ids:
+                        matched_request_state.pending_function_call_ids.append(completed_function_call_id)
+                    matched_request_state.pending_tool_call_output_types[completed_function_call_id] = output_type
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
                     seen_tool_call_keys=matched_request_state.seen_tool_call_keys,
@@ -679,13 +679,34 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type,
                 ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
 
-        if event_type == "response.completed" and terminal_request_state is not None:
+        completed_usage = (
+            event.response.usage
+            if event_type == "response.completed" and event is not None and event.response is not None
+            else None
+        )
+        completed_empty_prewarm = (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and terminal_request_state.request_kind == "prewarm"
+            and completed_usage is not None
+            and completed_usage.output_tokens == 0
+        )
+
+        if (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and not completed_empty_prewarm
+        ):
             # Record the completed response id regardless of input shape so
             # subsequent turns (including ones that never populated
             # input_item_count, e.g. string inputs) can still reuse this
             # anchor for continuity lookups.
             if response_id is not None:
                 session.last_completed_response_id = response_id
+                session.last_pending_function_call_ids = list(terminal_request_state.pending_function_call_ids)
+                session.last_pending_tool_call_output_types = dict(
+                    terminal_request_state.pending_tool_call_output_types
+                )
             # Prefix trimming is only meaningful for list-shaped inputs, so
             # keep the input-count / fingerprint update scoped to that path.
             if terminal_request_state.input_item_count > 0:
@@ -710,7 +731,12 @@ class _HTTPBridgeUpstreamEventsMixin:
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             await _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
-        if response_id is not None and matched_request_state is not None and event_type == "response.completed":
+        if (
+            response_id is not None
+            and matched_request_state is not None
+            and event_type == "response.completed"
+            and not completed_empty_prewarm
+        ):
             await self._register_http_bridge_previous_response_id(
                 session,
                 response_id,

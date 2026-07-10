@@ -439,6 +439,9 @@ from app.modules.proxy._service.response_create import (
     _response_output_item_done_function_call_id as _response_output_item_done_function_call_id,
 )
 from app.modules.proxy._service.response_create import (
+    _response_output_item_done_tool_call as _response_output_item_done_tool_call,
+)
+from app.modules.proxy._service.response_create import (
     _responses_request_contains_input_image as _responses_request_contains_input_image,
 )
 from app.modules.proxy._service.response_create import (
@@ -619,6 +622,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _prepare_websocket_request_state_for_auth_replay,  # noqa: F401
     _prepare_websocket_request_state_for_visible_output_replay,  # noqa: F401
     _record_websocket_continuity_completion,  # noqa: F401
+    _record_websocket_responses_lite_acceptance,  # noqa: F401
     _refresh_websocket_request_input_fingerprint_from_text,  # noqa: F401
     _release_websocket_response_create_gate,  # noqa: F401
     _rewrite_websocket_continuity_corruption_event,  # noqa: F401
@@ -1995,7 +1999,13 @@ def _is_missing_tool_output_error(
     if code != "invalid_request_error" or param != "input" or message is None:
         return False
     normalized = " ".join(message.lower().split())
-    return normalized.startswith("no tool output found for function call call_")
+    return normalized.startswith(
+        (
+            "no tool output found for function call call_",
+            "no tool output found for custom tool call call_",
+            "no tool output found for apply patch call call_",
+        )
+    )
 
 
 def _is_previous_response_not_found_error(

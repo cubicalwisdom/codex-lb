@@ -26,7 +26,13 @@ import { AccountMultiSelect } from "@/features/api-keys/components/account-multi
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
-import type { ApiKeyCreateRequest, LimitRuleCreate, ServiceTierType, TrafficClass } from "@/features/api-keys/schemas";
+import type {
+  ApiKeyCreateRequest,
+  LimitRuleCreate,
+  ReasoningEffortType,
+  ServiceTierType,
+  TrafficClass,
+} from "@/features/api-keys/schemas";
 
 const formSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -97,7 +103,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       enforcedReasoningEffort:
         draft.enforcedReasoningEffort === "none"
           ? null
-          : draft.enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
+          : draft.enforcedReasoningEffort as ReasoningEffortType,
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
       expiresAt: draft.expiresAt?.toISOString(),
@@ -179,6 +185,8 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
                   <SelectItem value="medium">Medium</SelectItem>
                   <SelectItem value="high">High</SelectItem>
                   <SelectItem value="xhigh">XHigh</SelectItem>
+                  <SelectItem value="max">Max</SelectItem>
+                  <SelectItem value="ultra">Ultra</SelectItem>
                 </SelectContent>
               </Select>
             </div>

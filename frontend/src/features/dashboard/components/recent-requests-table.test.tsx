@@ -118,11 +118,13 @@ describe("RecentRequestsTable", () => {
              inputTokens: 1000,
              outputTokens: 200,
              cachedInputTokens: 200,
+             cacheWriteTokens: null,
              reasoningEffort: "high",
              costUsd: 0.01,
              costBreakdown: {
                inputUsd: 0.004,
                cachedInputUsd: 0.001,
+               cacheWriteInputUsd: null,
                outputUsd: 0.005,
                totalUsd: 0.01,
              },
@@ -202,6 +204,7 @@ describe("RecentRequestsTable", () => {
             inputTokens: 1,
             outputTokens: 0,
             cachedInputTokens: null,
+            cacheWriteTokens: null,
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
@@ -230,6 +233,7 @@ describe("RecentRequestsTable", () => {
             inputTokens: 1,
             outputTokens: 0,
             cachedInputTokens: null,
+            cacheWriteTokens: null,
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
@@ -272,6 +276,7 @@ describe("RecentRequestsTable", () => {
              inputTokens: 1,
              outputTokens: 0,
              cachedInputTokens: null,
+             cacheWriteTokens: null,
              reasoningEffort: null,
              costUsd: 0,
              costBreakdown: null,
@@ -315,6 +320,7 @@ describe("RecentRequestsTable", () => {
              inputTokens: 1,
              outputTokens: 0,
              cachedInputTokens: null,
+             cacheWriteTokens: null,
              reasoningEffort: null,
              costUsd: 0,
              costBreakdown: null,
@@ -359,11 +365,13 @@ describe("RecentRequestsTable", () => {
             inputTokens: 1000,
             outputTokens: 400,
             cachedInputTokens: 200,
+            cacheWriteTokens: 100,
             reasoningEffort: null,
             costUsd: 0.01,
             costBreakdown: {
               inputUsd: 0.004,
               cachedInputUsd: 0.002,
+              cacheWriteInputUsd: 0.001,
               outputUsd: 0.004,
               totalUsd: 0.01,
             },
@@ -378,8 +386,9 @@ describe("RecentRequestsTable", () => {
 
     expect(within(dialog).getByText("Cost")).toBeInTheDocument();
     expect(costSection).toHaveTextContent("$0.01 =");
-    expect(costSection).toHaveTextContent("800 Input ($0.00)");
+    expect(costSection).toHaveTextContent("700 Input ($0.00)");
     expect(costSection).toHaveTextContent("200 Cached ($0.00)");
+    expect(costSection).toHaveTextContent("100 Cache write ($0.00)");
     expect(costSection).toHaveTextContent("400 Output ($0.00)");
   });
 
@@ -413,6 +422,7 @@ describe("RecentRequestsTable", () => {
             inputTokens: 1,
             outputTokens: 0,
             cachedInputTokens: null,
+            cacheWriteTokens: null,
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
@@ -466,6 +476,7 @@ describe("RecentRequestsTable", () => {
             inputTokens: 1,
             outputTokens: 0,
             cachedInputTokens: null,
+            cacheWriteTokens: null,
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
@@ -513,11 +524,13 @@ describe("RecentRequestsTable", () => {
             inputTokens: 1,
             outputTokens: 0,
             cachedInputTokens: 0,
+            cacheWriteTokens: null,
             reasoningEffort: null,
             costUsd: 0.01,
             costBreakdown: {
               inputUsd: 0.01,
               cachedInputUsd: null,
+              cacheWriteInputUsd: null,
               outputUsd: null,
               totalUsd: 0.01,
             },
@@ -561,11 +574,13 @@ describe("RecentRequestsTable", () => {
             inputTokens: 700,
             outputTokens: null,
             cachedInputTokens: 200,
+            cacheWriteTokens: null,
             reasoningEffort: null,
             costUsd: 0.01,
             costBreakdown: {
               inputUsd: 0.006,
               cachedInputUsd: 0.004,
+              cacheWriteInputUsd: null,
               outputUsd: null,
               totalUsd: 0.01,
             },
@@ -614,11 +629,13 @@ describe("RecentRequestsTable", () => {
             inputTokens: 1000,
             outputTokens: null,
             cachedInputTokens: 200,
+            cacheWriteTokens: null,
             reasoningEffort: null,
             costUsd: null,
             costBreakdown: {
               inputUsd: 0.006,
               cachedInputUsd: 0.004,
+              cacheWriteInputUsd: null,
               outputUsd: null,
               totalUsd: null,
             },
@@ -668,6 +685,7 @@ describe("RecentRequestsTable", () => {
             inputTokens: 1,
             outputTokens: 0,
             cachedInputTokens: null,
+            cacheWriteTokens: null,
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
@@ -720,6 +738,7 @@ describe("RecentRequestsTable", () => {
             inputTokens: 1,
             outputTokens: 0,
             cachedInputTokens: null,
+            cacheWriteTokens: null,
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
@@ -767,11 +786,13 @@ describe("RecentRequestsTable", () => {
             inputTokens: 1000,
             outputTokens: 500,
             cachedInputTokens: null,
+            cacheWriteTokens: null,
             reasoningEffort: null,
             costUsd: 4.321234,
             costBreakdown: {
               inputUsd: null,
               cachedInputUsd: null,
+              cacheWriteInputUsd: null,
               outputUsd: null,
               totalUsd: 4.321234,
             },

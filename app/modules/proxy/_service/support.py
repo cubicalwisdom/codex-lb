@@ -213,6 +213,7 @@ class _StreamSettlement:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
+    cache_write_tokens: int | None = None
     error_code: str | None = None
     error_message: str | None = None
     error: UpstreamError | None = None
@@ -267,6 +268,7 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    responses_lite_model: str | None = None
     latency_first_token_ms: int | None = None
     request_log_id: str | None = None
     requested_service_tier: str | None = None
@@ -275,6 +277,7 @@ class _WebSocketRequestState:
     awaiting_response_created: bool = False
     event_queue: asyncio.Queue[str | None] | None = None
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
+    request_kind: str = "normal"
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
@@ -298,6 +301,7 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    fresh_upstream_request_responses_lite_model: str | None = None
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
@@ -319,6 +323,7 @@ class _WebSocketRequestState:
     suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
+    pending_tool_call_output_types: dict[str, str] = field(default_factory=dict)
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
@@ -390,6 +395,8 @@ class _HTTPBridgeSession:
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
+    last_pending_function_call_ids: list[str] = field(default_factory=list)
+    last_pending_tool_call_output_types: dict[str, str] = field(default_factory=dict)
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
@@ -411,6 +418,9 @@ class _WebSocketContinuityState:
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
     last_pending_function_call_ids: list[str] = field(default_factory=list)
+    last_pending_tool_call_output_types: dict[str, str] = field(default_factory=dict)
+    responses_lite_model: str | None = None
+    responses_lite_response_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

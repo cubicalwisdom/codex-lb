@@ -226,6 +226,7 @@ class RequestLogsRepository:
         error_message: str | None = None,
         requested_at: datetime | None = None,
         cached_input_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         reasoning_effort: str | None = None,
         service_tier: str | None = None,
@@ -260,6 +261,9 @@ class RequestLogsRepository:
             resolved_useragent_group = (
                 useragent_group if not isinstance(useragent_group, str) or useragent_group.strip() else None
             )
+            resolved_cache_write_tokens = (
+                max(0, int(cache_write_tokens)) if cache_write_tokens is not None else None
+            )
             log = RequestLog(
                 account_id=account_id,
                 api_key_id=api_key_id,
@@ -277,6 +281,7 @@ class RequestLogsRepository:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cached_input_tokens=cached_input_tokens,
+                cache_write_tokens=resolved_cache_write_tokens,
                 reasoning_tokens=reasoning_tokens,
                 cost_usd=None,
                 reasoning_effort=reasoning_effort,

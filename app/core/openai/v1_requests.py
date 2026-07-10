@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.openai.exceptions import ClientPayloadError
@@ -12,6 +14,57 @@ from app.core.openai.requests import (
     validate_tool_types,
 )
 from app.core.types import JsonValue
+
+_UNSUPPORTED_RESPONSE_CONTROLS = (
+    "max_output_tokens",
+    "prompt_cache_retention",
+    "safety_identifier",
+    "temperature",
+    "top_p",
+    "truncation",
+    "user",
+)
+_UNSUPPORTED_RESPONSE_CONTROL_ALIASES = ("promptCacheRetention",)
+
+
+def reject_unsupported_response_controls(
+    payload: Mapping[str, JsonValue],
+    *,
+    allow_local_lifecycle: bool = False,
+) -> None:
+    for field in ("background", "store"):
+        if payload.get(field) is True and not allow_local_lifecycle:
+            raise ClientPayloadError(
+                f"The ChatGPT-backed Codex upstream does not support {field}=true.",
+                param=field,
+                code="unsupported_parameter",
+                error_type="invalid_request_error",
+            )
+    if payload.get("metadata") is not None and not allow_local_lifecycle:
+        raise ClientPayloadError(
+            "The ChatGPT-backed Codex upstream does not support the 'metadata' parameter.",
+            param="metadata",
+            code="unsupported_parameter",
+            error_type="invalid_request_error",
+        )
+    for field in _UNSUPPORTED_RESPONSE_CONTROLS:
+        if field not in payload or payload.get(field) is None:
+            continue
+        raise ClientPayloadError(
+            f"The ChatGPT-backed Codex upstream does not support the '{field}' parameter.",
+            param=field,
+            code="unsupported_parameter",
+            error_type="invalid_request_error",
+        )
+    for field in _UNSUPPORTED_RESPONSE_CONTROL_ALIASES:
+        if field not in payload or payload.get(field) is None:
+            continue
+        raise ClientPayloadError(
+            f"The ChatGPT-backed Codex upstream does not support the '{field}' parameter.",
+            param=field,
+            code="unsupported_parameter",
+            error_type="invalid_request_error",
+        )
 
 
 class V1ResponsesRequest(BaseModel):
@@ -26,6 +79,8 @@ class V1ResponsesRequest(BaseModel):
     parallel_tool_calls: bool | None = None
     reasoning: ResponsesReasoning | None = None
     store: bool | None = None
+    background: bool | None = None
+    metadata: dict[str, str] | None = None
     stream: bool | None = None
     include: list[str] = Field(default_factory=list)
     service_tier: str | None = None
@@ -44,11 +99,6 @@ class V1ResponsesRequest(BaseModel):
             return value
         raise ValueError("input must be a string or array")
 
-    @field_validator("store")
-    @classmethod
-    def _ensure_store_false(cls, value: bool | None) -> bool | None:
-        return False
-
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
@@ -56,7 +106,8 @@ class V1ResponsesRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_input(self) -> "V1ResponsesRequest":
-        if self.messages is None and self.input is None:
+        continuation = self.conversation is not None or self.previous_response_id is not None
+        if self.messages is None and self.input is None and not continuation:
             raise ValueError("Provide either 'input' or 'messages'.")
         if self.messages is not None and self.input not in (None, []):
             raise ValueError("Provide either 'input' or 'messages', not both.")
@@ -64,8 +115,17 @@ class V1ResponsesRequest(BaseModel):
             raise ValueError("Provide either 'conversation' or 'previous_response_id', not both.")
         return self
 
+    @field_validator("conversation", "previous_response_id")
+    @classmethod
+    def _normalize_continuity_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
     def to_responses_request(self) -> ResponsesRequest:
         data = self.model_dump(mode="json", exclude_none=True)
+        reject_unsupported_response_controls(data, allow_local_lifecycle=True)
         messages = data.pop("messages", None)
         instructions = data.get("instructions")
         instruction_text = instructions if isinstance(instructions, str) else ""
@@ -117,6 +177,7 @@ class V1ResponsesCompactRequest(BaseModel):
 
     def to_compact_request(self) -> ResponsesCompactRequest:
         data = self.model_dump(mode="json", exclude_none=True)
+        reject_unsupported_response_controls(data)
         messages = data.pop("messages", None)
         instructions = data.get("instructions")
         instruction_text = instructions if isinstance(instructions, str) else ""

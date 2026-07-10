@@ -15,6 +15,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings import Settings
 from app.core.openai.models import CompactResponsePayload
+from app.core.types import JsonValue
 from app.db.models import Account, DashboardSettings, RequestLog
 from app.db.session import SessionLocal
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -249,7 +250,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
                 session_id="sid_compact_trigger",
                 request_id="resp_compact_anchor",
                 request_kind="response_create",
-                model="gpt-5.1",
+                model="gpt-5.6-sol",
                 status="success",
             )
         )
@@ -267,7 +268,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
 
     async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         del headers, access_token, kwargs
-        seen_payload["payload"] = payload.model_dump(mode="json", exclude_none=True)
+        seen_payload["payload"] = payload.to_payload()
         seen_payload["input"] = payload.input
         seen_payload["model"] = payload.model
         seen_payload["previous_response_id"] = getattr(payload, "previous_response_id", None)
@@ -288,12 +289,19 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
 
     payload = {
-        "model": "gpt-5.1",
+        "model": "gpt-5.6-sol",
         "instructions": "compact this turn",
         "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{"type": "custom", "name": "exec"}],
+            },
+            {"type": "message", "role": "developer", "content": "Use exec."},
             {"role": "user", "content": "hello"},
             {"type": "compaction_trigger"},
         ],
+        "parallel_tool_calls": True,
         "previous_response_id": "resp_compact_anchor",
         "promptCacheKey": "compact-cache-affinity",
         "include": [],
@@ -311,12 +319,21 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
     events = list(_iter_sse_events(lines))
     assert [event["type"] for event in events] == ["response.output_item.done", "response.completed"]
     assert selection_preferred_ids == [owner_account.id]
-    assert seen_payload["model"] == "gpt-5.1"
-    assert seen_payload["input"] == [{"role": "user", "content": "hello"}]
+    assert seen_payload["model"] == "gpt-5.6-sol"
+    assert seen_payload["input"] == [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "exec"}],
+        },
+        {"type": "message", "role": "developer", "content": "Use exec."},
+        {"role": "user", "content": "hello"},
+    ]
     assert seen_payload["previous_response_id"] == "resp_compact_anchor"
     assert seen_payload["account_id"] == raw_account_id
     compact_payload = cast(Mapping[str, object], seen_payload["payload"])
     assert compact_payload["prompt_cache_key"] == "compact-cache-affinity"
+    assert compact_payload["parallel_tool_calls"] is False
     assert "include" not in compact_payload
     assert "stream" not in compact_payload
     assert events[0]["item"] == {
@@ -1456,6 +1473,7 @@ async def test_proxy_responses_forwards_native_codex_responses_lite_payload_and_
             custom_tool_call,
             custom_tool_call_output,
         ],
+        "reasoning": {"effort": "ultra"},
         "stream": True,
     }
     native_headers = {
@@ -1480,7 +1498,7 @@ async def test_proxy_responses_forwards_native_codex_responses_lite_payload_and_
     assert seen_headers["session_id"] == native_headers["session_id"]
     assert seen_headers["x-codex-turn-metadata"] == native_headers["x-codex-turn-metadata"]
     assert seen_headers["x-codex-beta-features"] == native_headers["x-codex-beta-features"]
-    assert seen_headers["x-openai-internal-codex-responses-lite"] == "true"
+    assert "x-openai-internal-codex-responses-lite" not in {key.lower() for key in seen_headers}
     assert seen_headers["x-request-id"] == native_headers["x-request-id"]
     assert seen_payload["instructions"] == "hi"
     assert seen_payload["tools"] == []
@@ -1490,6 +1508,66 @@ async def test_proxy_responses_forwards_native_codex_responses_lite_payload_and_
         user_message,
         custom_tool_call,
         custom_tool_call_output,
+    ]
+    reasoning = cast(dict[str, JsonValue], seen_payload["reasoning"])
+    assert reasoning["effort"] == "max"
+
+    upstream_headers: dict[str, str] = {}
+    proxy_client_module._apply_responses_lite_http_header(
+        upstream_headers,
+        cast(Mapping[str, JsonValue], seen_payload),
+    )
+    assert upstream_headers == {proxy_client_module.CODEX_RESPONSES_LITE_HEADER: "true"}
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_preserves_non_message_developer_directive(async_client, monkeypatch):
+    raw_account_id = "acc_future_directive"
+    auth_json = _make_auth_json(raw_account_id, "future-directive@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+        "reasoning_content": "directive-level reasoning",
+        "tool_calls": [{"id": "call_1", "name": "future_tool"}],
+    }
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_future_directive",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.6-sol",
+            "input": [
+                developer_directive,
+                {"type": "message", "role": "developer", "content": "follow the directive"},
+                {"type": "message", "role": "user", "content": "inspect"},
+            ],
+            "stream": True,
+        },
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    assert _extract_first_event(lines)["type"] == "response.completed"
+    assert seen_payload["instructions"] == "follow the directive"
+    assert seen_payload["input"] == [
+        developer_directive,
+        {"type": "message", "role": "user", "content": "inspect"},
     ]
 
 

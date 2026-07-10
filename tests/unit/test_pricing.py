@@ -65,14 +65,23 @@ def test_get_pricing_for_model_gpt_5_4_alias():
 
 
 @pytest.mark.parametrize(
-    ("requested_model", "canonical_model", "input_per_1m", "cached_input_per_1m", "output_per_1m"),
+    (
+        "requested_model",
+        "canonical_model",
+        "input_per_1m",
+        "cached_input_per_1m",
+        "cache_write_input_per_1m",
+        "output_per_1m",
+    ),
     [
-        ("gpt-5.6-sol", "gpt-5.6-sol", 5.0, 0.5, 30.0),
-        ("gpt-5.6-sol-xhigh-fast", "gpt-5.6-sol", 5.0, 0.5, 30.0),
-        ("gpt-5.6-terra", "gpt-5.6-terra", 2.5, 0.25, 15.0),
-        ("gpt-5.6-terra-ultra-fast", "gpt-5.6-terra", 2.5, 0.25, 15.0),
-        ("gpt-5.6-luna", "gpt-5.6-luna", 1.0, 0.1, 6.0),
-        ("gpt-5.6-luna-fast", "gpt-5.6-luna", 1.0, 0.1, 6.0),
+        ("gpt-5.6", "gpt-5.6-sol", 5.0, 0.5, 6.25, 30.0),
+        ("gpt-5.6-fast", "gpt-5.6-sol", 5.0, 0.5, 6.25, 30.0),
+        ("gpt-5.6-sol", "gpt-5.6-sol", 5.0, 0.5, 6.25, 30.0),
+        ("gpt-5.6-sol-xhigh-fast", "gpt-5.6-sol", 5.0, 0.5, 6.25, 30.0),
+        ("gpt-5.6-terra", "gpt-5.6-terra", 2.5, 0.25, 3.125, 15.0),
+        ("gpt-5.6-terra-ultra-fast", "gpt-5.6-terra", 2.5, 0.25, 3.125, 15.0),
+        ("gpt-5.6-luna", "gpt-5.6-luna", 1.0, 0.1, 1.25, 6.0),
+        ("gpt-5.6-luna-fast", "gpt-5.6-luna", 1.0, 0.1, 1.25, 6.0),
     ],
 )
 def test_get_pricing_for_model_gpt_5_6_aliases(
@@ -80,6 +89,7 @@ def test_get_pricing_for_model_gpt_5_6_aliases(
     canonical_model: str,
     input_per_1m: float,
     cached_input_per_1m: float,
+    cache_write_input_per_1m: float,
     output_per_1m: float,
 ) -> None:
     result = get_pricing_for_model(requested_model, DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
@@ -89,7 +99,26 @@ def test_get_pricing_for_model_gpt_5_6_aliases(
     assert model == canonical_model
     assert price.input_per_1m == input_per_1m
     assert price.cached_input_per_1m == cached_input_per_1m
+    assert price.cache_write_input_per_1m == cache_write_input_per_1m
     assert price.output_per_1m == output_per_1m
+
+
+def test_response_usage_details_declares_cache_write_tokens() -> None:
+    details = ResponseUsageDetails.model_validate(
+        {
+            "cached_tokens": 200,
+            "cache_write_tokens": 100,
+        }
+    )
+
+    assert "cache_write_tokens" in ResponseUsageDetails.model_fields
+    assert details.cache_write_tokens == 100
+
+
+def test_response_usage_details_clamps_negative_cache_write_tokens() -> None:
+    details = ResponseUsageDetails.model_validate({"cache_write_tokens": -7})
+
+    assert details.cache_write_tokens == 0
 
 
 def test_get_pricing_for_model_gpt_5_4_mini_alias():
@@ -155,6 +184,90 @@ def test_calculate_cost_breakdown_from_usage_cached_tokens():
     assert breakdown.total_usd == pytest.approx(
         ((800 / 1_000_000) * 2.0) + ((200 / 1_000_000) * 0.5) + ((500 / 1_000_000) * 4.0)
     )
+
+
+def test_calculate_cost_breakdown_from_usage_separates_cache_writes() -> None:
+    usage = UsageTokens(
+        input_tokens=1_000_000.0,
+        output_tokens=100_000.0,
+        cached_input_tokens=200_000.0,
+        cache_write_tokens=100_000.0,
+    )
+    price = DEFAULT_PRICING_MODELS["gpt-5.6-sol"]
+
+    breakdown = calculate_cost_breakdown_from_usage(usage, price)
+
+    assert breakdown is not None
+    assert breakdown.input_usd == pytest.approx(3.5)
+    assert breakdown.cached_input_usd == pytest.approx(0.1)
+    assert breakdown.cache_write_input_usd == pytest.approx(0.625)
+    assert breakdown.output_usd == pytest.approx(3.0)
+    assert breakdown.total_usd == pytest.approx(7.225)
+
+
+def test_calculate_cost_breakdown_from_response_usage_reads_cache_writes() -> None:
+    usage = ResponseUsage(
+        input_tokens=1_000,
+        output_tokens=500,
+        input_tokens_details=ResponseUsageDetails.model_validate(
+            {
+                "cached_tokens": 200,
+                "cache_write_tokens": 100,
+            }
+        ),
+    )
+    price = ModelPrice(
+        input_per_1m=2.0,
+        cached_input_per_1m=0.5,
+        cache_write_input_per_1m=2.5,
+        output_per_1m=4.0,
+    )
+
+    breakdown = calculate_cost_breakdown_from_usage(usage, price)
+
+    assert breakdown is not None
+    assert breakdown.input_usd == pytest.approx((700 / 1_000_000) * 2.0)
+    assert breakdown.cached_input_usd == pytest.approx((200 / 1_000_000) * 0.5)
+    assert breakdown.cache_write_input_usd == pytest.approx((100 / 1_000_000) * 2.5)
+    assert breakdown.output_usd == pytest.approx((500 / 1_000_000) * 4.0)
+
+
+def test_calculate_cost_breakdown_clamps_cache_writes_after_cached_reads() -> None:
+    usage = UsageTokens(
+        input_tokens=100.0,
+        output_tokens=0.0,
+        cached_input_tokens=80.0,
+        cache_write_tokens=50.0,
+    )
+    price = ModelPrice(
+        input_per_1m=2.0,
+        cached_input_per_1m=0.5,
+        cache_write_input_per_1m=2.5,
+        output_per_1m=4.0,
+    )
+
+    breakdown = calculate_cost_breakdown_from_usage(usage, price)
+
+    assert breakdown is not None
+    assert breakdown.input_usd == pytest.approx(0.0)
+    assert breakdown.cached_input_usd == pytest.approx((80 / 1_000_000) * 0.5)
+    assert breakdown.cache_write_input_usd == pytest.approx((20 / 1_000_000) * 2.5)
+    assert breakdown.output_usd == pytest.approx(0.0)
+
+
+def test_gpt_5_6_fast_uses_one_standard_api_equivalent_pricing_path() -> None:
+    usage = UsageTokens(
+        input_tokens=1_000_000.0,
+        output_tokens=0.0,
+    )
+
+    cost = calculate_cost_from_usage(
+        usage,
+        DEFAULT_PRICING_MODELS["gpt-5.6-sol"],
+        service_tier="priority",
+    )
+
+    assert cost == pytest.approx(5.0)
 
 
 def test_calculate_cost_breakdown_from_usage_clamps_cached_tokens():

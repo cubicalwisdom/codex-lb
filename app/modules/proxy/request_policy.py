@@ -13,7 +13,7 @@ from app.core.openai.strict_schema import (
     validate_strict_function_tool_schema,
     validate_strict_json_schema,
 )
-from app.core.openai.v1_requests import V1ResponsesRequest
+from app.core.openai.v1_requests import V1ResponsesRequest, reject_unsupported_response_controls
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.request_id import get_request_id
@@ -60,12 +60,10 @@ _MODEL_ALIAS_REASONING_TOKENS: dict[str, str] = {
     "low": "low",
     "medium": "medium",
     "high": "high",
-    "max": "max",
-    "ultra": "max",
     "xhigh": "high",
     "extra": "high",
 }
-_MODEL_ALIAS_REASONING_RANK: dict[str, int] = {"minimal": 0, "low": 1, "medium": 2, "high": 3, "max": 4}
+_MODEL_ALIAS_REASONING_RANK: dict[str, int] = {"minimal": 0, "low": 1, "medium": 2, "high": 3}
 _MODEL_ALIAS_SERVICE_TIER_TOKENS: dict[str, str] = {
     "fast": "priority",
     "priority": "priority",
@@ -373,8 +371,13 @@ def normalize_responses_request_payload(
     openai_compat: bool,
 ) -> ResponsesRequest:
     if openai_compat:
+        # This normalizer serves native/backend and websocket compatibility
+        # paths. Locally managed persistence is intentionally enabled only by
+        # the public /v1 HTTP route, which owns the durable lifecycle.
+        reject_unsupported_response_controls(payload)
         responses = V1ResponsesRequest.model_validate(payload).to_responses_request()
     else:
+        reject_unsupported_response_controls(payload)
         responses = ResponsesRequest.model_validate(payload)
     enforce_strict_text_format(responses)
     enforce_strict_function_tools_format(responses.tools)

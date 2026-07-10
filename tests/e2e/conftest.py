@@ -66,14 +66,18 @@ async def _maybe_await(result: object) -> None:
 
 
 @pytest_asyncio.fixture
-async def e2e_client(db_setup, monkeypatch):
+async def e2e_client(db_setup, monkeypatch, isolated_codexneo_sync_service):
     import app.main as main_module
+    from app.modules.accounts import api as accounts_api
 
     async def _noop_init_db() -> None:
         return None
 
     monkeypatch.setattr(main_module, "init_db", _noop_init_db)
     app = create_app()
+    app.dependency_overrides[accounts_api.get_codexneo_account_sync_service] = (
+        lambda: isolated_codexneo_sync_service
+    )
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:

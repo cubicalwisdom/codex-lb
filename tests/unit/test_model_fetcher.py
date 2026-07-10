@@ -49,6 +49,8 @@ class _CodexResponse:
                     "base_instructions": "",
                     "context_window": 128000,
                     "priority": 1,
+                    "model_messages": {"pragmatic": "Use the pragmatic personality."},
+                    "future_capability": {"enabled": True, "modes": ["next"]},
                 }
             ]
         }
@@ -109,3 +111,5 @@ async def test_fetch_models_for_plan_uses_resolved_codex_route(monkeypatch: pyte
     assert client.calls[0]["route"] is route
     assert client.calls[0]["method"] == "GET"
     assert str(client.calls[0]["url"]).endswith("/codex/models?client_version=0.128.0")
+    assert models[0].raw["model_messages"] == {"pragmatic": "Use the pragmatic personality."}
+    assert models[0].raw["future_capability"] == {"enabled": True, "modes": ["next"]}

@@ -1004,6 +1004,64 @@ async def test_api_key_update_accepts_uppercase_enforced_reasoning(async_client)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("effort", ["max", "ultra"])
+async def test_api_key_create_accepts_extended_gpt56_reasoning(async_client, effort):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": f"extended-reasoning-{effort}",
+            "enforcedReasoningEffort": effort,
+        },
+    )
+
+    assert created.status_code == 200
+    assert created.json()["enforcedReasoningEffort"] == effort
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effort", ["max", "ultra"])
+async def test_api_key_update_accepts_extended_gpt56_reasoning(async_client, effort):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": f"extended-reasoning-update-{effort}"},
+    )
+    assert created.status_code == 200
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{created.json()['id']}",
+        json={"enforcedReasoningEffort": effort},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["enforcedReasoningEffort"] == effort
+
+
+@pytest.mark.asyncio
+async def test_dashboard_models_expose_supported_and_default_reasoning(async_client):
+    response = await async_client.get("/api/models")
+
+    assert response.status_code == 200
+    models = {model["id"]: model for model in response.json()["models"]}
+    assert models["gpt-5.6-sol"]["supportedReasoningEfforts"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+    assert models["gpt-5.6-sol"]["defaultReasoningEffort"] == "low"
+    assert models["gpt-5.6-luna"]["supportedReasoningEfforts"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert models["gpt-5.6-luna"]["defaultReasoningEffort"] == "medium"
+
+
+@pytest.mark.asyncio
 async def test_stream_usage_logs_actual_service_tier(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",

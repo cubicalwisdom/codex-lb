@@ -73,6 +73,28 @@ describe("ApiKeyCreateDialog", () => {
     expect(onSubmit.mock.calls[0][0].trafficClass).toBe("opportunistic");
   });
 
+  it("offers and submits ultra reasoning", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Ultra key");
+    await user.click(screen.getByRole("combobox", { name: /enforced reasoning/i }));
+    await user.click(await screen.findByRole("option", { name: "Ultra" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].enforcedReasoningEffort).toBe("ultra");
+  });
+
   it("resets the codex /model checkbox when the dialog is dismissed", async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();

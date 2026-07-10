@@ -19,6 +19,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     ProxyResponseError,
     UpstreamProxyRouteTrace,
     _as_image_fetch_session,
+    _client_metadata_uses_responses_lite,
     _inline_content_images,
     _inline_input_image_urls,
     _ws_transport_payload_budget_bytes,
@@ -87,14 +88,17 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _fingerprint_input_items,
     _header_value_case_insensitive,
     _http_bridge_startup_keepalive_grace_seconds,
+    _inject_missing_interrupted_function_call_outputs,
     _input_prefix_matches_stored_context,
     _is_previous_response_not_found_error,
     _maybe_log_proxy_request_payload,
     _maybe_log_proxy_request_shape,
+    _missing_function_call_outputs_for_previous_response,
     _normalize_service_tier_value,
     _normalize_session_id,
     _openai_error_envelope_from_response_failed_payload,
     _partial_output_proxy_error_event_block,
+    _response_create_client_metadata,
     _responses_request_contains_input_image,
     _responses_request_uses_image_generation,
     _service_get_settings,
@@ -261,6 +265,43 @@ async def _iter_account_capacity_wait_sse(
         remaining_sleep_seconds -= chunk_seconds
 
 
+def _http_bridge_interrupted_tool_outputs_input(
+    session: _HTTPBridgeSession,
+    *,
+    payload: ResponsesRequest,
+    request_id: str,
+) -> list[JsonValue] | None:
+    if not session.last_pending_function_call_ids or session.last_completed_response_id is None:
+        return None
+    if payload.previous_response_id != session.last_completed_response_id:
+        return None
+    input_items = payload.input
+    if not isinstance(input_items, list):
+        return None
+    input_item_list = cast(list[JsonValue], input_items)
+    missing_call_ids = _missing_function_call_outputs_for_previous_response(
+        input_item_list,
+        pending_call_ids=session.last_pending_function_call_ids,
+        output_types=session.last_pending_tool_call_output_types,
+    )
+    if not missing_call_ids:
+        return None
+    logger.warning(
+        "http_bridge_interrupted_tool_outputs_injected request_id=%s previous_response_id=%s missing_call_count=%s",
+        request_id,
+        session.last_completed_response_id,
+        len(missing_call_ids),
+    )
+    return cast(
+        list[JsonValue],
+        _inject_missing_interrupted_function_call_outputs(
+            input_item_list,
+            missing_call_ids=missing_call_ids,
+            output_types=session.last_pending_tool_call_output_types,
+        ),
+    )
+
+
 class _HTTPBridgeStreamingMixin:
     def stream_http_responses(
         self: Any,
@@ -411,6 +452,40 @@ class _HTTPBridgeStreamingMixin:
         request_id = ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
+        bridge_payload = payload.to_payload()
+        bridge_client_metadata = _response_create_client_metadata(
+            bridge_payload,
+            headers=headers,
+            preserve_existing_responses_lite=forwarded_request,
+        )
+        bridge_uses_responses_lite = bridge_client_metadata is not None and _client_metadata_uses_responses_lite(
+            bridge_client_metadata
+        )
+        if bridge_client_metadata is not None or "client_metadata" in bridge_payload:
+            payload = payload.model_copy(update={"client_metadata": bridge_client_metadata})
+
+        def prepare_bridge_request(
+            request_payload: ResponsesRequest,
+            *,
+            reservation: ApiKeyUsageReservationData | None = api_key_reservation,
+        ) -> tuple[_WebSocketRequestState, str]:
+            if bridge_uses_responses_lite:
+                return self._prepare_http_bridge_request(
+                    request_payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=reservation,
+                    request_id=request_id,
+                    preserve_responses_lite_client_metadata=True,
+                )
+            return self._prepare_http_bridge_request(
+                request_payload,
+                headers,
+                api_key=api_key,
+                api_key_reservation=reservation,
+                request_id=request_id,
+            )
+
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
@@ -498,13 +573,7 @@ class _HTTPBridgeStreamingMixin:
                     update={"previous_response_id": durable_lookup.latest_response_id}
                 )
                 proxy_injected_previous_response_id = True
-                _fresh_request_state, fresh_upstream_request_text = self._prepare_http_bridge_request(
-                    payload,
-                    headers,
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    request_id=request_id,
-                )
+                _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(payload)
                 del _fresh_request_state
                 _log_http_bridge_event(
                     "fresh_reattach_anchor_injected",
@@ -537,13 +606,7 @@ class _HTTPBridgeStreamingMixin:
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
                 effective_payload = effective_payload.model_copy(update={"input": trimmed_input_items})
-        request_state, text_data = self._prepare_http_bridge_request(
-            effective_payload,
-            headers,
-            api_key=api_key,
-            api_key_reservation=api_key_reservation,
-            request_id=request_id,
-        )
+        request_state, text_data = prepare_bridge_request(effective_payload)
         if downstream_turn_state is not None:
             request_state.session_id = _normalize_session_id(downstream_turn_state)
         if previous_response_trimmed_input_count is not None:
@@ -690,13 +753,7 @@ class _HTTPBridgeStreamingMixin:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
-                request_state, text_data = self._prepare_http_bridge_request(
-                    payload,
-                    headers,
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    request_id=request_id,
-                )
+                request_state, text_data = prepare_bridge_request(payload)
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
                 request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -845,6 +902,14 @@ class _HTTPBridgeStreamingMixin:
                     else "owner_forward_bootstrap",
                     outcome="success",
                 )
+                recovery_payload = effective_payload
+                recovery_injected_input = _http_bridge_interrupted_tool_outputs_input(
+                    session,
+                    payload=recovery_payload,
+                    request_id=request_id,
+                )
+                if recovery_injected_input is not None:
+                    recovery_payload = recovery_payload.model_copy(update={"input": recovery_injected_input})
                 retry_request_state: _WebSocketRequestState | None = None
                 try:
                     retry_api_key_reservation = api_key_reservation
@@ -852,20 +917,17 @@ class _HTTPBridgeStreamingMixin:
                     if api_key is not None and api_key_reservation is not None:
                         retry_api_key_reservation = await self._reserve_websocket_api_key_usage(
                             api_key,
-                            request_model=effective_payload.model,
+                            request_model=recovery_payload.model,
                             request_service_tier=_normalize_service_tier_value(
-                                dict(effective_payload.to_payload()).get("service_tier"),
+                                dict(recovery_payload.to_payload()).get("service_tier"),
                             ),
-                            request_usage_budget=estimate_api_key_request_usage(effective_payload),
+                            request_usage_budget=estimate_api_key_request_usage(recovery_payload),
                         )
                         retry_reservation_reacquired = True
 
-                    retry_request_state, retry_text_data = self._prepare_http_bridge_request(
-                        effective_payload,
-                        headers,
-                        api_key=api_key,
-                        api_key_reservation=retry_api_key_reservation,
-                        request_id=request_id,
+                    retry_request_state, retry_text_data = prepare_bridge_request(
+                        recovery_payload,
+                        reservation=retry_api_key_reservation,
                     )
                     if downstream_turn_state is not None:
                         retry_request_state.session_id = _normalize_session_id(downstream_turn_state)
@@ -912,6 +974,9 @@ class _HTTPBridgeStreamingMixin:
             and durable_lookup is not None
             and durable_lookup.latest_response_id is not None
         ):
+            if durable_lookup.latest_response_id != session.last_completed_response_id:
+                session.last_pending_function_call_ids = []
+                session.last_pending_tool_call_output_types = {}
             session.last_completed_response_id = durable_lookup.latest_response_id
             session.last_completed_input_count = durable_full_resend_anchor_count
             session.last_completed_input_prefix_fingerprint = durable_full_resend_anchor_fingerprint
@@ -953,13 +1018,7 @@ class _HTTPBridgeStreamingMixin:
                 update={"previous_response_id": session.last_completed_response_id}
             )
             proxy_injected_previous_response_id = True
-            request_state, text_data = self._prepare_http_bridge_request(
-                effective_payload,
-                headers,
-                api_key=api_key,
-                api_key_reservation=api_key_reservation,
-                request_id=request_id,
-            )
+            request_state, text_data = prepare_bridge_request(effective_payload)
             request_state.transport = _REQUEST_TRANSPORT_HTTP
             request_state.request_stage = _http_bridge_request_stage(
                 headers=headers,
@@ -989,6 +1048,10 @@ class _HTTPBridgeStreamingMixin:
         incoming_input = effective_payload.input
         stored_count = session.last_completed_input_count
         stored_fingerprint = session.last_completed_input_prefix_fingerprint
+        submit_payload = effective_payload
+        store_context_trim_applied = False
+        store_context_original_count = 0
+        store_context_original_fingerprint: str | None = None
         if (
             has_previous_response_id
             and stored_count > 0
@@ -999,43 +1062,15 @@ class _HTTPBridgeStreamingMixin:
             incoming_input_list = cast(list[JsonValue], incoming_input)
             incoming_prefix_fingerprint = _fingerprint_input_items(incoming_input_list[:stored_count])
             if incoming_prefix_fingerprint == stored_fingerprint:
-                original_count = len(incoming_input_list)
-                trimmed_input = incoming_input_list[stored_count:]
-                trimmed_payload = effective_payload.model_copy(update={"input": trimmed_input})
-                previous_preferred_account_id = request_state.preferred_account_id
-                request_state, text_data = self._prepare_http_bridge_request(
-                    trimmed_payload,
-                    headers,
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    request_id=request_id,
-                )
-                if downstream_turn_state is not None:
-                    request_state.session_id = _normalize_session_id(downstream_turn_state)
-                request_state.transport = _REQUEST_TRANSPORT_HTTP
-                request_state.request_stage = _http_bridge_request_stage(
-                    headers=headers,
-                    payload=trimmed_payload,
-                    durable_lookup=durable_lookup,
-                )
-                request_state.preferred_account_id = previous_preferred_account_id
-                request_state.input_item_count = original_count
-                request_state.input_full_fingerprint = _fingerprint_input_items(incoming_input_list)
-                if proxy_injected_previous_response_id:
-                    request_state.proxy_injected_previous_response_id = True
-                    request_state.fresh_upstream_request_text = fresh_upstream_request_text
-                    # The trim branch only fires when the untrimmed payload
-                    # is a true full resend whose prefix exactly matches the
-                    # already-stored context, so the unanchored request text
-                    # is a safe fresh-turn replay target regardless of
-                    # whether the anchor came from the durable or
-                    # session-level injection path.
-                    request_state.fresh_upstream_request_is_retry_safe = True
+                store_context_trim_applied = True
+                store_context_original_count = len(incoming_input_list)
+                store_context_original_fingerprint = _fingerprint_input_items(incoming_input_list)
+                submit_payload = effective_payload.model_copy(update={"input": incoming_input_list[stored_count:]})
                 logger.info(
                     "store_context_input_trimmed request_id=%s original_items=%s trimmed_to=%s previous_response_id=%s",
                     request_id,
-                    original_count,
-                    len(trimmed_input),
+                    store_context_original_count,
+                    store_context_original_count - stored_count,
                     effective_payload.previous_response_id,
                 )
             else:
@@ -1046,6 +1081,40 @@ class _HTTPBridgeStreamingMixin:
                     len(incoming_input_list),
                     stored_count,
                     effective_payload.previous_response_id,
+                )
+        injected_input_items = _http_bridge_interrupted_tool_outputs_input(
+            session,
+            payload=submit_payload,
+            request_id=request_id,
+        )
+        if injected_input_items is not None:
+            submit_payload = submit_payload.model_copy(update={"input": injected_input_items})
+        if store_context_trim_applied or injected_input_items is not None:
+            previous_request_state = request_state
+            request_state, text_data = prepare_bridge_request(submit_payload)
+            if downstream_turn_state is not None:
+                request_state.session_id = _normalize_session_id(downstream_turn_state)
+            request_state.transport = _REQUEST_TRANSPORT_HTTP
+            request_state.request_stage = _http_bridge_request_stage(
+                headers=headers,
+                payload=submit_payload,
+                durable_lookup=durable_lookup,
+            )
+            request_state.preferred_account_id = previous_request_state.preferred_account_id
+            if store_context_trim_applied and injected_input_items is None:
+                request_state.input_item_count = store_context_original_count
+                request_state.input_full_fingerprint = store_context_original_fingerprint
+            elif previous_response_trimmed_input_count is not None and injected_input_items is None:
+                request_state.input_item_count = previous_response_trimmed_input_count
+                request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
+            if proxy_injected_previous_response_id:
+                request_state.proxy_injected_previous_response_id = True
+                request_state.fresh_upstream_request_text = fresh_upstream_request_text
+                request_state.fresh_upstream_request_is_retry_safe = (
+                    True if store_context_trim_applied else previous_request_state.fresh_upstream_request_is_retry_safe
+                )
+                request_state.fresh_upstream_request_responses_lite_model = (
+                    previous_request_state.fresh_upstream_request_responses_lite_model
                 )
         session_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
             session,
@@ -1254,6 +1323,13 @@ class _HTTPBridgeStreamingMixin:
                 )
                 recovery_path = "local_previous_response_error"
                 retry_payload = effective_payload
+                retry_injected_input = _http_bridge_interrupted_tool_outputs_input(
+                    session,
+                    payload=retry_payload,
+                    request_id=request_id,
+                )
+                if retry_injected_input is not None:
+                    retry_payload = retry_payload.model_copy(update={"input": retry_injected_input})
                 retry_previous_response_id = request_state.previous_response_id
                 retry_request_stage = "reattach"
                 retry_preferred_account_id = request_state.preferred_account_id
@@ -1329,12 +1405,9 @@ class _HTTPBridgeStreamingMixin:
                     )
                     retry_reservation_reacquired = True
 
-                retry_request_state, retry_text_data = self._prepare_http_bridge_request(
+                retry_request_state, retry_text_data = prepare_bridge_request(
                     retry_payload,
-                    headers,
-                    api_key=api_key,
-                    api_key_reservation=retry_api_key_reservation,
-                    request_id=request_id,
+                    reservation=retry_api_key_reservation,
                 )
                 if downstream_turn_state is not None:
                     retry_request_state.session_id = _normalize_session_id(downstream_turn_state)

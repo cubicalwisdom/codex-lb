@@ -13,11 +13,11 @@ from pathlib import Path
 from typing import Any, TypeVar, cast
 
 from app.core.clients.proxy import (
-    CODEX_RESPONSES_LITE_WS_METADATA_KEY,
     ImageFetchSession,
     ProxyResponseError,
+    _enforce_responses_lite_parallel_tool_calls,
     _inline_content_images,
-    responses_lite_requested_from_native_headers,
+    _normalize_responses_lite_websocket_client_metadata,
 )
 from app.core.config.settings import DEFAULT_HOME_DIR, get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
@@ -130,6 +130,7 @@ def _response_create_text(
         upstream_payload["type"] = "response.create"
     if client_metadata:
         upstream_payload["client_metadata"] = client_metadata
+    _enforce_responses_lite_parallel_tool_calls(upstream_payload)
     return json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
 
 
@@ -148,6 +149,7 @@ def _response_create_text_with_size_guard(
         upstream_payload["type"] = "response.create"
     if client_metadata:
         upstream_payload["client_metadata"] = client_metadata
+    _enforce_responses_lite_parallel_tool_calls(upstream_payload)
     text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
     payload_size = len(text_data.encode("utf-8"))
     max_bytes = _upstream_response_create_max_bytes()
@@ -235,59 +237,107 @@ def _slim_response_create_payload_for_upstream(
     }
 
 
-def _function_call_output_call_ids(input_items: list[JsonValue]) -> set[str]:
-    call_ids: set[str] = set()
+_TOOL_CALL_OUTPUT_TYPE_BY_CALL_TYPE = {
+    "function_call": "function_call_output",
+    "custom_tool_call": "custom_tool_call_output",
+    "apply_patch_call": "apply_patch_call_output",
+}
+_TOOL_CALL_OUTPUT_TYPES = frozenset(_TOOL_CALL_OUTPUT_TYPE_BY_CALL_TYPE.values())
+
+
+def _tool_call_output_types_by_call_id(input_items: list[JsonValue]) -> dict[str, set[str]]:
+    output_types_by_call_id: dict[str, set[str]] = {}
     for item in input_items:
-        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+        if not isinstance(item, dict):
+            continue
+        output_type = item.get("type")
+        if not isinstance(output_type, str) or output_type not in _TOOL_CALL_OUTPUT_TYPES:
             continue
         call_id = item.get("call_id")
         if isinstance(call_id, str) and call_id:
-            call_ids.add(call_id)
-    return call_ids
+            output_types_by_call_id.setdefault(call_id, set()).add(output_type)
+    return output_types_by_call_id
+
+
+def _function_call_output_call_ids(input_items: list[JsonValue]) -> set[str]:
+    return set(_tool_call_output_types_by_call_id(input_items))
 
 
 def _missing_function_call_outputs_for_previous_response(
     input_items: list[JsonValue],
     *,
     pending_call_ids: list[str],
+    output_types: Mapping[str, str] | None = None,
 ) -> list[str]:
     if not pending_call_ids:
         return []
-    present_call_ids = _function_call_output_call_ids(input_items)
-    return [call_id for call_id in pending_call_ids if call_id not in present_call_ids]
+    present_output_types = _tool_call_output_types_by_call_id(input_items)
+    return [
+        call_id
+        for call_id in pending_call_ids
+        if (output_types or {}).get(call_id, "function_call_output")
+        not in present_output_types.get(call_id, set())
+    ]
 
 
-def _synthetic_interrupted_function_call_output(call_id: str) -> dict[str, JsonValue]:
-    return {
-        "type": "function_call_output",
+def _synthetic_interrupted_function_call_output(
+    call_id: str,
+    *,
+    output_type: str = "function_call_output",
+) -> dict[str, JsonValue]:
+    if output_type not in _TOOL_CALL_OUTPUT_TYPES:
+        output_type = "function_call_output"
+    item: dict[str, JsonValue] = {
+        "type": output_type,
         "call_id": call_id,
         "output": (
             "Tool call was not executed because the previous turn was interrupted before tool output was available."
         ),
     }
+    if output_type == "apply_patch_call_output":
+        item["status"] = "failed"
+    return item
 
 
 def _inject_missing_interrupted_function_call_outputs(
     input_items: list[JsonValue],
     *,
     missing_call_ids: list[str],
+    output_types: Mapping[str, str] | None = None,
 ) -> list[JsonValue]:
     if not missing_call_ids:
         return input_items
     return [
-        *[_synthetic_interrupted_function_call_output(call_id) for call_id in missing_call_ids],
+        *[
+            _synthetic_interrupted_function_call_output(
+                call_id,
+                output_type=(output_types or {}).get(call_id, "function_call_output"),
+            )
+            for call_id in missing_call_ids
+        ],
         *input_items,
     ]
 
 
-def _response_output_item_done_function_call_id(payload: dict[str, JsonValue] | None) -> str | None:
+def _response_output_item_done_tool_call(payload: dict[str, JsonValue] | None) -> tuple[str, str] | None:
     if not isinstance(payload, dict) or payload.get("type") != "response.output_item.done":
         return None
     item = payload.get("item")
-    if not isinstance(item, dict) or item.get("type") != "function_call":
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    output_type = _TOOL_CALL_OUTPUT_TYPE_BY_CALL_TYPE.get(item_type) if isinstance(item_type, str) else None
+    if output_type is None:
         return None
     call_id = item.get("call_id")
-    return call_id if isinstance(call_id, str) and call_id else None
+    if not isinstance(call_id, str) or not call_id:
+        return None
+    return call_id, output_type
+
+
+def _response_output_item_done_function_call_id(payload: dict[str, JsonValue] | None) -> str | None:
+    tool_call = _response_output_item_done_tool_call(payload)
+    return tool_call[0] if tool_call is not None else None
 
 
 def _response_create_too_large_error_envelope(
@@ -723,6 +773,7 @@ def _response_create_client_metadata(
     payload: Mapping[str, JsonValue],
     *,
     headers: Mapping[str, str],
+    preserve_existing_responses_lite: bool = False,
 ) -> Mapping[str, JsonValue] | None:
     raw_value = payload.get("client_metadata")
     client_metadata: dict[str, JsonValue] = {}
@@ -732,11 +783,14 @@ def _response_create_client_metadata(
                 client_metadata[key] = value
 
     normalized_headers = {key.lower(): value for key, value in headers.items()}
-    if responses_lite_requested_from_native_headers(headers):
-        client_metadata.setdefault(CODEX_RESPONSES_LITE_WS_METADATA_KEY, "true")
-
     turn_metadata = normalized_headers.get("x-codex-turn-metadata")
     if isinstance(turn_metadata, str) and turn_metadata.strip():
         client_metadata.setdefault("x-codex-turn-metadata", turn_metadata)
+
+    client_metadata = _normalize_responses_lite_websocket_client_metadata(
+        payload,
+        client_metadata,
+        preserve_existing=preserve_existing_responses_lite,
+    )
 
     return client_metadata or None

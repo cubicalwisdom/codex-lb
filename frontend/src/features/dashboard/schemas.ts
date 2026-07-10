@@ -148,6 +148,7 @@ export const DashboardProjectionsSchema = z.object({
 const RequestLogCostBreakdownSchema = z.object({
   inputUsd: z.number().nullable().optional().default(null),
   cachedInputUsd: z.number().nullable().optional().default(null),
+  cacheWriteInputUsd: z.number().nullable().optional().default(null),
   outputUsd: z.number().nullable().optional().default(null),
   totalUsd: z.number().nullable().optional().default(null),
 });
@@ -181,6 +182,7 @@ export const RequestLogSchema = z.object({
   inputTokens: z.number().nullable().optional().default(null),
   outputTokens: z.number().nullable().optional().default(null),
   cachedInputTokens: z.number().nullable(),
+  cacheWriteTokens: z.number().nullable().optional().default(null),
   reasoningEffort: z.string().nullable(),
   costUsd: z.number().nullable(),
   costBreakdown: RequestLogCostBreakdownSchema.nullable().optional().default(null),

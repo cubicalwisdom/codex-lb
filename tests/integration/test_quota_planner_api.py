@@ -355,7 +355,13 @@ async def test_quota_planner_warm_now_executes_when_explicitly_gated(monkeypatch
 
     async def fake_send(self, *, account, model, request_id):
         del self, account, model, request_id
-        return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+        return WarmupUsage(
+            input_tokens=3,
+            output_tokens=1,
+            cached_input_tokens=0,
+            reasoning_tokens=None,
+            cache_write_tokens=1,
+        )
 
     async def failing_record_effect(self, account, model, *, source, confidence):
         del self, account, model, source, confidence
@@ -374,7 +380,9 @@ async def test_quota_planner_warm_now_executes_when_explicitly_gated(monkeypatch
     assert payload["status"] == "executed"
     async with SessionLocal() as session:
         logs = await session.execute(select(RequestLog).where(RequestLog.request_kind == "warmup"))
-        assert logs.scalar_one().request_id == payload["requestId"]
+        request_log = logs.scalar_one()
+        assert request_log.request_id == payload["requestId"]
+        assert request_log.cache_write_tokens == 1
 
 
 @pytest.mark.asyncio

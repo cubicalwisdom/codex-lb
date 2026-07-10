@@ -69,3 +69,34 @@ The database SHALL persist global warm-up settings, per-account opt-in, warm-up 
 - **WHEN** a warm-up request is logged
 - **THEN** the request log records a source value that allows account usage summaries to exclude internal warm-up traffic
 
+### Requirement: Responses lifecycle resources have a reversible schema
+
+The database SHALL persist API-key-scoped stored responses, conversations, and ordered conversation items through an Alembic revision on the current single-head migration graph. The schema MUST cascade conversation deletion to its items, index resource scope lookups, and support upgrade and downgrade without leaving a second Alembic head.
+
+#### Scenario: Migration creates lifecycle tables
+
+- **WHEN** the migration upgrades from its declared parent
+- **THEN** stored response, conversation, and conversation item tables exist with scope and lifecycle columns
+- **AND** Alembic reports exactly one head
+
+#### Scenario: Migration is reversible
+
+- **WHEN** the lifecycle migration is downgraded
+- **THEN** all three added tables and their indexes are removed
+
+### Requirement: Request logs persist cache-write tokens compatibly
+
+The database migration graph MUST add a nullable integer `cache_write_tokens` column to `request_logs` from the current single Alembic head. Upgrade and downgrade MUST preserve a single valid graph, and historical rows MUST remain valid with a null value rather than an inferred backfill.
+
+#### Scenario: Existing database upgrades
+
+- **WHEN** an existing database upgrades from the prior head
+- **THEN** `request_logs.cache_write_tokens` exists and is nullable
+- **AND** pre-existing request rows have a null cache-write value
+
+#### Scenario: Migration downgrades
+
+- **WHEN** the cache-write migration is downgraded
+- **THEN** only the `cache_write_tokens` column is removed
+- **AND** the migration graph returns to the prior head
+

@@ -10,6 +10,8 @@ For native Codex Responses requests, the proxy MUST preserve the complete ordere
 
 When a native Codex client requests Lite, upstream HTTP and compact transports MUST send `x-openai-internal-codex-responses-lite: true`. Upstream WebSocket transports MUST put `ws_request_header_x_openai_internal_codex_responses_lite: "true"` in `response.create.client_metadata` and MUST omit the HTTP-only marker from the WebSocket handshake. The proxy MUST NOT honor or synthesize the marker for a non-native client.
 
+Every full upstream payload selected for Responses Lite MUST contain `parallel_tool_calls: false`, including direct HTTP, direct WebSocket, HTTP-to-WebSocket bridge, owner-forward, fresh retry, and replay payloads. Trusted marker-only WebSocket continuations MUST follow the same rule. Non-Lite full Responses requests MUST retain the client's requested value.
+
 #### Scenario: Request validation preserves embedded tool bundles and ordering
 
 - **GIVEN** a full or compact Responses input array contains multiple `additional_tools` developer-role items, ordinary messages, and a matched `custom_tool_call` / `custom_tool_call_output` pair
@@ -33,6 +35,19 @@ When a native Codex client requests Lite, upstream HTTP and compact transports M
 - **THEN** the upstream handshake omits `x-openai-internal-codex-responses-lite`
 - **AND** the forwarded `response.create.client_metadata` contains `ws_request_header_x_openai_internal_codex_responses_lite: "true"`
 - **AND** the forwarded input preserves the embedded tool declaration, developer instruction, and custom tool output in their original relative order
+
+#### Scenario: Responses Lite disables parallel tool calls on every full wire payload
+
+- **GIVEN** a full native Codex Responses request selects Lite and requests `parallel_tool_calls: true`
+- **WHEN** the proxy forwards, retries, or replays it over HTTP or WebSocket
+- **THEN** the upstream payload contains `parallel_tool_calls: false`
+- **AND** a trusted same-model marker-only WebSocket continuation also contains `parallel_tool_calls: false`
+
+#### Scenario: Non-Lite parallel-tool behavior remains unchanged
+
+- **GIVEN** a full Responses request does not select Lite
+- **WHEN** the proxy forwards it
+- **THEN** this rule does not rewrite its requested `parallel_tool_calls` value
 
 #### Scenario: Non-native clients cannot enable the internal Lite transport
 
@@ -385,22 +400,37 @@ When an API key carries an enforced service tier, the proxy MUST override any in
 
 ### Requirement: Cursor GPT-5 model aliases normalize to canonical slugs
 
-For Responses proxy traffic, the service MUST recognize Cursor-style GPT-5 model aliases formed by appending known suffix tokens
-(`minimal`, `low`, `medium`, `high`, `xhigh`, `extra`, `fast`, `priority`, `reasoning`, `thinking`) to supported GPT-5 family slugs. The alias
-resolver MUST match longer qualified canonical slugs before shorter family prefixes so aliases such as `gpt-5.4-mini-high` and `gpt-5.3-codex-fast` normalize
-to the intended model. Unknown suffix tokens MUST leave the requested model unchanged.
+For Responses proxy traffic, the service MUST recognize Cursor-style GPT-5 model aliases formed by appending known suffix tokens (`minimal`, `low`, `medium`, `high`, `xhigh`, `extra`, `fast`, `priority`, `reasoning`, `thinking`) to supported GPT-5 family slugs, including `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. The resolver MUST match longer qualified canonical slugs before shorter family prefixes. Unknown suffix tokens MUST leave the requested model unchanged. `max` and `ultra` MUST NOT be treated as suffix tokens, and qualified canonical bases such as `gpt-5.1-codex-max` MUST be matched before shorter bases.
 
 #### Scenario: Qualified mini model alias normalizes reasoning
 
-- **WHEN** a client sends a Responses request with `model: "gpt-5.4-mini-high"`
-- **THEN** the forwarded upstream request uses `model: "gpt-5.4-mini"`
-- **AND** the forwarded upstream request uses `reasoning.effort: "high"`
+- **WHEN** a client sends `model: gpt-5.4-mini-high`
+- **THEN** the forwarded request uses `model: gpt-5.4-mini`
+- **AND** it uses `reasoning.effort: high`
 
 #### Scenario: Qualified codex model alias normalizes service tier
 
-- **WHEN** a client sends a Responses request with `model: "gpt-5.3-codex-fast"`
-- **THEN** the forwarded upstream request uses `model: "gpt-5.3-codex"`
-- **AND** the forwarded upstream request uses `service_tier: "priority"`
+- **WHEN** a client sends `model: gpt-5.3-codex-fast`
+- **THEN** the forwarded request uses `model: gpt-5.3-codex`
+- **AND** it uses `service_tier: priority`
+
+#### Scenario: GPT-5.6 personality alias normalizes reasoning and service tier
+
+- **WHEN** a client sends `model: gpt-5.6-sol-extra-high-fast`
+- **THEN** the forwarded request uses `model: gpt-5.6-sol`
+- **AND** it uses `reasoning.effort: high`
+- **AND** it uses `service_tier: priority`
+
+#### Scenario: Max-qualified canonical base keeps its identity
+
+- **WHEN** a client sends `model: gpt-5.1-codex-max-fast`
+- **THEN** the forwarded request uses `model: gpt-5.1-codex-max`
+- **AND** it uses `service_tier: priority`
+
+#### Scenario: GPT-5.6 max and ultra labels are not rewritten
+
+- **WHEN** a client sends `model: gpt-5.6-sol-max` or `model: gpt-5.6-sol-ultra`
+- **THEN** the model label remains unchanged
 
 ### Requirement: OpenAI-compatible Responses payload sanitation removes provider-specific thinking aliases
 
@@ -523,12 +553,13 @@ The service SHALL accept built-in Responses tool definitions on `/backend-api/co
 - **WHEN** a client sends `/backend-api/codex/responses` or `/v1/responses` with built-in Responses tools such as `image_generation`, `computer_use`, `computer_use_preview`, `file_search`, or `code_interpreter`
 - **THEN** the proxy forwards those tool objects upstream instead of returning a local `invalid_request_error`
 
-### Requirement: Compact requests drop tool-only fields
-The service SHALL remove `tools`, `tool_choice`, and `parallel_tool_calls` from compact request payloads before calling the upstream compact endpoint.
+### Requirement: Compact requests drop tool definitions and disable parallel tool calls
+The service SHALL remove `tools` and `tool_choice` from compact request payloads before calling the upstream compact endpoint, and SHALL explicitly send `parallel_tool_calls: false`.
 
 #### Scenario: compact request reuses a full Responses payload shape
 - **WHEN** a client sends `/backend-api/codex/responses/compact` or `/v1/responses/compact` with `tools`, `tool_choice`, or `parallel_tool_calls`
-- **THEN** the proxy drops those fields before the upstream compact request
+- **THEN** the proxy drops `tools` and `tool_choice` before the upstream compact request
+- **AND** the upstream compact payload contains `parallel_tool_calls: false`
 - **AND** the compact request continues without a local or upstream `invalid_request_error` caused by `param="tools"`
 
 ### Requirement: Responses requests accept input_file content items with a file_id
@@ -1087,3 +1118,295 @@ When an HTTP bridge request is still pending before upstream `response.completed
 - **AND** a visible HTTP bridge request is still counted in the session queue
 - **THEN** prewarm cleanup releases its response-create gate and admission state
 - **AND** the visible request queue count is preserved
+
+### Requirement: Continuation-only Responses requests are accepted
+
+`POST /v1/responses` and OpenAI-compatible requests sent to `POST /backend-api/codex/responses` MUST accept a request with no `input` or `messages` when it contains exactly one non-empty continuity key: `previous_response_id` or `conversation`. The normalized upstream payload MUST use empty instructions and an empty input list when those fields are omitted. Requests containing both continuity keys MUST remain invalid.
+
+#### Scenario: Continue by previous response without new input
+
+- **WHEN** a client sends a model and non-empty `previous_response_id` without `input` or `messages`
+- **THEN** local validation accepts the request
+- **AND** the normalized payload contains the same `previous_response_id`, `instructions=""`, and `input=[]`
+
+#### Scenario: Continue by conversation without new input
+
+- **WHEN** a client sends a model and non-empty `conversation` without `input` or `messages`
+- **THEN** local validation accepts the request
+- **AND** the normalized payload contains the same `conversation`, `instructions=""`, and `input=[]`
+
+### Requirement: Unsupported Responses controls fail explicitly
+
+The HTTP Responses compatibility surfaces MUST return HTTP 400 with an OpenAI-style error whose `code` is `unsupported_parameter` and whose `param` identifies the field when a request asks for generation behavior the ChatGPT-backed upstream cannot honor. `background=true`, `store=true`, and locally supported `metadata` are no longer unsupported on `/v1/responses`; they MUST be handled by the local lifecycle layer and removed before private upstream forwarding. Explicitly supplied unsupported controls such as `max_output_tokens`, `prompt_cache_retention`/`promptCacheRetention`, `safety_identifier`, `temperature`, `top_p`, `truncation`, or `user` MUST still fail and MUST NOT be silently discarded.
+
+#### Scenario: Locally implemented persistence flags are accepted
+
+- **WHEN** a `/v1/responses` client sends `store=true` or `background=true`
+- **THEN** the local lifecycle implementation handles the requested behavior
+- **AND** the unsupported private-upstream flags are not forwarded
+
+#### Scenario: Unsupported generation control is supplied
+
+- **WHEN** a client explicitly supplies one of the remaining unsupported generation controls
+- **THEN** the service returns HTTP 400 with `code=unsupported_parameter`
+- **AND** the error identifies the exact field in `param`
+
+### Requirement: Stored Responses lifecycle is API-key scoped
+
+`POST /v1/responses` with `store=true` or `background=true` MUST create a durable response resource scoped to the authenticated downstream API key. The same scope MUST be able to retrieve the resource, list its input items, and delete it. Other API-key scopes MUST receive an OpenAI-style not-found error and MUST NOT learn whether the resource exists.
+
+#### Scenario: Stored synchronous response is retrievable
+
+- **WHEN** a client creates a non-streaming response with `store=true`
+- **THEN** the terminal public response is persisted
+- **AND** `GET /v1/responses/{response_id}` returns the same response id, status, output, and usage
+
+#### Scenario: Response cannot cross API-key scopes
+
+- **GIVEN** a stored response was created by one API key
+- **WHEN** another API key retrieves, lists input items for, cancels, or deletes that id
+- **THEN** the service returns the same not-found contract as an unknown id
+
+### Requirement: Background Responses have an owned cancellable lifecycle
+
+`POST /v1/responses` with `background=true` MUST return promptly with a durable queued response and a stable public id. The application MUST own and track the execution task, persist in-progress and terminal states, cancel and await owned tasks during shutdown, and mark stranded non-terminal records failed during startup recovery. `POST /v1/responses/{response_id}/cancel` MUST cancel only an active background response in the same API-key scope.
+
+#### Scenario: Background response completes after polling
+
+- **WHEN** a client creates a response with `background=true`
+- **THEN** create returns a response with `status=queued` or `status=in_progress`
+- **AND** later retrieval returns a terminal response with the same public id
+
+#### Scenario: Active background response is cancelled
+
+- **WHEN** the owning client cancels an active background response
+- **THEN** the owned task is cancelled and awaited
+- **AND** the durable response status becomes `cancelled`
+
+### Requirement: Stored response input items are listable
+
+`GET /v1/responses/{response_id}/input_items` MUST return the normalized input items recorded for a same-scope stored response. Items MUST have stable ids, preserve input ordering, and support `after`, `limit`, and `order` cursor parameters using the OpenAI list envelope.
+
+#### Scenario: String input becomes one stable message item
+
+- **GIVEN** a stored response created from string input
+- **WHEN** the owner lists input items twice
+- **THEN** both calls return the same message item id and input text
+
+### Requirement: Input-token count is explicit about local limitations
+
+`POST /v1/responses/input_tokens` MUST return a deterministic `input_tokens` count for locally visible text and tool definitions. It MUST reject file/image references and unresolved previous-response context with an OpenAI-style error rather than report an invented exact count. The result MUST NOT be used as actual upstream billing usage.
+
+#### Scenario: Text request receives a deterministic count
+
+- **WHEN** the same text-only token-count payload is submitted twice
+- **THEN** both responses contain the same non-negative `input_tokens` value
+
+#### Scenario: Opaque input is rejected
+
+- **WHEN** token counting depends on a file, image, or unresolved upstream response
+- **THEN** the service returns HTTP 400 with a stable explicit error code
+
+### Requirement: Conversations and items are durable scoped resources
+
+The `/v1/conversations` resource and its item subresource MUST support create, retrieve, metadata update, delete, item create, item retrieve, item delete, and cursor-based item list operations within the owning API-key scope. Conversation ids and item ids MUST be stable. Deleting a conversation MUST delete its items.
+
+#### Scenario: Conversation CRUD preserves metadata
+
+- **WHEN** a client creates a conversation, updates its metadata, and retrieves it
+- **THEN** the same conversation id and updated metadata are returned
+
+#### Scenario: Conversation items preserve order
+
+- **WHEN** a client adds multiple items and lists them ascending
+- **THEN** the returned items match insertion order and have stable ids
+
+### Requirement: Responses can execute against local conversation state
+
+When a same-scope `POST /v1/responses` names a local conversation, the service MUST expand existing conversation items before new input for private upstream execution, MUST NOT forward the local conversation id as an upstream resource id, and MUST append the successful response input and output items back to that conversation in order. Unknown or cross-scope conversation ids MUST fail before upstream execution.
+
+#### Scenario: Conversation response uses accumulated context
+
+- **GIVEN** a conversation already contains one user message
+- **WHEN** the owner creates a response with that conversation and new input
+- **THEN** upstream execution receives the prior item before the new input
+- **AND** successful response input and output are appended to the conversation
+
+### Requirement: Responses cache-write usage remains typed and available for accounting
+
+The proxy MUST parse `usage.input_tokens_details.cache_write_tokens` as a non-negative token count when it is present and MUST carry the value through every successful Responses finalization path used for request accounting.
+
+#### Scenario: HTTP response reports cache-write tokens
+
+- **WHEN** an HTTP Responses completion reports `input_tokens_details.cache_write_tokens = 1000`
+- **THEN** the typed response usage exposes `cache_write_tokens = 1000`
+- **AND** the finalized request log receives `cache_write_tokens = 1000`
+
+#### Scenario: Websocket response omits cache-write tokens
+
+- **WHEN** a websocket Responses completion omits `input_tokens_details.cache_write_tokens`
+- **THEN** the typed response remains valid
+- **AND** the finalized request log records a null cache-write count
+
+#### Scenario: Upstream reports a negative cache-write count
+
+- **WHEN** a Responses completion reports a negative `input_tokens_details.cache_write_tokens`
+- **THEN** the typed usage normalizes the value to zero
+- **AND** request-log persistence cannot store a negative cache-write count
+
+### Requirement: Native tool-call continuations preserve typed output pairing
+
+Native Codex continuation handling MUST track completed `function_call`, `custom_tool_call`, and `apply_patch_call` items by `call_id` together with their required output item type. When a request continues the just-completed response and omits a pending output, the proxy MUST add one synthetic interrupted output of the matching type before forwarding. It MUST NOT add a duplicate when the matching output is already present and MUST NOT execute or retry the tool itself.
+
+#### Scenario: Custom tool output is missing from a continuation
+
+- **GIVEN** a completed native response emitted `custom_tool_call` with call id `call_custom`
+- **WHEN** the next request continues that response without a matching output
+- **THEN** the forwarded input begins with one `custom_tool_call_output` for `call_custom`
+- **AND** the upstream request is not rejected for a missing custom tool output
+
+#### Scenario: Custom tool output is already present
+
+- **GIVEN** a completed native response emitted `custom_tool_call` with call id `call_custom`
+- **WHEN** the continuation already contains `custom_tool_call_output` for `call_custom`
+- **THEN** the client output is forwarded unchanged
+- **AND** no synthetic duplicate is added
+
+#### Scenario: Upstream reports custom missing-output corruption
+
+- **WHEN** upstream reports `No tool output found for custom tool call call_*`
+- **THEN** the proxy classifies it as missing-output continuity corruption
+- **AND** does not expose the raw call id downstream
+
+#### Scenario: Safe full transcript repairs a rejected anchored continuation
+
+- **GIVEN** an anchored continuation has not produced `response.created`
+- **AND** request preparation retained a safe full transcript that is complete without the upstream anchor
+- **WHEN** upstream rejects the anchor for a missing tool output
+- **THEN** the proxy reconnects and replays that full transcript once without `previous_response_id`
+- **AND** the proxy does not execute a tool while replaying the recorded transcript
+
+#### Scenario: Short continuation cannot be repaired safely
+
+- **GIVEN** a continuation depends on `previous_response_id` and has no safe full transcript
+- **WHEN** upstream rejects it for a missing tool output
+- **THEN** the proxy fails closed without replaying the request
+
+### Requirement: Native Responses Lite signaling is derived and continuity-aware
+
+The proxy MUST derive the upstream Responses Lite signal from normalized input containing `additional_tools`, not from an inbound internal header or metadata marker. It MUST strip stale or untrusted markers and synthesize the transport-specific HTTP or WebSocket signal after alias normalization and API-key enforcement. A marker-only incremental WebSocket frame MAY retain the marker only when its `previous_response_id` equals the downstream-visible response id recorded by the most recently accepted Lite request for the same effective model. A missing or different anchor MUST have the marker stripped without clearing the earlier trusted continuity.
+
+A transparent replay that suppresses a new `response.created` MUST keep continuity on the original downstream-visible id, not the hidden replay id. A fresh full-resend replay that clears `previous_response_id` MUST drop the marker unless the replay body itself still contains `additional_tools`; acceptance of a marker-stripped replay MUST NOT establish Lite continuity. An accepted Lite prewarm MAY establish continuity. HTTP-bridge trim, owner-forward, and retry paths MUST preserve an internally derived canonical marker even when the forwarded input delta no longer contains the stored Lite prefix.
+
+#### Scenario: Marker-only incremental request follows an accepted Lite prewarm
+
+- **GIVEN** a native full Lite request for an effective model reached `response.created`
+- **WHEN** the same connection sends an incremental request for that model with the Lite metadata marker, the accepted response id as `previous_response_id`, and no repeated `additional_tools` item
+- **THEN** the proxy forwards the canonical Lite WebSocket metadata
+- **AND** a missing/different anchor or effective-model change strips the marker without clearing the trusted accepted anchor
+
+#### Scenario: Untrusted marker cannot enable Lite
+
+- **GIVEN** a request is not Lite-shaped and has no accepted same-model Lite continuity
+- **WHEN** it supplies the internal Lite header or WebSocket metadata key
+- **THEN** the proxy removes that signal before upstream forwarding
+
+#### Scenario: Suppressed-created replay keeps the visible Lite anchor
+
+- **GIVEN** a Lite request already exposed `response.created` downstream
+- **WHEN** a transparent replay suppresses its new created event and rewrites events to the original visible response id
+- **THEN** a same-model marker-only frame referencing the visible id remains trusted
+- **AND** a frame referencing the hidden replay id has its marker stripped
+
+#### Scenario: Fresh replay reclassifies the Lite marker from its body
+
+- **GIVEN** a trusted incremental frame is replayed without `previous_response_id`
+- **WHEN** the replay body has no `additional_tools` item
+- **THEN** the replay omits the reserved marker and does not create a new trusted Lite anchor
+- **BUT WHEN** the replay body retains `additional_tools`
+- **THEN** it keeps the canonical marker and may establish new continuity after acceptance
+
+#### Scenario: Bridge input trimming preserves internally derived Lite metadata
+
+- **GIVEN** an HTTP bridge request derived Lite mode from a stored `additional_tools` prefix
+- **WHEN** trim, owner-forward, or retry handling forwards only a later input delta
+- **THEN** the forwarded WebSocket request still carries the internally derived Lite metadata
+
+### Requirement: Non-message instruction-role directives remain byte-identical
+
+The proxy MUST preserve any typed system/developer input item whose type is neither absent nor `message`. Preservation MUST apply through instruction normalization, input sanitization, omitted-instructions defaulting, serialization, and compact trimming. Preserved directives MUST bypass sanitizer removal of fields including `reasoning_content`, `reasoning_details`, `tool_calls`, and `function_call`, and MUST act as compact-trim anchors.
+
+#### Scenario: Opaque developer directive survives every normalization stage
+
+- **GIVEN** a Responses request contains a typed developer directive with opaque `reasoning_content`, `reasoning_details`, `tool_calls`, and `function_call` fields
+- **WHEN** the proxy validates, sanitizes, compacts, and serializes the request
+- **THEN** the directive remains in `input` byte-for-byte and in order
+- **AND** omitted top-level `instructions` defaults to an accepted empty value
+
+### Requirement: Interrupted tool outputs are typed and recovery-safe
+
+The proxy MUST retain pending `function_call`, `custom_tool_call`, and `apply_patch_call` identities with their required output types across direct WebSocket and HTTP bridge continuations. Missing apply-patch outputs MUST use `apply_patch_call_output` with `status: failed`. HTTP bridge injection MUST occur before request preparation so size enforcement, fingerprints, stored context, and API-key usage budgeting observe the forwarded payload. Recovery and replay trimming MUST preserve typed outputs, including normal zero-input completed turns. A synthetic prewarm completion with zero output tokens MUST NOT replace the real continuity anchor. The existing one-shot safe full-transcript recovery for hidden orphan errors MUST remain available.
+
+On owner-forward failure before any downstream bytes, local recovery MUST inject synthetic interrupted outputs only when the rebound local session retains pending tool-call state for the anchored response id. If recovery rebinds a fresh local session with no pending tool-call state, the proxy MUST resubmit the anchored request unchanged and MUST NOT fabricate tool outputs. If upstream then rejects the request with a missing-tool-output error, the proxy MUST mask the raw 400 and call id as a retryable continuity failure. Persisting pending call ids in the durable bridge store is outside this change.
+
+#### Scenario: HTTP bridge prepares a typed interrupted output
+
+- **GIVEN** a completed response has an unresolved apply-patch call
+- **WHEN** the next anchored HTTP bridge request omits its output
+- **THEN** one failed apply-patch output is injected before request preparation
+- **AND** size, usage budget, fingerprint, stored context, retry payload, and replay trimming reflect that injected item
+
+#### Scenario: Hidden orphan falls back to a safe transcript
+
+- **GIVEN** upstream reports a missing tool output before `response.created` and the call id is not locally reconstructable
+- **AND** request preparation retained a transcript that is complete without the rejected anchor
+- **WHEN** the proxy attempts recovery
+- **THEN** it replays that transcript once without `previous_response_id`
+- **AND** unsafe short continuations remain fail-closed
+
+#### Scenario: Owner-forward failover recovery without local pending state is a bounded gap
+
+- **GIVEN** an anchored follow-up was forwarded to a remote owner and the relay fails before yielding bytes
+- **AND** pending call metadata exists only in the remote owner's memory because the durable store does not persist call ids
+- **WHEN** local recovery rebinds a fresh session with no pending tool-call state
+- **THEN** the anchored request is resubmitted unmodified, without fabricated tool outputs
+- **AND** any upstream missing-tool-output rejection is masked as a retryable continuity failure rather than exposing the raw 400 or call id
+
+#### Scenario: Synthetic prewarm does not replace real continuity
+
+- **GIVEN** a bridge session has a real completed-response anchor
+- **WHEN** a synthetic request with `request_kind: prewarm` completes with zero output tokens
+- **THEN** the prewarm does not replace the real session or durable anchor
+- **AND** a normal zero-input completed turn may still update continuity and pending-call state
+
+### Requirement: Missing-tool-output classification covers all tool call variants
+
+The proxy MUST classify an upstream `invalid_request_error` with `param: input` whose message starts with `No tool output found for function call call_`, `No tool output found for custom tool call call_`, or `No tool output found for apply patch call call_` as a missing-tool-output continuity error. Existing masking and retry recovery MUST engage instead of forwarding the raw upstream 400.
+
+#### Scenario: Custom tool call variant is masked on the HTTP bridge
+
+- **WHEN** upstream returns `invalid_request_error` with `param: input` and `No tool output found for custom tool call call_x`
+- **AND** the pending bridge request carries `previous_response_id`
+- **THEN** the proxy rewrites the error to a retryable continuity failure
+- **AND** the raw upstream message and call id are not exposed downstream
+
+### Requirement: Ultra reasoning effort is aliased to max on the upstream wire
+
+The proxy MUST forward an outbound Responses payload whose client-requested or API-key-enforced `reasoning.effort` resolves to `ultra` as `reasoning.effort: max`. Client catalog and persisted API-key configuration MUST retain `ultra`. Direct `max` and `xhigh` values MUST be forwarded unchanged. Automation dispatch paths are outside this selective reconciliation.
+
+#### Scenario: Client-requested ultra forwards as max
+
+- **WHEN** a client sends a Responses request for Sol with `reasoning: {"effort": "ultra"}`
+- **THEN** the forwarded upstream payload uses `reasoning.effort: max`
+
+#### Scenario: Enforced ultra forwards as max
+
+- **GIVEN** an API key is configured with `enforcedReasoningEffort: ultra`
+- **WHEN** a Responses request is proxied with that key
+- **THEN** the forwarded upstream payload uses `reasoning.effort: max`
+- **AND** the stored API-key policy remains `ultra`
+
+#### Scenario: Max and xhigh remain unchanged
+
+- **WHEN** a client sends `reasoning.effort: max` or `reasoning.effort: xhigh`
+- **THEN** the forwarded upstream payload keeps the same value

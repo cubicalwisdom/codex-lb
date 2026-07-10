@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any, Final, Literal, cast
@@ -18,6 +18,7 @@ from fastapi import (
     Form,
     HTTPException,
     Path,
+    Query,
     Request,
     Response,
     Security,
@@ -142,6 +143,15 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+from app.modules.responses_lifecycle import service as responses_lifecycle
+from app.modules.responses_lifecycle.runtime import get_background_response_manager
+from app.modules.responses_lifecycle.schemas import (
+    ConversationCreateRequest,
+    ConversationItemsCreateRequest,
+    ConversationUpdateRequest,
+    InputTokenCountRequest,
+)
+from app.modules.responses_lifecycle.token_count import OpaqueTokenCountInputError, count_input_tokens
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 
@@ -268,17 +278,32 @@ def _accepts_event_stream(request: Request) -> bool:
 def _has_openai_responses_shape(payload: V1ResponsesRequest | Mapping[str, JsonValue]) -> bool:
     if isinstance(payload, Mapping):
         payload_dict = cast("Mapping[str, JsonValue]", payload)
+        continuation_only = (
+            payload_dict.get("input") is None
+            and payload_dict.get("messages") is None
+            and (
+                bool(payload_dict.get("previous_response_id"))
+                or bool(payload_dict.get("conversation"))
+            )
+        )
         return (
             ("input" in payload_dict and payload_dict.get("instructions") is None)
             or payload_dict.get("messages") is not None
             or "truncation" in payload_dict
+            or continuation_only
         )
 
     explicit_fields = payload.model_fields_set
+    continuation_only = (
+        payload.input is None
+        and payload.messages is None
+        and (payload.previous_response_id is not None or payload.conversation is not None)
+    )
     return (
         ("input" in explicit_fields and payload.instructions is None)
         or payload.messages is not None
         or "truncation" in explicit_fields
+        or continuation_only
     )
 
 
@@ -561,6 +586,19 @@ async def v1_responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    background = payload.background is True
+    store = payload.store is True or background
+    metadata = payload.metadata
+    conversation_id = payload.conversation
+    public_previous_response_id = payload.previous_response_id
+    if payload.stream and background:
+        error = openai_error(
+            "unsupported_parameter",
+            "Locally managed background Responses require stream=false; poll the returned response id instead.",
+            error_type="invalid_request_error",
+        )
+        error["error"]["param"] = "stream"
+        return _logged_error_json_response(request, 400, error)
     try:
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
@@ -571,8 +609,85 @@ async def v1_responses(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
+
+    api_key_scope = _responses_api_key_scope(api_key)
+    if responses_payload.previous_response_id is not None:
+        try:
+            responses_payload.previous_response_id = await responses_lifecycle.resolve_previous_response_id(
+                responses_payload.previous_response_id,
+                api_key_scope,
+            )
+        except responses_lifecycle.LifecycleResourceNotFoundError:
+            return _lifecycle_not_found(
+                request,
+                "response",
+                responses_payload.previous_response_id,
+            )
+        except responses_lifecycle.LifecycleStateError as exc:
+            return _lifecycle_state_error(request, str(exc), param="previous_response_id")
+
+    new_input_items = responses_lifecycle.normalize_input_items(responses_payload.input)
+    if conversation_id is not None:
+        try:
+            prior_items = await responses_lifecycle.conversation_items_for_execution(
+                conversation_id,
+                api_key_scope,
+            )
+        except responses_lifecycle.LifecycleResourceNotFoundError:
+            return _lifecycle_not_found(request, "conversation", conversation_id)
+        responses_payload.input = [*prior_items, *new_input_items]
+        responses_payload.conversation = None
+
+    request_snapshot = cast(
+        dict[str, JsonValue],
+        payload.model_dump(mode="json", exclude_none=True),
+    )
+    if background:
+        response_id = responses_lifecycle.new_response_id()
+        created_at = int(time.time())
+        shell = responses_lifecycle.public_response_shell(
+            response_id=response_id,
+            model=responses_payload.model,
+            created_at=created_at,
+            status="queued",
+            background=True,
+            instructions=responses_payload.instructions,
+            tools=responses_payload.tools,
+            tool_choice=cast(JsonValue | None, responses_payload.tool_choice),
+            parallel_tool_calls=responses_payload.parallel_tool_calls,
+            metadata=metadata,
+            previous_response_id=public_previous_response_id,
+            conversation_id=conversation_id,
+        )
+        await responses_lifecycle.create_response(
+            response_id=response_id,
+            api_key_scope=api_key_scope,
+            status="queued",
+            background=True,
+            request=request_snapshot,
+            input_items=new_input_items,
+            response=shell,
+            conversation_id=conversation_id,
+            created_at=created_at,
+        )
+        get_background_response_manager().start(
+            response_id,
+            _run_background_response(
+                request=request,
+                payload=responses_payload.model_copy(deep=True),
+                context=context,
+                api_key=api_key,
+                api_key_scope=api_key_scope,
+                response_id=response_id,
+                metadata=metadata,
+                conversation_id=conversation_id,
+                input_items=new_input_items,
+            ),
+        )
+        return JSONResponse(content=shell, status_code=200)
+
     if responses_payload.stream:
-        return await _stream_responses(
+        stream_response = await _stream_responses(
             request,
             responses_payload,
             context,
@@ -581,7 +696,24 @@ async def v1_responses(
             openai_cache_affinity=True,
             prefer_http_bridge=True,
         )
-    return await _collect_responses(
+        if (store or conversation_id is not None) and isinstance(stream_response, StreamingResponse):
+            stream_response.body_iterator = _observe_lifecycle_stream(
+                stream_response.body_iterator,
+                api_key_scope=api_key_scope,
+                store=store,
+                request_snapshot=request_snapshot,
+                model=responses_payload.model,
+                instructions=responses_payload.instructions,
+                tools=responses_payload.tools,
+                tool_choice=cast(JsonValue | None, responses_payload.tool_choice),
+                parallel_tool_calls=responses_payload.parallel_tool_calls,
+                metadata=metadata,
+                public_previous_response_id=public_previous_response_id,
+                conversation_id=conversation_id,
+                input_items=new_input_items,
+            )
+        return stream_response
+    result = await _collect_responses(
         request,
         responses_payload,
         context,
@@ -590,6 +722,630 @@ async def v1_responses(
         openai_cache_affinity=True,
         prefer_http_bridge=True,
     )
+    if result.status_code >= 400:
+        return result
+    response_payload = _response_json_mapping(result)
+    if response_payload is None:
+        return result
+    upstream_response_id = response_payload.get("id")
+    public_response_id = (
+        upstream_response_id if isinstance(upstream_response_id, str) and upstream_response_id else None
+    ) or responses_lifecycle.new_response_id()
+    response_base = responses_lifecycle.public_response_shell(
+        response_id=public_response_id,
+        model=responses_payload.model,
+        created_at=_json_epoch(response_payload.get("created_at")),
+        status=str(response_payload.get("status") or "completed"),
+        background=False,
+        instructions=responses_payload.instructions,
+        tools=responses_payload.tools,
+        tool_choice=cast(JsonValue | None, responses_payload.tool_choice),
+        parallel_tool_calls=responses_payload.parallel_tool_calls,
+        metadata=metadata,
+        previous_response_id=public_previous_response_id,
+        conversation_id=conversation_id,
+    )
+    response_base.update(response_payload)
+    finalized = responses_lifecycle.finalize_public_response(
+        response_base,
+        public_response_id=public_response_id,
+        background=False,
+        metadata=metadata,
+        conversation_id=conversation_id,
+    )
+    if store:
+        await responses_lifecycle.create_response(
+            response_id=public_response_id,
+            api_key_scope=api_key_scope,
+            status=str(finalized.get("status") or "completed"),
+            background=False,
+            request=request_snapshot,
+            input_items=new_input_items,
+            response=finalized,
+            conversation_id=conversation_id,
+            created_at=_json_epoch(finalized.get("created_at")),
+        )
+        if isinstance(upstream_response_id, str):
+            await responses_lifecycle.update_response_status(
+                public_response_id,
+                api_key_scope,
+                status=str(finalized.get("status") or "completed"),
+                response=finalized,
+                upstream_response_id=upstream_response_id,
+            )
+    if conversation_id is not None:
+        await _append_response_to_conversation(
+            conversation_id,
+            api_key_scope,
+            input_items=new_input_items,
+            response=finalized,
+        )
+    return _json_response_preserving_headers(result, finalized)
+
+
+@v1_router.get("/responses/{response_id}")
+async def v1_retrieve_response(
+    request: Request,
+    response_id: str,
+    stream: bool = Query(default=False),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    if stream:
+        return _lifecycle_state_error(
+            request,
+            "Stored response stream replay is not supported.",
+            param="stream",
+            code="unsupported_parameter",
+        )
+    try:
+        record = await responses_lifecycle.get_response(response_id, _responses_api_key_scope(api_key))
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        return _lifecycle_not_found(request, "response", response_id)
+    return JSONResponse(content=record.response)
+
+
+@v1_router.delete("/responses/{response_id}")
+async def v1_delete_response(
+    request: Request,
+    response_id: str,
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    api_key_scope = _responses_api_key_scope(api_key)
+    try:
+        record = await responses_lifecycle.get_response(response_id, api_key_scope)
+        if record.status in responses_lifecycle.ACTIVE_RESPONSE_STATUSES:
+            return _lifecycle_state_error(request, "Cancel an active background response before deleting it.")
+        await responses_lifecycle.delete_response(response_id, api_key_scope)
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        return _lifecycle_not_found(request, "response", response_id)
+    return JSONResponse(content={"id": response_id, "object": "response", "deleted": True})
+
+
+@v1_router.post("/responses/{response_id}/cancel")
+async def v1_cancel_response(
+    request: Request,
+    response_id: str,
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    api_key_scope = _responses_api_key_scope(api_key)
+    try:
+        record = await responses_lifecycle.get_response(response_id, api_key_scope)
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        return _lifecycle_not_found(request, "response", response_id)
+    if not record.background or record.status not in responses_lifecycle.ACTIVE_RESPONSE_STATUSES:
+        return _lifecycle_state_error(
+            request,
+            "Only an active background response can be cancelled.",
+        )
+    cancelled = await get_background_response_manager().cancel(response_id)
+    if not cancelled:
+        refreshed = await responses_lifecycle.get_response(response_id, api_key_scope)
+        if refreshed.status not in responses_lifecycle.ACTIVE_RESPONSE_STATUSES:
+            return _lifecycle_state_error(
+                request,
+                "The background response is already terminal and cannot be cancelled.",
+            )
+        return _lifecycle_state_error(
+            request,
+            "The background response worker is not active on this instance.",
+            code="background_worker_unavailable",
+        )
+    cancelled_response = dict(record.response)
+    cancelled_response.update({"status": "cancelled", "completed_at": None, "error": None})
+    updated = await responses_lifecycle.update_response_status(
+        response_id,
+        api_key_scope,
+        status="cancelled",
+        response=cancelled_response,
+    )
+    return JSONResponse(content=updated.response)
+
+
+@v1_router.get("/responses/{response_id}/input_items")
+async def v1_response_input_items(
+    request: Request,
+    response_id: str,
+    after: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    order: Literal["asc", "desc"] = Query(default="desc"),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    try:
+        record = await responses_lifecycle.get_response(response_id, _responses_api_key_scope(api_key))
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        return _lifecycle_not_found(request, "response", response_id)
+    return JSONResponse(
+        content=responses_lifecycle.paginate_input_items(
+            record.input_items,
+            after=after,
+            limit=limit,
+            order=order,
+        )
+    )
+
+
+@v1_router.post("/responses/input_tokens")
+async def v1_response_input_tokens(
+    request: Request,
+    payload: InputTokenCountRequest = Body(...),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    try:
+        input_tokens = await count_input_tokens(payload, _responses_api_key_scope(api_key))
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        conversation = payload.conversation
+        conversation_id = conversation if isinstance(conversation, str) else "unknown"
+        return _lifecycle_not_found(request, "conversation", conversation_id)
+    except OpaqueTokenCountInputError as exc:
+        return _lifecycle_state_error(
+            request,
+            str(exc),
+            code="unsupported_token_count_input",
+        )
+    return JSONResponse(
+        content={"object": "response.input_tokens", "input_tokens": input_tokens},
+        headers={"x-codex-lb-token-count": "local-compatible"},
+    )
+
+
+@v1_router.post("/conversations")
+async def v1_create_conversation(
+    payload: ConversationCreateRequest = Body(default_factory=ConversationCreateRequest),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    conversation = await responses_lifecycle.create_conversation(
+        _responses_api_key_scope(api_key),
+        metadata=payload.metadata,
+        items=payload.items,
+    )
+    return JSONResponse(content=conversation.to_public())
+
+
+@v1_router.get("/conversations/{conversation_id}")
+async def v1_retrieve_conversation(
+    request: Request,
+    conversation_id: str,
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    try:
+        conversation = await responses_lifecycle.get_conversation(
+            conversation_id,
+            _responses_api_key_scope(api_key),
+        )
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        return _lifecycle_not_found(request, "conversation", conversation_id)
+    return JSONResponse(content=conversation.to_public())
+
+
+@v1_router.post("/conversations/{conversation_id}")
+async def v1_update_conversation(
+    request: Request,
+    conversation_id: str,
+    payload: ConversationUpdateRequest = Body(...),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    try:
+        conversation = await responses_lifecycle.update_conversation(
+            conversation_id,
+            _responses_api_key_scope(api_key),
+            payload.metadata,
+        )
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        return _lifecycle_not_found(request, "conversation", conversation_id)
+    return JSONResponse(content=conversation.to_public())
+
+
+@v1_router.delete("/conversations/{conversation_id}")
+async def v1_delete_conversation(
+    request: Request,
+    conversation_id: str,
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    try:
+        await responses_lifecycle.delete_conversation(conversation_id, _responses_api_key_scope(api_key))
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        return _lifecycle_not_found(request, "conversation", conversation_id)
+    return JSONResponse(content={"id": conversation_id, "object": "conversation.deleted", "deleted": True})
+
+
+@v1_router.post("/conversations/{conversation_id}/items")
+async def v1_create_conversation_items(
+    request: Request,
+    conversation_id: str,
+    payload: ConversationItemsCreateRequest = Body(...),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    try:
+        items = await responses_lifecycle.append_conversation_items(
+            conversation_id,
+            _responses_api_key_scope(api_key),
+            payload.items,
+        )
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        return _lifecycle_not_found(request, "conversation", conversation_id)
+    return JSONResponse(content=_conversation_item_list(items))
+
+
+@v1_router.get("/conversations/{conversation_id}/items")
+async def v1_list_conversation_items(
+    request: Request,
+    conversation_id: str,
+    after: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    order: Literal["asc", "desc"] = Query(default="desc"),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    try:
+        result = await responses_lifecycle.list_conversation_items(
+            conversation_id,
+            _responses_api_key_scope(api_key),
+            after=after,
+            limit=limit,
+            order=order,
+        )
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        return _lifecycle_not_found(request, "conversation", conversation_id)
+    return JSONResponse(content=result)
+
+
+@v1_router.get("/conversations/{conversation_id}/items/{item_id}")
+async def v1_retrieve_conversation_item(
+    request: Request,
+    conversation_id: str,
+    item_id: str,
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    try:
+        item = await responses_lifecycle.get_conversation_item(
+            conversation_id,
+            item_id,
+            _responses_api_key_scope(api_key),
+        )
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        return _lifecycle_not_found(request, "conversation item", item_id)
+    return JSONResponse(content=item)
+
+
+@v1_router.delete("/conversations/{conversation_id}/items/{item_id}")
+async def v1_delete_conversation_item(
+    request: Request,
+    conversation_id: str,
+    item_id: str,
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    try:
+        conversation = await responses_lifecycle.delete_conversation_item(
+            conversation_id,
+            item_id,
+            _responses_api_key_scope(api_key),
+        )
+    except responses_lifecycle.LifecycleResourceNotFoundError:
+        return _lifecycle_not_found(request, "conversation item", item_id)
+    return JSONResponse(content=conversation.to_public())
+
+
+async def _observe_lifecycle_stream(
+    stream: AsyncIterable[str | bytes | memoryview[int]],
+    *,
+    api_key_scope: str,
+    store: bool,
+    request_snapshot: Mapping[str, JsonValue],
+    model: str,
+    instructions: str,
+    tools: list[JsonValue],
+    tool_choice: JsonValue | None,
+    parallel_tool_calls: bool | None,
+    metadata: Mapping[str, str] | None,
+    public_previous_response_id: str | None,
+    conversation_id: str | None,
+    input_items: list[JsonValue],
+) -> AsyncIterator[str | bytes | memoryview[int]]:
+    output_items: dict[int, dict[str, JsonValue]] = {}
+    terminal_response: dict[str, JsonValue] | None = None
+    async for chunk in stream:
+        text_chunk = (
+            bytes(chunk).decode("utf-8", errors="replace")
+            if isinstance(chunk, (bytes, memoryview))
+            else chunk
+        )
+        payload = _parse_sse_payload(text_chunk)
+        if payload is not None:
+            _collect_output_item_event(payload, output_items)
+            event_type = payload.get("type")
+            response_value = payload.get("response")
+            if event_type in {"response.completed", "response.incomplete"} and is_json_mapping(response_value):
+                normalized, _ = _normalize_public_response_mapping(response_value, output_items)
+                if normalized is not None:
+                    terminal_response = normalized
+        yield chunk
+
+    if terminal_response is None:
+        return
+    response_id_value = terminal_response.get("id")
+    response_id = (
+        response_id_value if isinstance(response_id_value, str) and response_id_value else None
+    ) or responses_lifecycle.new_response_id()
+    response_base = responses_lifecycle.public_response_shell(
+        response_id=response_id,
+        model=model,
+        created_at=_json_epoch(terminal_response.get("created_at")),
+        status=str(terminal_response.get("status") or "completed"),
+        background=False,
+        instructions=instructions,
+        tools=tools,
+        tool_choice=tool_choice,
+        parallel_tool_calls=parallel_tool_calls,
+        metadata=metadata,
+        previous_response_id=public_previous_response_id,
+        conversation_id=conversation_id,
+    )
+    response_base.update(terminal_response)
+    finalized = responses_lifecycle.finalize_public_response(
+        response_base,
+        public_response_id=response_id,
+        background=False,
+        metadata=metadata,
+        conversation_id=conversation_id,
+    )
+    try:
+        if store:
+            status_value = finalized.get("status")
+            status = status_value if isinstance(status_value, str) else "completed"
+            await responses_lifecycle.create_response(
+                response_id=response_id,
+                api_key_scope=api_key_scope,
+                status=status,
+                background=False,
+                request=request_snapshot,
+                input_items=input_items,
+                response=finalized,
+                conversation_id=conversation_id,
+                created_at=_json_epoch(finalized.get("created_at")),
+            )
+            await responses_lifecycle.update_response_status(
+                response_id,
+                api_key_scope,
+                status=status,
+                response=finalized,
+                upstream_response_id=response_id,
+            )
+        if conversation_id is not None:
+            await _append_response_to_conversation(
+                conversation_id,
+                api_key_scope,
+                input_items=input_items,
+                response=finalized,
+            )
+    except Exception:
+        logger.exception(
+            "Failed to persist terminal lifecycle state for streamed response response_id=%s",
+            response_id,
+        )
+
+
+async def _run_background_response(
+    *,
+    request: Request,
+    payload: ResponsesRequest,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    api_key_scope: str,
+    response_id: str,
+    metadata: Mapping[str, str] | None,
+    conversation_id: str | None,
+    input_items: list[JsonValue],
+) -> None:
+    record = await responses_lifecycle.get_response(response_id, api_key_scope)
+    in_progress = dict(record.response)
+    in_progress["status"] = "in_progress"
+    await responses_lifecycle.update_response_status(
+        response_id,
+        api_key_scope,
+        status="in_progress",
+        response=in_progress,
+    )
+    try:
+        result = await _collect_responses(
+            request,
+            payload,
+            context,
+            api_key,
+            codex_session_affinity=False,
+            openai_cache_affinity=True,
+            prefer_http_bridge=True,
+        )
+        response_payload = _response_json_mapping(result)
+        if result.status_code >= 400 or response_payload is None:
+            error_value = response_payload.get("error") if response_payload is not None else None
+            failed = dict(in_progress)
+            failed.update(
+                {
+                    "status": "failed",
+                    "error": error_value
+                    if isinstance(error_value, dict)
+                    else {
+                        "code": "background_response_failed",
+                        "message": "Background response execution failed.",
+                        "type": "server_error",
+                    },
+                }
+            )
+            await responses_lifecycle.update_response_status(
+                response_id,
+                api_key_scope,
+                status="failed",
+                response=failed,
+            )
+            return
+        upstream_response_id_value = response_payload.get("id")
+        upstream_response_id = (
+            upstream_response_id_value if isinstance(upstream_response_id_value, str) else None
+        )
+        response_base = dict(in_progress)
+        response_base.update(response_payload)
+        finalized = responses_lifecycle.finalize_public_response(
+            response_base,
+            public_response_id=response_id,
+            background=True,
+            metadata=metadata,
+            conversation_id=conversation_id,
+        )
+        status_value = finalized.get("status")
+        status = status_value if isinstance(status_value, str) else "completed"
+        await responses_lifecycle.update_response_status(
+            response_id,
+            api_key_scope,
+            status=status,
+            response=finalized,
+            upstream_response_id=upstream_response_id,
+        )
+        if conversation_id is not None:
+            try:
+                await _append_response_to_conversation(
+                    conversation_id,
+                    api_key_scope,
+                    input_items=input_items,
+                    response=finalized,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to append background response to conversation response_id=%s conversation_id=%s",
+                    response_id,
+                    conversation_id,
+                )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Background response execution failed response_id=%s", response_id)
+        failed = dict(in_progress)
+        failed.update(
+            {
+                "status": "failed",
+                "error": {
+                    "code": "background_response_failed",
+                    "message": "Background response execution failed.",
+                    "type": "server_error",
+                },
+            }
+        )
+        await responses_lifecycle.update_response_status(
+            response_id,
+            api_key_scope,
+            status="failed",
+            response=failed,
+        )
+
+
+async def _append_response_to_conversation(
+    conversation_id: str,
+    api_key_scope: str,
+    *,
+    input_items: list[JsonValue],
+    response: Mapping[str, JsonValue],
+) -> None:
+    output_value = response.get("output")
+    output_items = cast(list[JsonValue], output_value) if isinstance(output_value, list) else []
+    await responses_lifecycle.append_conversation_items(
+        conversation_id,
+        api_key_scope,
+        [*input_items, *output_items],
+    )
+
+
+def _responses_api_key_scope(api_key: ApiKeyData | None) -> str:
+    return api_key.id if api_key is not None else responses_lifecycle.ANONYMOUS_API_KEY_SCOPE
+
+
+def _json_epoch(value: JsonValue | None) -> int:
+    if isinstance(value, bool):
+        return int(time.time())
+    if isinstance(value, (int, float)):
+        return int(value)
+    return int(time.time())
+
+
+def _response_json_mapping(response: Response) -> dict[str, JsonValue] | None:
+    body = getattr(response, "body", None)
+    if not isinstance(body, bytes):
+        return None
+    try:
+        parsed = json.loads(body)
+    except (JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return cast(dict[str, JsonValue], parsed)
+
+
+def _json_response_preserving_headers(
+    original: Response,
+    content: Mapping[str, JsonValue],
+) -> JSONResponse:
+    headers = {
+        key: value
+        for key, value in original.headers.items()
+        if key.lower() not in {"content-length", "content-type"}
+    }
+    return JSONResponse(content=dict(content), status_code=original.status_code, headers=headers)
+
+
+def _conversation_item_list(items: list[JsonValue]) -> dict[str, JsonValue]:
+    ids = [item.get("id") for item in items if isinstance(item, dict) and isinstance(item.get("id"), str)]
+    return {
+        "object": "list",
+        "data": items,
+        "first_id": ids[0] if ids else "",
+        "last_id": ids[-1] if ids else "",
+        "has_more": False,
+    }
+
+
+def _lifecycle_not_found(request: Request, resource: str, resource_id: str) -> JSONResponse:
+    error = openai_error(
+        "not_found",
+        f"No {resource} found with id '{resource_id}'.",
+        error_type="invalid_request_error",
+    )
+    return _logged_error_json_response(request, 404, error)
+
+
+def _lifecycle_state_error(
+    request: Request,
+    message: str,
+    *,
+    param: str | None = None,
+    code: str = "invalid_response_state",
+) -> JSONResponse:
+    error: dict[str, JsonValue] = {
+        "error": {
+            "message": message,
+            "type": "invalid_request_error",
+            "code": code,
+        }
+    }
+    if param is not None:
+        cast(dict[str, JsonValue], error["error"])["param"] = param
+    return _logged_error_json_response(request, 400, error)
 
 
 @internal_router.post(
@@ -682,10 +1438,13 @@ async def models(
     return await _build_codex_models_response(api_key)
 
 
-@v1_router.get("/models", response_model=ModelListResponse)
+@v1_router.get("/models", response_model=None)
 async def v1_models(
+    request: Request,
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    if request.query_params.get("client_version"):
+        return await _build_codex_models_response(api_key)
     return await _build_models_response(api_key)
 
 
@@ -1103,6 +1862,7 @@ async def v1_audio_transcriptions(
     )
 
 
+@router.post("/images/generations", response_model=None, include_in_schema=False)
 @v1_router.post("/images/generations", response_model=None)
 async def v1_images_generations(
     request: Request,
@@ -1240,6 +2000,104 @@ async def v1_images_edits(
         payload=form_payload,
         images=images_payload,
         mask=mask_payload,
+        context=context,
+        api_key=api_key,
+    )
+
+
+@router.post("/images/edits", response_model=None, include_in_schema=False)
+async def codex_images_edits(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    try:
+        raw_payload = await request.json()
+    except (JSONDecodeError, UnicodeDecodeError):
+        return _logged_error_json_response(
+            request,
+            400,
+            images_service_module.make_invalid_request_error(
+                "Expected a JSON request body.",
+                param="prompt",
+            ),
+        )
+    if not is_json_mapping(raw_payload):
+        return _logged_error_json_response(
+            request,
+            400,
+            images_service_module.make_invalid_request_error(
+                "Expected a JSON object request body.",
+                param="prompt",
+            ),
+        )
+
+    raw_form: dict[str, object] = {
+        "model": raw_payload.get("model"),
+        "prompt": raw_payload.get("prompt"),
+        "n": raw_payload.get("n", 1),
+        "size": raw_payload.get("size", "auto"),
+        "quality": raw_payload.get("quality", "auto"),
+        "background": raw_payload.get("background", "auto"),
+        "output_format": raw_payload.get("output_format", "png"),
+        "output_compression": raw_payload.get("output_compression", 100),
+        "moderation": raw_payload.get("moderation", "auto"),
+        "partial_images": raw_payload.get("partial_images"),
+        "stream": raw_payload.get("stream", False),
+        "input_fidelity": raw_payload.get("input_fidelity"),
+        "user": raw_payload.get("user"),
+    }
+    try:
+        form_payload = V1ImagesEditsForm.model_validate(raw_form)
+    except ValidationError as exc:
+        return _logged_error_json_response(request, 400, openai_validation_error(exc))
+
+    raw_images = raw_payload.get("images")
+    if not isinstance(raw_images, list) or not raw_images:
+        return _logged_error_json_response(
+            request,
+            400,
+            images_service_module.make_invalid_request_error(
+                "At least one `images[].image_url` data URL is required.",
+                param="images",
+            ),
+        )
+
+    images: list[tuple[bytes, str | None]] = []
+    for index, raw_image in enumerate(raw_images):
+        if not is_json_mapping(raw_image):
+            return _logged_error_json_response(
+                request,
+                400,
+                images_service_module.make_invalid_request_error(
+                    f"images[{index}].image_url must be a base64 data URL.",
+                    param="images",
+                ),
+            )
+        image_url = raw_image.get("image_url")
+        if not isinstance(image_url, str):
+            return _logged_error_json_response(
+                request,
+                400,
+                images_service_module.make_invalid_request_error(
+                    f"images[{index}].image_url must be a base64 data URL.",
+                    param="images",
+                ),
+            )
+        try:
+            images.append(images_service_module.decode_data_url(image_url))
+        except ValueError as exc:
+            return _logged_error_json_response(
+                request,
+                400,
+                images_service_module.make_invalid_request_error(str(exc), param="images"),
+            )
+
+    return await _proxy_images_edit_request(
+        request=request,
+        payload=form_payload,
+        images=images,
+        mask=None,
         context=context,
         api_key=api_key,
     )
@@ -1715,23 +2573,27 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     if not models:
         await _release_reservation(reservation)
-        return JSONResponse(content=CodexModelsResponse(models=[]).model_dump(mode="json"))
+        return JSONResponse(content=CodexModelsResponse(models=[], data=[]).model_dump(mode="json"))
 
     entries: list[CodexModelEntry] = []
+    data: list[ModelListItem] = []
     for slug, model in models.items():
         if visibility_allowed_models is None:
             if not is_public_model(model, allowed_models):
                 continue
-            entries.append(_to_codex_model_entry(model))
+            entry = _to_codex_model_entry(model)
+            entries.append(entry)
+            data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
             continue
-        entries.append(
-            _to_codex_model_entry(
-                model,
-                visibility="list" if slug in visibility_allowed_models else "hide",
-            )
+        entry = _to_codex_model_entry(
+            model,
+            visibility="list" if slug in visibility_allowed_models else "hide",
         )
+        entries.append(entry)
+        if entry.visibility == "list":
+            data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
     await _release_reservation(reservation)
-    return JSONResponse(content=CodexModelsResponse(models=entries).model_dump(mode="json"))
+    return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))
 
 
 async def _build_models_response(api_key: ApiKeyData | None) -> Response:
@@ -1755,28 +2617,7 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     for slug, model in models.items():
         if not is_public_model(model, allowed_models):
             continue
-        items.append(
-            ModelListItem.model_validate(
-                {
-                    "id": slug,
-                    "created": created,
-                    "owned_by": "codex-lb",
-                    "metadata": _to_model_metadata(model),
-                    "api_types": ["chat_completions"],
-                    "capabilities": _v1_model_capabilities(model),
-                    "context_length": _v1_input_context_window(model),
-                    "contextLength": _v1_input_context_window(model),
-                    "max_output_tokens": _v1_max_output_tokens(model),
-                    "maxOutputTokens": _v1_max_output_tokens(model),
-                    "supports_reasoning": _v1_supports_reasoning(model),
-                    "supportsReasoning": _v1_supports_reasoning(model),
-                    "supports_images": _v1_supports_vision(model),
-                    "supportsImages": _v1_supports_vision(model),
-                    "supports_vision": _v1_supports_vision(model),
-                    "supportsVision": _v1_supports_vision(model),
-                }
-            )
-        )
+        items.append(_to_model_list_item(slug, model, created=created))
     await _release_reservation(reservation)
     return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
 
@@ -1795,6 +2636,39 @@ def _canonical_model_set(models: Iterable[str]) -> set[str]:
 
 def _canonical_model_slug(model: str) -> str:
     return resolve_model_alias(model) or model
+
+
+def _to_model_list_item(slug: str, model: UpstreamModel, *, created: int) -> ModelListItem:
+    return ModelListItem.model_validate(
+        {
+            "id": slug,
+            "created": created,
+            "owned_by": "codex-lb",
+            "metadata": _to_model_metadata(model),
+            "api_types": ["chat_completions"],
+            "capabilities": _v1_model_capabilities(model),
+            "context_length": _v1_input_context_window(model),
+            "contextLength": _v1_input_context_window(model),
+            "max_output_tokens": _v1_max_output_tokens(model),
+            "maxOutputTokens": _v1_max_output_tokens(model),
+            "supports_reasoning": _v1_supports_reasoning(model),
+            "supportsReasoning": _v1_supports_reasoning(model),
+            "supports_images": _v1_supports_vision(model),
+            "supportsImages": _v1_supports_vision(model),
+            "supports_vision": _v1_supports_vision(model),
+            "supportsVision": _v1_supports_vision(model),
+        }
+    )
+
+
+def _model_list_created_at(model: UpstreamModel) -> int:
+    for key in ("created", "created_at", "createdAt"):
+        raw_value = model.raw.get(key)
+        if isinstance(raw_value, int):
+            return raw_value
+        if isinstance(raw_value, float):
+            return int(raw_value)
+    return 0
 
 
 def _codex_model_visibility_allowed_models(api_key: ApiKeyData | None) -> set[str] | None:

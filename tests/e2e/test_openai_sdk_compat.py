@@ -21,7 +21,7 @@ Surfaces covered:
 - ``client.images.generate(...)`` (best-effort against the
   ``tool_usage.image_gen`` translation path)
 - Unsupported surfaces (embeddings, moderations, files, batches,
-  fine_tuning, ``responses.retrieve/cancel/delete``) — assert the SDK
+  fine_tuning) — assert the SDK
   receives a clean 4xx, not a 500.
 
 All upstream interactions are mocked via ``monkeypatch`` on the proxy
@@ -742,6 +742,114 @@ class TestImages:
 
 
 # ---------------------------------------------------------------------------
+# Stored Responses lifecycle and Conversations
+# ---------------------------------------------------------------------------
+
+
+class TestResponsesLifecycle:
+    @pytest.mark.asyncio
+    async def test_store_retrieve_input_items_delete(self, sdk_client, monkeypatch):
+        response_id = "resp_sdk_stored"
+        _patch_upstream_stream(
+            monkeypatch,
+            [
+                _response_created(response_id, 0),
+                *_message_output_block("msg_sdk_stored", "stored", 0, 1),
+                _response_completed_empty(response_id, 7),
+            ],
+        )
+
+        created = await sdk_client.responses.create(
+            model=DEFAULT_MODEL,
+            input="remember",
+            store=True,
+            metadata={"case": "sdk"},
+        )
+        assert created.id == response_id
+        assert created.metadata == {"case": "sdk"}
+
+        retrieved = await sdk_client.responses.retrieve(response_id)
+        assert retrieved.id == response_id
+        assert retrieved.output_text == "stored"
+
+        input_page = await sdk_client.responses.input_items.list(response_id, order="asc")
+        assert input_page.data[0].type == "message"
+        assert input_page.data[0].content[0].text == "remember"
+
+        assert await sdk_client.responses.delete(response_id) is None
+        with pytest.raises(openai.NotFoundError):
+            await sdk_client.responses.retrieve(response_id)
+
+    @pytest.mark.asyncio
+    async def test_stored_response_is_hidden_from_another_api_key(
+        self,
+        sdk_client,
+        e2e_client,
+        create_api_key,
+        monkeypatch,
+    ):
+        response_id = "resp_sdk_scoped"
+        _patch_upstream_stream(
+            monkeypatch,
+            [_response_created(response_id), _response_completed_empty(response_id, 1)],
+        )
+        await sdk_client.responses.create(model=DEFAULT_MODEL, input="private", store=True)
+
+        second_key = await create_api_key(e2e_client, name="e2e-sdk-other-scope")
+        import httpx
+
+        other_client = openai.AsyncOpenAI(
+            api_key=second_key["key"],
+            base_url="http://testserver/v1",
+            http_client=httpx.AsyncClient(
+                transport=e2e_client._transport,  # noqa: SLF001
+                base_url="http://testserver",
+            ),
+        )
+        try:
+            with pytest.raises(openai.NotFoundError):
+                await other_client.responses.retrieve(response_id)
+            with pytest.raises(openai.NotFoundError):
+                await other_client.responses.create(
+                    model=DEFAULT_MODEL,
+                    input="continue",
+                    previous_response_id=response_id,
+                )
+        finally:
+            await other_client.close()
+
+    @pytest.mark.asyncio
+    async def test_conversations_and_token_count(self, sdk_client):
+        conversation = await sdk_client.conversations.create(
+            metadata={"topic": "sdk"},
+            items=[{"type": "message", "role": "user", "content": "hello"}],
+        )
+        assert conversation.id.startswith("conv_")
+        updated = await sdk_client.conversations.update(
+            conversation.id,
+            metadata={"topic": "updated"},
+        )
+        assert updated.metadata == {"topic": "updated"}
+
+        created_items = await sdk_client.conversations.items.create(
+            conversation.id,
+            items=[{"type": "message", "role": "user", "content": "again"}],
+        )
+        assert created_items.data[0].type == "message"
+        listed = await sdk_client.conversations.items.list(conversation.id, order="asc")
+        assert len(listed.data) == 2
+
+        counted = await sdk_client.responses.input_tokens.count(
+            model=DEFAULT_MODEL,
+            input="count me",
+        )
+        assert counted.input_tokens > 0
+
+        deleted = await sdk_client.conversations.delete(conversation.id)
+        assert deleted.deleted is True
+
+
+# ---------------------------------------------------------------------------
 # Unsupported routes — SDK must receive a clean 4xx (NotFoundError)
 # ---------------------------------------------------------------------------
 
@@ -786,7 +894,7 @@ class TestUnsupportedSurfaces:
         self._assert_clean_4xx(ei.value)
 
     @pytest.mark.asyncio
-    async def test_responses_retrieve_is_clean_4xx(self, sdk_client):
-        with pytest.raises(openai.APIStatusError) as ei:
+    async def test_unknown_response_retrieve_is_clean_404(self, sdk_client):
+        with pytest.raises(openai.NotFoundError) as ei:
             await sdk_client.responses.retrieve("resp_does_not_exist")
-        self._assert_clean_4xx(ei.value)
+        assert ei.value.status_code == 404

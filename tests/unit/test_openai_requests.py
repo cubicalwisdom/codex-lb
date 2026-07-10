@@ -311,6 +311,22 @@ def test_openai_compatible_reasoning_aliases_are_normalized():
     assert "reasoningSummary" not in dumped
 
 
+def test_openai_compatible_reasoning_effort_preserves_client_plane_ultra():
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [],
+            "reasoningEffort": " ULTRA ",
+        }
+    )
+
+    dumped = request.to_payload()
+
+    assert dumped["reasoning"] == {"effort": "ultra"}
+    assert "reasoningEffort" not in dumped
+
+
 def test_provider_thinking_aliases_are_normalized():
     payload = {
         "model": "gpt-5.1",
@@ -327,32 +343,35 @@ def test_provider_thinking_aliases_are_normalized():
     assert "enable_thinking" not in dumped
 
 
-def test_provider_thinking_max_alias_is_normalized():
-    payload = {
-        "model": "gpt-5.6-sol",
-        "instructions": "hi",
-        "input": [],
-        "thinking": "max",
-    }
-    request = ResponsesRequest.model_validate(payload)
+def test_provider_thinking_mapping_preserves_client_plane_ultra():
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [],
+            "thinking": {"effort": " ULTRA "},
+        }
+    )
 
     dumped = request.to_payload()
-    assert dumped["reasoning"] == {"effort": "max"}
+
+    assert dumped["reasoning"] == {"effort": "ultra"}
     assert "thinking" not in dumped
 
 
-def test_provider_thinking_ultra_alias_maps_to_wire_max():
-    payload = {
-        "model": "gpt-5.6-sol",
-        "instructions": "hi",
-        "input": [],
-        "thinking": "ultra",
-    }
-    request = ResponsesRequest.model_validate(payload)
+def test_provider_thinking_string_alias_accepts_catalog_advertised_efforts():
+    for effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+        payload = {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [],
+            "thinking": effort,
+        }
+        request = ResponsesRequest.model_validate(payload)
 
-    dumped = request.to_payload()
-    assert dumped["reasoning"] == {"effort": "max"}
-    assert "thinking" not in dumped
+        dumped = request.to_payload()
+        assert dumped["reasoning"] == {"effort": effort}
+        assert "thinking" not in dumped
 
 
 def test_explicit_reasoning_wins_over_provider_thinking_aliases():
@@ -613,6 +632,69 @@ def test_responses_rejects_conversation_previous_response_id():
         ResponsesRequest.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    ("continuity_field", "continuity_value"),
+    [("previous_response_id", "resp_1"), ("conversation", "conv_1")],
+)
+def test_v1_responses_accepts_continuation_without_new_input(continuity_field: str, continuity_value: str):
+    request = V1ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", continuity_field: continuity_value}
+    ).to_responses_request()
+
+    assert request.instructions == ""
+    assert request.input == []
+    assert getattr(request, continuity_field) == continuity_value
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_output_tokens", 1024),
+        ("prompt_cache_retention", "24h"),
+        ("promptCacheRetention", "24h"),
+        ("safety_identifier", "safe_123"),
+        ("temperature", 0.2),
+        ("top_p", 0.9),
+        ("truncation", "auto"),
+        ("user", "user_123"),
+    ],
+)
+def test_v1_responses_rejects_controls_that_cannot_be_honored(field: str, value: JsonValue):
+    request = V1ResponsesRequest.model_validate({"model": "gpt-5.1", "input": "hi", field: value})
+
+    with pytest.raises(ClientPayloadError) as exc_info:
+        request.to_responses_request()
+
+    assert exc_info.value.code == "unsupported_parameter"
+    assert exc_info.value.param == field
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("background", True),
+        ("store", True),
+        ("metadata", {"client": "test"}),
+    ],
+)
+def test_v1_responses_accepts_locally_managed_lifecycle_controls(field: str, value: JsonValue):
+    request = V1ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "input": "hi", field: value}
+    ).to_responses_request()
+
+    assert request.to_payload().get(field) is None or field == "store"
+
+
+def test_v1_responses_accepts_false_background_and_store_without_forwarding_background():
+    request = V1ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "input": "hi", "background": False, "store": False}
+    ).to_responses_request()
+
+    payload = request.to_payload()
+    assert "background" not in payload
+    assert payload["store"] is False
+
+
 def test_v1_messages_convert_to_responses_input():
     payload = {
         "model": "gpt-5.1",
@@ -669,6 +751,68 @@ def test_responses_preserves_responses_lite_input_shape_untouched():
     assert dumped["instructions"] == "primary"
     assert dumped["tools"] == []
     assert dumped["input"] == expected_input
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_preserves_non_message_directives_byte_identically(request_type):
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+        "reasoning_content": "directive-level reasoning",
+        "reasoning_details": {"opaque": True},
+        "tool_calls": [{"id": "call_1", "name": "future_tool"}],
+        "function_call": {"name": "future_tool", "arguments": "{}"},
+        "content": [{"type": "reasoning", "text": "opaque directive content"}],
+    }
+    system_directive = {
+        "type": "future_directive",
+        "role": "system",
+        "directive": {"mode": "audit"},
+    }
+
+    request = request_type.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "input": [
+                developer_directive,
+                {"type": "message", "role": "developer", "content": "follow the directive"},
+                system_directive,
+                {"type": "message", "role": "user", "content": "inspect"},
+            ],
+        }
+    )
+
+    dumped = request.to_payload()
+
+    assert request.instructions == "follow the directive"
+    assert request.input == [
+        developer_directive,
+        system_directive,
+        {"type": "message", "role": "user", "content": "inspect"},
+    ]
+    assert dumped["instructions"] == "follow the directive"
+    assert dumped["input"] == request.input
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_directive_only_input_defaults_instructions_to_empty(request_type):
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict"},
+    }
+
+    request = request_type.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "input": [developer_directive],
+        }
+    )
+
+    assert request.instructions == ""
+    assert request.input == [developer_directive]
+    assert request.to_payload()["input"] == [developer_directive]
 
 
 def test_responses_input_system_message_keeps_user_text_parts():
@@ -863,7 +1007,7 @@ def test_compact_strips_tool_fields():
     dumped = request.to_payload()
     assert "tools" not in dumped
     assert "tool_choice" not in dumped
-    assert "parallel_tool_calls" not in dumped
+    assert dumped["parallel_tool_calls"] is False
 
 
 def test_v1_compact_strips_tool_fields():
@@ -879,7 +1023,7 @@ def test_v1_compact_strips_tool_fields():
     dumped = request.to_payload()
     assert "tools" not in dumped
     assert "tool_choice" not in dumped
-    assert "parallel_tool_calls" not in dumped
+    assert dumped["parallel_tool_calls"] is False
 
 
 def test_v1_compact_messages_convert():
@@ -921,11 +1065,15 @@ def test_v1_compact_store_omitted_defaults_to_false():
     assert "store" not in request.to_payload()
 
 
-def test_v1_compact_store_true_is_coerced_to_false():
+def test_v1_compact_store_true_is_rejected_explicitly():
     payload = {"model": "gpt-5.1", "input": "hello", "store": True}
     request = V1ResponsesCompactRequest.model_validate(payload)
-    compact = request.to_compact_request()
-    assert compact.store is False
+
+    with pytest.raises(ClientPayloadError) as exc_info:
+        request.to_compact_request()
+
+    assert exc_info.value.code == "unsupported_parameter"
+    assert exc_info.value.param == "store"
 
 
 def test_responses_normalizes_assistant_input_text_to_output_text():

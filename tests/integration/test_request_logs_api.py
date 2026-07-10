@@ -102,6 +102,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert latest["costBreakdown"] == {
         "inputUsd": None,
         "cachedInputUsd": None,
+        "cacheWriteInputUsd": None,
         "outputUsd": None,
         "totalUsd": None,
     }
@@ -119,11 +120,81 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert older["costBreakdown"] == {
         "inputUsd": None,
         "cachedInputUsd": None,
+        "cacheWriteInputUsd": None,
         "outputUsd": pytest.approx(0.002),
         "totalUsd": pytest.approx(0.002125),
     }
     assert older["transport"] == "http"
     assert older["requestKind"] == "normal"
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_returns_cache_write_tokens_and_cost(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_cache_write", "cache-write@example.com"))
+        await logs_repo.add_log(
+            account_id="acc_cache_write",
+            request_id="req_cache_write_cost",
+            model="gpt-5.6-sol",
+            input_tokens=1_000,
+            output_tokens=500,
+            cached_input_tokens=200,
+            cache_write_tokens=100,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            transport="websocket",
+        )
+
+    response = await async_client.get("/api/request-logs?limit=1")
+
+    assert response.status_code == 200
+    request = response.json()["requests"][0]
+    assert request["requestId"] == "req_cache_write_cost"
+    assert request["cacheWriteTokens"] == 100
+    assert request["costUsd"] == pytest.approx(0.019225)
+    assert request["costBreakdown"] == {
+        "inputUsd": pytest.approx(0.0035),
+        "cachedInputUsd": pytest.approx(0.0001),
+        "cacheWriteInputUsd": pytest.approx(0.000625),
+        "outputUsd": pytest.approx(0.015),
+        "totalUsd": pytest.approx(0.019225),
+    }
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_keeps_cache_write_cost_when_cached_tokens_are_absent(async_client, db_setup):
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_cache_write_without_cached_read",
+            model="gpt-5.6-sol",
+            input_tokens=1_000,
+            output_tokens=0,
+            cached_input_tokens=None,
+            cache_write_tokens=100,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+        )
+
+    response = await async_client.get("/api/request-logs?limit=1")
+
+    assert response.status_code == 200
+    request = response.json()["requests"][0]
+    assert request["requestId"] == "req_cache_write_without_cached_read"
+    assert request["cachedInputTokens"] is None
+    assert request["cacheWriteTokens"] == 100
+    assert request["costBreakdown"] == {
+        "inputUsd": pytest.approx(0.0045),
+        "cachedInputUsd": pytest.approx(0.0),
+        "cacheWriteInputUsd": pytest.approx(0.000625),
+        "outputUsd": pytest.approx(0.0),
+        "totalUsd": pytest.approx(0.005125),
+    }
 
 
 @pytest.mark.asyncio
