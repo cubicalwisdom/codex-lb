@@ -221,8 +221,52 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
     assert captured_account_ids[1] != invalidated_account_id
 
 
+@pytest.mark.parametrize(
+    ("compact_response", "expected_item"),
+    [
+        pytest.param(
+            {
+                "object": "response.compaction",
+                "compaction_summary": {
+                    "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
+                    "summary_text": "condensed thread state",
+                },
+                "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15},
+            },
+            {
+                "type": "compaction",
+                "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
+            },
+            id="legacy-summary-without-id",
+        ),
+        pytest.param(
+            {
+                "object": "response.compaction",
+                "output": [
+                    {
+                        "id": "cmp_upstream_123",
+                        "type": "compaction",
+                        "encrypted_content": "ENCRYPTED_CONTEXT_OUTPUT",
+                    }
+                ],
+                "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15},
+            },
+            {
+                "id": "cmp_upstream_123",
+                "type": "compaction",
+                "encrypted_content": "ENCRYPTED_CONTEXT_OUTPUT",
+            },
+            id="explicit-output-preserves-id",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_proxy_responses_compaction_trigger_streams_single_compaction_item(async_client, monkeypatch):
+async def test_proxy_responses_compaction_trigger_streams_single_compaction_item(
+    async_client,
+    monkeypatch,
+    compact_response,
+    expected_item,
+):
     email = "compact-trigger@example.com"
     raw_account_id = "acc_compact_trigger"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -274,16 +318,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
         seen_payload["previous_response_id"] = getattr(payload, "previous_response_id", None)
         seen_payload["conversation"] = getattr(payload, "conversation", None)
         seen_payload["account_id"] = account_id
-        return CompactResponsePayload.model_validate(
-            {
-                "object": "response.compaction",
-                "compaction_summary": {
-                    "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
-                    "summary_text": "condensed thread state",
-                },
-                "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15},
-            }
-        )
+        return CompactResponsePayload.model_validate(compact_response)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select_account)
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
@@ -336,16 +371,8 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
     assert compact_payload["parallel_tool_calls"] is False
     assert "include" not in compact_payload
     assert "stream" not in compact_payload
-    assert events[0]["item"] == {
-        "type": "compaction",
-        "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
-    }
-    assert events[1]["response"]["output"] == [
-        {
-            "type": "compaction",
-            "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
-        }
-    ]
+    assert events[0]["item"] == expected_item
+    assert events[1]["response"]["output"] == [expected_item]
     assert events[1]["response"]["usage"] == {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}
     assert lines[-1] == "data: [DONE]"
 

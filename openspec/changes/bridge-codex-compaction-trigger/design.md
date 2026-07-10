@@ -37,6 +37,8 @@ The repo already has a working `/responses/compact` path that can fetch the comp
 
 4. Normalize the compact result into a single compaction item by preferring an explicit `output` item when present and otherwise deriving one from `compaction_summary.encrypted_content`.
    - Rationale: upstream compact payloads have varied slightly, but the Codex client only needs one canonical `compaction` item.
+   - Preserve a non-empty string `id` from the explicit upstream output item and reuse the resulting item unchanged in both `response.output_item.done.item` and `response.completed.response.output[0]`.
+   - Keep the legacy `compaction_summary` fallback ID-less instead of inventing an item identity that upstream did not provide.
    - Alternative considered: accept any upstream shape and forward it as-is. Rejected because the downstream collector requires a single compaction output item.
 
 5. Keep the bridge narrow.

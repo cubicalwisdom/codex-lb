@@ -2,11 +2,13 @@
 
 - [x] 1.1 Add a request-policy helper that strips a terminal top-level `compaction_trigger` from a `ResponsesRequest` input list and rejects malformed placement with an OpenAI-shaped 400.
 - [x] 1.2 Teach `/backend-api/codex/responses` to detect that helper result, call the existing compact service instead of the normal streaming path, and synthesize the raw SSE compaction stream from the compact result.
+- [x] 1.3 Preserve a non-empty canonical compact output item `id` unchanged in both synthetic SSE locations while keeping the legacy `compaction_summary` fallback ID-less.
 
 ## 2. Cover the regressions
 
 - [x] 2.1 Add a streaming integration test that verifies a valid terminal `compaction_trigger` yields exactly one `response.output_item.done` compaction item and a terminal `response.completed` event with the same item in `output`.
 - [x] 2.2 Add a 400 regression test for malformed trigger placement, including duplicated and non-terminal trigger items.
+- [x] 2.3 Cover both canonical output identity preservation and legacy ID-less summary compatibility at the helper and external Codex route surfaces.
 
 ## 3. Validate the change
 

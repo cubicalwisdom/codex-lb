@@ -3370,10 +3370,14 @@ def _compact_response_output_item(payload: CompactResponsePayload) -> dict[str, 
             encrypted_content = item.get("encrypted_content")
             if isinstance(item_type, str) and item_type in {"compaction", "compaction_summary"}:
                 if isinstance(encrypted_content, str):
-                    return {
+                    compact_item: dict[str, JsonValue] = {
                         "type": "compaction",
                         "encrypted_content": encrypted_content,
                     }
+                    item_id = item.get("id")
+                    if isinstance(item_id, str) and item_id:
+                        compact_item["id"] = item_id
+                    return compact_item
     summary = getattr(payload, "compaction_summary", None)
     if summary is None:
         summary = extra.get("compaction_summary")
