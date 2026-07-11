@@ -243,7 +243,31 @@ Expected: `18 passed`. Do not claim that GNU Make itself ran locally.
 
 - [ ] **Step 2: Prove direct-node equivalence**
 
-Run the `$nodes` command from Task 1 Step 1 again and confirm `18 passed`. Compare its collected node ids with the marker collection; the sets must match exactly.
+Run the exact explicit inventory and confirm `18 passed`:
+
+```powershell
+$nodes = @(
+  'tests/unit/test_proxy_utils.py::test_stream_responses_derives_http_lite_signal_from_body',
+  'tests/unit/test_proxy_utils.py::test_stream_responses_websocket_derives_lite_marker_from_body',
+  'tests/unit/test_proxy_utils.py::test_websocket_lite_acceptance_allows_only_linked_same_model_incremental_marker',
+  'tests/unit/test_proxy_utils.py::test_websocket_lite_incremental_marker_requires_accepted_response_linkage',
+  'tests/unit/test_proxy_utils.py::test_prepare_websocket_response_create_request_captures_client_full_resend_anchor_replay',
+  'tests/unit/test_proxy_utils.py::test_compact_responses_derives_http_lite_signal_from_body',
+  'tests/unit/test_openai_requests.py::test_v1_compact_strips_tool_fields',
+  'tests/integration/test_proxy_compact.py::test_proxy_compact_strips_tool_fields_before_upstream',
+  'tests/integration/test_proxy_responses.py::test_proxy_responses_compaction_trigger_streams_single_compaction_item',
+  'tests/integration/test_http_responses_bridge.py::test_backend_responses_http_bridge_reuses_upstream_websocket_and_preserves_previous_response_id',
+  'tests/integration/test_proxy_websocket_responses.py::test_backend_responses_websocket_proxies_upstream_and_persists_log',
+  'tests/integration/test_v1_models.py::test_v1_models_with_client_version_returns_codex_catalog',
+  'tests/integration/test_v1_models.py::test_v1_models_with_empty_client_version_keeps_openai_shape',
+  'tests/integration/test_v1_models.py::test_v1_models_codex_negotiation_preserves_api_key_filtering',
+  'tests/integration/test_v1_models.py::test_backend_codex_models_rewrites_visibility_when_opted_in',
+  'tests/integration/test_v1_models.py::test_model_sets_are_consistent_across_api_endpoints'
+)
+uv run pytest -q -ra --timeout=180 --timeout-method=thread $nodes
+```
+
+Compare its collected node ids with the marker collection; the sets must match exactly.
 
 - [ ] **Step 3: Run the full affected files in three independent groups**
 
