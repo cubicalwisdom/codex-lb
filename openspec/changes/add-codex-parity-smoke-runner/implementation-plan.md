@@ -297,7 +297,7 @@ openspec validate --specs
 git diff --check
 ```
 
-Expected: Ruff lint, OpenSpec validation, and the diff check exit zero. If the full-file Ruff format command reproduces the known two-line `test_proxy_utils.py` baseline failure, prove the same proposed format diff exists at base commit `e88fbf3`, run Ruff format on every other changed test file to zero, and record the baseline exception. Do not reformat those unrelated lines merely to make this metadata-only change green.
+Expected: Ruff lint, OpenSpec validation, and the diff check exit zero. If the full-file Ruff format command proposes changes in a legacy test file, compare that file's complete proposed formatter transformation with base commit `e88fbf3`. Accept only transformations already present at that base, require the newly created workflow-contract file to format-check at zero, and record each proven baseline exception. Do not reformat unrelated legacy lines merely to make this metadata-only change green.
 
 - [ ] **Step 5: Sync stable OpenSpec requirements and context**
 
