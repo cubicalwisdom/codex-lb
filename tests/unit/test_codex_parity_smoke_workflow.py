@@ -21,11 +21,13 @@ def _assert_codex_parity_smoke_make_contract(makefile: str) -> None:
     assert TARGET in phony_targets, f"{TARGET} must be declared .PHONY"
 
     lines = makefile.splitlines()
-    declaration_pattern = re.compile(rf"^{re.escape(TARGET)}\s*:(?P<prerequisites>.*)$")
     rules: list[tuple[str, tuple[str, ...]]] = []
     for index, line in enumerate(lines):
-        match = declaration_pattern.fullmatch(line)
-        if match is None:
+        if line.startswith("\t") or ":" not in line:
+            continue
+
+        target_list, prerequisites = line.split(":", maxsplit=1)
+        if TARGET not in target_list.split():
             continue
 
         recipe: list[str] = []
@@ -35,7 +37,7 @@ def _assert_codex_parity_smoke_make_contract(makefile: str) -> None:
             command = body_line.removeprefix("\t").strip()
             if command:
                 recipe.append(command)
-        rules.append((match.group("prerequisites"), tuple(recipe)))
+        rules.append((prerequisites, tuple(recipe)))
 
     assert rules, f"missing Make target: {TARGET}"
     for prerequisites, _recipe in rules:
@@ -43,6 +45,7 @@ def _assert_codex_parity_smoke_make_contract(makefile: str) -> None:
 
     recipes = tuple(recipe for _prerequisites, recipe in rules if recipe)
     assert recipes == (EXPECTED_RECIPE,)
+    assert makefile.count(TARGET) == 3, f"{TARGET} must occur exactly three times"
 
 
 def test_codex_parity_smoke_workflow_contract() -> None:
@@ -61,7 +64,7 @@ def test_codex_parity_smoke_workflow_rejects_prerequisites() -> None:
 test-codex-parity-smoke:
 \tuv sync --dev --frozen
 \tPYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) --strict-markers -m codex_parity_smoke
-test-codex-parity-smoke: ci-fast
+other-target test-codex-parity-smoke: ci-fast
 """
 
     with pytest.raises(AssertionError, match="must not have prerequisites"):
