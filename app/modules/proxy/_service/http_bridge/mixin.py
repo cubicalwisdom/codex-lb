@@ -1663,25 +1663,19 @@ class _HTTPBridgeMixin(
     ) -> None:
         session.closed = True
         current_task = asyncio.current_task()
-        upstream_reader = session.upstream_reader
+        upstream_reader, active_send_tasks = self._cancel_http_bridge_session_activity_nowait(session)
         if upstream_reader is current_task:
             session.upstream_reader = None
-        elif upstream_reader is not None:
-            upstream_reader.cancel()
-        retry_send_tasks = tuple(session.retry_send_tasks)
-        for retry_send_task in retry_send_tasks:
-            if retry_send_task is not current_task:
-                retry_send_task.cancel()
         if upstream_reader is not None and upstream_reader is not current_task:
             await _await_cancelled_task(upstream_reader, label="http bridge upstream reader")
             if session.upstream_reader is upstream_reader:
                 session.upstream_reader = None
-        for retry_send_task in retry_send_tasks:
-            if retry_send_task is current_task:
-                session.retry_send_tasks.discard(retry_send_task)
+        for active_send_task in active_send_tasks:
+            if active_send_task is current_task:
+                session.active_send_tasks.discard(active_send_task)
                 continue
-            await _await_cancelled_task(retry_send_task, label="http bridge retry send")
-            session.retry_send_tasks.discard(retry_send_task)
+            await _await_cancelled_task(active_send_task, label="http bridge active send")
+            session.active_send_tasks.discard(active_send_task)
         if turn_state_lock_held:
             self._unregister_http_bridge_turn_states_locked(session)
             self._unregister_http_bridge_previous_response_ids_locked(session)
@@ -2544,3 +2538,17 @@ class _HTTPBridgeMixin(
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+
+    def _cancel_http_bridge_session_activity_nowait(
+        self,
+        session: "_HTTPBridgeSession",
+    ) -> tuple[asyncio.Task[None] | None, tuple[asyncio.Task[None], ...]]:
+        current_task = asyncio.current_task()
+        upstream_reader = session.upstream_reader
+        active_send_tasks = tuple(session.active_send_tasks)
+        if upstream_reader is not None and upstream_reader is not current_task:
+            upstream_reader.cancel()
+        for active_send_task in active_send_tasks:
+            if active_send_task is not current_task:
+                active_send_task.cancel()
+        return upstream_reader, active_send_tasks

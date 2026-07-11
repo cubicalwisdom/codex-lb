@@ -403,7 +403,7 @@ class _HTTPBridgeSession:
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
-    retry_send_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    active_send_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     last_upstream_close_code: int | None = None
     closed: bool = False
     retired: bool = False

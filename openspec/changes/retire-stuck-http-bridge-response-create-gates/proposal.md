@@ -11,4 +11,5 @@ Live Codex traffic produced repeated `response_create_gate_timeout` failures whi
 - Preserve healthy active streams, recent pre-created requests, synthetic prewarm requests, and non-HTTP work.
 - Keep the current waiter failure explicit; the next Codex reconnect creates a fresh bridge instead of looping behind the stale session.
 - Make retirement and reconnect cleanup cancellation-safe so tombstoned generations cannot resend and provisional sockets or leases remain tracked until settled.
+- Register initial and retry upstream sends as cancellable session activity without holding the lifecycle lock across network I/O.
 - Mirror and verify the portable runtime without restarting Codex Desktop.

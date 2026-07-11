@@ -4,7 +4,9 @@
 
 When a visible HTTP bridge request times out waiting for a per-session response-create gate, the proxy MUST retire the bridge session only if locked final revalidation finds pending visible HTTP work that is still pre-`response.created`, owns the gate, has held that gate for at least the configured stuck-gate retirement threshold, has never been matched to an upstream event, and has no downstream-visible output. Total request age before gate acquisition MUST NOT determine eligibility. Upstream-event evidence MUST remain true across visible-output and authentication replay preparation even when replay resets response identifiers or event counters. Healthy active streams, recently acquired gates, synthetic prewarm requests, non-HTTP work, and any ever-event-bearing request MUST NOT be retired by this rule.
 
-Retirement MUST be terminal for the affected session generation. The proxy MUST detach only that registered generation, prevent its reconnect/replay/resend or ownership reacquisition, cancel and await its reader and active retry sends before other cleanup awaits, fail and remove pending requests using `stream_incomplete`, terminalize pending event queues, and release response-create, admission, account-response-create, reservation, account, durable, and alias resources. Cleanup MUST occur without awaiting while the pending or registry lock is held and MUST remain tracked if the caller is cancelled. The timed-out waiter MUST retain the stable `response_create_gate_timeout` error so the client can retry safely on a fresh generation.
+Retirement MUST be terminal for the affected session generation. The proxy MUST detach only that registered generation, prevent its reconnect/replay/resend or ownership reacquisition, synchronously cancel its reader and all registered active sends before releasing lifecycle ownership, then await them before other cleanup awaits. It MUST fail and remove pending requests using `stream_incomplete`, terminalize pending event queues, and release response-create, admission, account-response-create, reservation, account, durable, and alias resources. Cleanup MUST occur without awaiting while the pending or registry lock is held and MUST remain tracked if the caller is cancelled. The timed-out waiter MUST retain the stable `response_create_gate_timeout` error so the client can retry safely on a fresh generation.
+
+Initial submission and retry sends MUST register their actual upstream-send tasks during lifecycle validation and MUST await network I/O only after releasing the lifecycle lock. A blocked initial send MUST NOT prevent a gate-timeout waiter from entering retirement, receiving the stable timeout response, or fully settling the terminal generation.
 
 If reconnect acquires a provisional upstream socket or a new account lease but exits before installing them, including because cancellation interrupts old-socket settlement, old-lease settlement, or a named error handler, the proxy MUST transfer those resources to separately tracked cancellation-safe cleanup before preserving the original cancellation or exception. Repeated caller cancellation MUST NOT interrupt that ownership, and cleanup failures MUST retain and retry each unresolved resource. A reused session lease MUST NOT be released as provisional ownership or on a pre-install terminal failure. The old session lease MUST remain discoverable by session retirement until its release completes. Final tombstone validation and replacement installation MUST contain no intervening await.
 
@@ -51,12 +53,28 @@ Concurrent reconnect attempts for one session MUST serialize their complete reso
 - **THEN** the request remains marked as having received upstream input
 - **AND** a later gate timeout does not retire its session under the stuck-gate rule
 
-#### Scenario: Retirement wins after a retry send starts
+#### Scenario: Retirement wins after an active send starts
 
-- **WHEN** a retry path has registered a send but its network write is still blocked
+- **WHEN** initial submission or a retry path has registered a send but its network write is still blocked
 - **AND** locked final revalidation retires that generation
 - **THEN** close cancels and awaits the registered send
 - **AND** no replay or resend completes after the terminal decision
+
+#### Scenario: Blocked initial send does not starve gate-timeout retirement
+
+- **WHEN** an initial visible HTTP submit owns the response-create gate and its registered upstream send is blocked before any event
+- **AND** a second visible submit times out waiting for that gate after the threshold
+- **THEN** retirement acquires lifecycle promptly and tombstones the generation
+- **AND** it cancels the initial send before releasing lifecycle ownership
+- **AND** the waiter receives `response_create_gate_timeout`
+- **AND** the old submit and all generation resources are settled
+
+#### Scenario: Terminal quiescing precedes close-child startup
+
+- **WHEN** locked retirement marks a generation terminal while its reader or active sends are runnable
+- **AND** bounded close startup is delayed
+- **THEN** the reader and active sends already have cancellation requested before detach completes
+- **AND** they cannot produce post-tombstone side effects during the startup delay
 
 #### Scenario: Repeated cancellation cannot abandon provisional ownership
 

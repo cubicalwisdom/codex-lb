@@ -37,3 +37,10 @@
 - [x] 5.4 Transfer provisional reconnect ownership to bounded shielded cleanup that retains and retries unresolved resources; install replacements in a no-await lifecycle commit.
 - [x] 5.5 Run focused/full bridge verification, selected integration, Ruff, scoped ty, strict OpenSpec, and diff checks; append evidence and commit separately.
 - [x] 5.6 Add RED coverage for concurrent reconnect handoff, serialize reconnect provisioning per session, and rerun the verification ladder.
+
+## 6. Blocked initial-send correction
+
+- [x] 6.1 Add RED coverage for a real initial submit blocked in `send_text` while a second visible submit times out waiting for the gate.
+- [x] 6.2 Register the initial send while lifecycle is held, await it after releasing lifecycle, and generalize registered activity from retry-only to all active sends.
+- [x] 6.3 Cancel reader and active-send snapshots synchronously inside terminal retirement before expected-generation detach or close-child startup.
+- [x] 6.4 Run focused/full bridge verification, selected integration, Ruff, scoped ty, strict OpenSpec, and diff checks; independently review and commit separately.

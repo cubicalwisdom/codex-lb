@@ -13987,3 +13987,263 @@ async def test_reconnect_http_bridge_session_serializes_concurrent_resource_hand
             if not reader_task.done():
                 reader_task.cancel()
         await asyncio.gather(*reader_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_response_create_gate_timeout_retires_blocked_initial_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-blocked-initial-send")
+    session_lease = proxy_service.AccountLease(
+        lease_id="lease-blocked-initial-session",
+        account_id=session.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    session.account_lease = session_lease
+    original = proxy_service._WebSocketRequestState(
+        request_id="req-blocked-initial-owner",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"owner"}',
+        event_queue=asyncio.Queue(),
+    )
+    waiter = proxy_service._WebSocketRequestState(
+        request_id="req-blocked-initial-waiter",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"waiter"}',
+        event_queue=asyncio.Queue(),
+    )
+    response_leases = {
+        original.request_id: proxy_service.AccountLease(
+            lease_id="lease-blocked-initial-owner-response",
+            account_id=session.account.id,
+            kind="response_create",
+            acquired_at=2.0,
+        ),
+        waiter.request_id: proxy_service.AccountLease(
+            lease_id="lease-blocked-initial-waiter-response",
+            account_id=session.account.id,
+            kind="response_create",
+            acquired_at=3.0,
+        ),
+    }
+    admission_release = Mock()
+    work_admission = SimpleNamespace(
+        acquire_response_create=AsyncMock(
+            return_value=SimpleNamespace(release=admission_release),
+        )
+    )
+    send_entered = asyncio.Event()
+    allow_send = asyncio.Event()
+    send_cancelled = asyncio.Event()
+    send_completed = asyncio.Event()
+
+    async def send_text(_text: str) -> None:
+        send_entered.set()
+        try:
+            await allow_send.wait()
+            send_completed.set()
+        except asyncio.CancelledError:
+            send_cancelled.set()
+            raise
+
+    async def acquire_response_lease(
+        *,
+        account_id: str,
+        request_id: str,
+        surface: str,
+    ) -> proxy_service.AccountLease:
+        assert account_id == session.account.id
+        assert surface == "http_bridge"
+        return response_leases[request_id]
+
+    upstream_close = AsyncMock()
+    session.upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(send_text=send_text, close=upstream_close),
+    )
+    service._http_bridge_sessions[session.key] = session
+    release_lease = AsyncMock()
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            proxy_admission_wait_timeout_seconds=0.001,
+            http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
+        ),
+    )
+    monkeypatch.setattr(service, "_get_work_admission", lambda: work_admission)
+    monkeypatch.setattr(
+        service,
+        "_acquire_account_response_create_lease_or_overload",
+        acquire_response_lease,
+    )
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    owner_task = asyncio.create_task(
+        service._submit_http_bridge_request(
+            session,
+            request_state=original,
+            text_data=cast(str, original.request_text),
+            queue_limit=8,
+        )
+    )
+    waiter_task: asyncio.Task[None] | None = None
+
+    try:
+        await asyncio.wait_for(send_entered.wait(), timeout=1.0)
+        assert original.response_create_gate_acquired is True
+        assert original in session.pending_requests
+        original.response_create_gate_acquired_at = time.monotonic() - 301.0
+        waiter_task = asyncio.create_task(
+            service._submit_http_bridge_request(
+                session,
+                request_state=waiter,
+                text_data=cast(str, waiter.request_text),
+                queue_limit=8,
+            )
+        )
+
+        with pytest.raises(ProxyResponseError) as waiter_exc_info:
+            with anyio.fail_after(1.0):
+                await waiter_task
+        assert waiter_exc_info.value.status_code == 429
+        assert waiter_exc_info.value.payload["error"]["code"] == "response_create_gate_timeout"
+
+        with pytest.raises(ProxyResponseError) as owner_exc_info:
+            await asyncio.wait_for(owner_task, timeout=1.0)
+        assert owner_exc_info.value.status_code == 502
+        assert owner_exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+        assert send_cancelled.is_set()
+        assert send_completed.is_set() is False
+        assert session.retired is True
+        assert session.closed is True
+        assert session.key not in service._http_bridge_sessions
+        assert session.pending_requests == deque()
+        assert session.queued_request_count == 0
+        assert session.response_create_gate.locked() is False
+        assert session.active_send_tasks == set()
+        assert session.account_lease is None
+        assert original.response_create_gate is None
+        assert original.response_create_gate_acquired is False
+        assert original.response_create_gate_acquired_at is None
+        assert original.response_create_admission is None
+        assert original.account_response_create_lease is None
+        assert waiter.response_create_gate is None
+        assert waiter.response_create_gate_acquired is False
+        assert waiter.response_create_gate_acquired_at is None
+        assert waiter.account_response_create_lease is None
+        admission_release.assert_called_once_with()
+        upstream_close.assert_awaited_once_with()
+        for lease in (*response_leases.values(), session_lease):
+            assert sum(call.args == (lease,) for call in release_lease.await_args_list) == 1
+    finally:
+        allow_send.set()
+        tasks = [owner_task]
+        if waiter_task is not None:
+            tasks.append(waiter_task)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for cleanup_task in list(service._background_cleanup_tasks):
+            await asyncio.gather(cleanup_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stuck_gate_retirement_quiesces_reader_and_sends_before_close_child_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-retire-quiesce-window")
+    await session.response_create_gate.acquire()
+    pending = proxy_service._WebSocketRequestState(
+        request_id="req-retire-quiesce-window",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic() - 600.0,
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"old"}',
+        response_create_gate_acquired=True,
+        response_create_gate=session.response_create_gate,
+        response_create_gate_acquired_at=time.monotonic() - 600.0,
+        awaiting_response_created=True,
+    )
+    session.pending_requests.append(pending)
+    session.queued_request_count = 1
+    service._http_bridge_sessions[session.key] = session
+    side_effect_permission = asyncio.Event()
+    close_child_started = asyncio.Event()
+    allow_close_child = asyncio.Event()
+    reader_started = asyncio.Event()
+    send_started = asyncio.Event()
+    cancelled: set[str] = set()
+    side_effects: list[str] = []
+
+    async def blocked_work(label: str, started: asyncio.Event) -> None:
+        started.set()
+        try:
+            await side_effect_permission.wait()
+            side_effects.append(label)
+        except asyncio.CancelledError:
+            cancelled.add(label)
+            raise
+
+    async def pause_close_child(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        reason: str,
+    ) -> None:
+        assert target_session is session
+        assert reason == "response_create_gate_timeout_stuck_pending"
+        close_child_started.set()
+        await allow_close_child.wait()
+
+    reader = asyncio.create_task(blocked_work("reader", reader_started))
+    send = asyncio.create_task(blocked_work("send", send_started))
+    session.upstream_reader = cast(asyncio.Task[None], reader)
+    session.active_send_tasks.add(cast(asyncio.Task[None], send))
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", pause_close_child)
+    retirement = asyncio.create_task(
+        service._retire_stuck_http_bridge_session_if_eligible(
+            session,
+            threshold_seconds=300.0,
+            detail="response_create_gate_timeout_stuck_pending",
+        )
+    )
+
+    try:
+        await asyncio.wait_for(reader_started.wait(), timeout=1.0)
+        await asyncio.wait_for(send_started.wait(), timeout=1.0)
+        await asyncio.wait_for(close_child_started.wait(), timeout=1.0)
+        assert session.retired is True
+        assert session.key not in service._http_bridge_sessions
+        assert reader.cancelling() > 0
+        assert send.cancelling() > 0
+
+        side_effect_permission.set()
+        await asyncio.gather(reader, send, return_exceptions=True)
+        assert cancelled == {"reader", "send"}
+        assert side_effects == []
+        allow_close_child.set()
+        assert await asyncio.wait_for(retirement, timeout=1.0) is True
+    finally:
+        side_effect_permission.set()
+        allow_close_child.set()
+        for task in (reader, send, retirement):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(reader, send, retirement, return_exceptions=True)

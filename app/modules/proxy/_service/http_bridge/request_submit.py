@@ -556,6 +556,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 bridge_session=session,
             )
             gate_acquired = True
+            send_task: asyncio.Task[None]
             async with session.lifecycle_lock:
                 current_session = session
                 http_bridge_sessions = getattr(self, "_http_bridge_sessions", None)
@@ -593,8 +594,17 @@ class _HTTPBridgeRequestSubmitMixin:
                 async with session.pending_lock:
                     session.pending_requests.append(request_state)
                 request_enqueued = True
-                await session.upstream.send_text(text_data)
-                session.last_used_at = _service_time().monotonic()
+                send_task = self._register_http_bridge_send_task_locked(session, text_data)
+            if not await self._await_http_bridge_send_task(session, send_task):
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "upstream_unavailable",
+                        "HTTP responses session bridge generation is retired",
+                        error_type="server_error",
+                    ),
+                )
+            session.last_used_at = _service_time().monotonic()
         except ProxyResponseError:
             await self._cleanup_http_bridge_submit_interruption(
                 session,
@@ -966,6 +976,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     return False
                 session.retired = True
                 session.closed = True
+            self._cancel_http_bridge_session_activity_nowait(session)
             async with self._http_bridge_lock:
                 self._detach_http_bridge_session_locked(
                     session.key,
@@ -985,19 +996,23 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         return True
 
-    async def _send_http_bridge_retry_text_if_active(
+    def _register_http_bridge_send_task_locked(
         self: Any,
         session: "_HTTPBridgeSession",
         text_data: str,
+    ) -> asyncio.Task[None]:
+        send_task = asyncio.create_task(
+            session.upstream.send_text(text_data),
+            name=f"http-bridge-send-{_hash_identifier(session.key.affinity_key)}",
+        )
+        session.active_send_tasks.add(send_task)
+        return send_task
+
+    async def _await_http_bridge_send_task(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        send_task: asyncio.Task[None],
     ) -> bool:
-        async with session.lifecycle_lock:
-            if session.retired or session.closed:
-                return False
-            send_task = asyncio.create_task(
-                session.upstream.send_text(text_data),
-                name=f"http-bridge-retry-send-{_hash_identifier(session.key.affinity_key)}",
-            )
-            session.retry_send_tasks.add(send_task)
         try:
             await send_task
         except asyncio.CancelledError:
@@ -1008,8 +1023,19 @@ class _HTTPBridgeRequestSubmitMixin:
                 return False
             raise
         finally:
-            session.retry_send_tasks.discard(send_task)
+            session.active_send_tasks.discard(send_task)
         return True
+
+    async def _send_http_bridge_text_if_active(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        text_data: str,
+    ) -> bool:
+        async with session.lifecycle_lock:
+            if session.retired or session.closed:
+                return False
+            send_task = self._register_http_bridge_send_task_locked(session, text_data)
+        return await self._await_http_bridge_send_task(session, send_task)
 
     async def _retry_http_bridge_request_on_fresh_upstream(
         self: Any,
@@ -1066,7 +1092,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
-                if not await self._send_http_bridge_retry_text_if_active(session, retry_text_data):
+                if not await self._send_http_bridge_text_if_active(session, retry_text_data):
                     return False
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()
@@ -1127,7 +1153,7 @@ class _HTTPBridgeRequestSubmitMixin:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
             if session.retired:
                 return False
-            if not await self._send_http_bridge_retry_text_if_active(session, request_text):
+            if not await self._send_http_bridge_text_if_active(session, request_text):
                 return False
             session.last_used_at = _service_time().monotonic()
             return True
@@ -1198,7 +1224,7 @@ class _HTTPBridgeRequestSubmitMixin:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
             if session.retired:
                 return "not_replayable"
-            if not await self._send_http_bridge_retry_text_if_active(session, request_text):
+            if not await self._send_http_bridge_text_if_active(session, request_text):
                 return "not_replayable"
             session.last_used_at = _service_time().monotonic()
             return "retried"
@@ -1270,7 +1296,7 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             if session.retired:
                 return False
-            if not await self._send_http_bridge_retry_text_if_active(session, retry_text):
+            if not await self._send_http_bridge_text_if_active(session, retry_text):
                 return False
             session.last_used_at = _service_time().monotonic()
             return True
