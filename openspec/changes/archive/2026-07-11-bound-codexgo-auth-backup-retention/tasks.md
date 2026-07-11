@@ -46,5 +46,5 @@
 - [x] 5.1 Run the focused/broad CodexNeo backend verification covering the current implementation and regressions.
 - [x] 5.2 Run scoped Ruff/ty, strict OpenSpec validation, and `git diff --check` for the completed change.
 - [x] 5.3 Mirror `service.py`, `sync.py`, and `scheduler.py` into both active portable Python roots; verify 6/6 source/runtime SHA matches and embedded/venv `py_compile` success.
-- [ ] 5.4 Drain and restart the portable backend, then verify readiness and a secret-safe live bounded-backup/current-account smoke. Deferred because the user prohibited any further stop or restart.
+- [x] 5.4 Observe the next natural Electron-managed portable backend reload, then verify readiness and a secret-safe live bounded-backup/current-account smoke without an agent-initiated restart. Backend PID `51836` was healthy/ready with drain off; the scheduled `01:39` refresh retained the current recovery backup at the 10-file cap, created token-free active provenance with no pending retired identity, and left Accounts/snapshots aligned at `29/29` without a new snapshot.
 - [x] 5.5 Update `CODEXNEO_IMPLEMENTATION_LIST.md` and `HANDOVER_CODEXNEO_INTEGRATION.md` with CN-063/CN-064/CN-065 root cause, safe provenance behavior, activation limits, and verification evidence.
