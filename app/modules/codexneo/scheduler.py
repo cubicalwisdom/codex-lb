@@ -8,6 +8,7 @@ from typing import Protocol
 
 from app.modules.codexneo.activity_log import CodexNeoActivityLogService
 from app.modules.codexneo.service import CodexGoAction, CodexNeoService
+from app.modules.codexneo.sync import CodexNeoAccountsSyncService
 
 logger = logging.getLogger(__name__)
 
@@ -94,4 +95,4 @@ class CodexGoRefreshScheduler:
 
 
 def build_codexgo_refresh_scheduler() -> CodexGoRefreshScheduler:
-    return CodexGoRefreshScheduler()
+    return CodexGoRefreshScheduler(service=CodexNeoService(account_sync=CodexNeoAccountsSyncService()))

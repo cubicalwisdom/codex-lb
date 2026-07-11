@@ -8,7 +8,7 @@ import subprocess
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -23,7 +23,12 @@ from app.core.exceptions import DashboardBadRequestError
 from app.modules.codexneo.activity_log import CodexNeoActivityLogService
 from app.modules.codexneo.home import resolve_configured_codex_home
 from app.modules.codexneo.schemas import CodexNeoActionResponse, CodexNeoSettingsResponse
-from app.modules.codexneo.sync import CodexNeoAccountsSyncService
+from app.modules.codexneo.sync import (
+    CodexNeoAccountsSyncService,
+    codexgo_auth_identity_fingerprint,
+    codexgo_root_state_guard,
+    record_codexgo_root_replacement,
+)
 
 DEFAULT_CODEX_API_BASE_URL = "http://127.0.0.1:2455/backend-api/codex"
 LEGACY_LOCAL_CODEX_API_BASE_URL = "http://127.0.0.1:2455/v1"
@@ -39,9 +44,10 @@ CONFIG_LEGACY_END_MARKER = "# END RC Codex Auth Switcher provider"
 CONFIG_LEGACY_PROVIDER_ID = "rc_switcher"
 CONFIG_ORIGINAL_BACKUP_SUFFIX = "codexneo-original"
 CONFIG_OPERATION_BACKUP_LABEL = "codexneo-backup"
-CONFIG_OPERATION_BACKUP_KEEP_LATEST = 10
-CONFIG_OPERATION_BACKUP_MIN_KEEP = 3
-CONFIG_OPERATION_BACKUP_MAX_AGE_DAYS = 14
+CODEXGO_AUTH_BACKUP_LABEL = "codexgo-backup"
+OPERATION_BACKUP_KEEP_LATEST = 10
+OPERATION_BACKUP_MIN_KEEP = 3
+OPERATION_BACKUP_MAX_AGE_DAYS = 14
 
 type CodexGoProvider = Callable[[str, str], Awaitable[dict[str, Any]]]
 type CodexRestartProvider = Callable[[], Awaitable["CodexRestartResult"]]
@@ -251,7 +257,11 @@ class CodexNeoService:
         updated = _apply_provider_config(current, base_url=base_url)
         backup_path = _backup_file(config_path, CONFIG_OPERATION_BACKUP_LABEL) if config_path.exists() else None
         _write_text_atomic(config_path, updated)
-        _prune_config_operation_backups(config_path)
+        _prune_operation_backups(
+            config_path,
+            label=CONFIG_OPERATION_BACKUP_LABEL,
+            protected_path=backup_path,
+        )
         _verify_provider_config(config_path, base_url=base_url)
         await self.update_settings(codex_api_base_url=base_url)
         response = CodexNeoActionResponse(
@@ -273,7 +283,11 @@ class CodexNeoService:
         )
         backup_path = _backup_file(config_path, CONFIG_OPERATION_BACKUP_LABEL) if config_path.exists() else None
         _write_text_atomic(config_path, updated)
-        _prune_config_operation_backups(config_path)
+        _prune_operation_backups(
+            config_path,
+            label=CONFIG_OPERATION_BACKUP_LABEL,
+            protected_path=backup_path,
+        )
         _verify_provider_reverted(config_path)
         response = CodexNeoActionResponse(
             success=True,
@@ -292,8 +306,24 @@ class CodexNeoService:
         response = await self._codexgo_provider(f"{base_url}/{action.value}", token)
         _validate_auth_json(response)
         auth_path = self._codex_home / "auth.json"
-        backup_path = _backup_file(auth_path, "codexgo-backup") if auth_path.exists() else None
-        _write_text_atomic(auth_path, json.dumps(response, indent=2, sort_keys=True) + "\n")
+        current_raw = (json.dumps(response, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        if codexgo_auth_identity_fingerprint(current_raw) is None:
+            raise DashboardBadRequestError(
+                "CodexGO provider did not return a stable account identity",
+                code="codexneo_codexgo_identity_missing",
+            )
+        async with codexgo_root_state_guard():
+            backup_path = _backup_file(auth_path, CODEXGO_AUTH_BACKUP_LABEL) if auth_path.exists() else None
+            _write_bytes_atomic(auth_path, current_raw)
+            record_codexgo_root_replacement(
+                self._settings_path.parent,
+                current_raw=current_raw,
+            )
+            _prune_operation_backups(
+                auth_path,
+                label=CODEXGO_AUTH_BACKUP_LABEL,
+                protected_path=backup_path,
+            )
         action_response = CodexNeoActionResponse(
             success=True,
             message=f"CodexGO auth {action.value} applied",
@@ -691,15 +721,29 @@ def _ensure_original_config_backup(config_path: Path, current: str) -> Path | No
     return original_backup_path
 
 
-def _prune_config_operation_backups(config_path: Path) -> None:
-    pattern = f"{config_path.name}.{CONFIG_OPERATION_BACKUP_LABEL}-*"
-    backups = sorted(config_path.parent.glob(pattern), key=lambda path: path.name, reverse=True)
+def _prune_operation_backups(
+    path: Path,
+    *,
+    label: str,
+    protected_path: Path | None = None,
+) -> None:
+    pattern = f"{path.name}.{label}-*"
+    candidates = list(path.parent.glob(pattern))
+    protected_name = protected_path.name if protected_path is not None else None
+    protected = [backup for backup in candidates if backup.name == protected_name]
+    remaining = sorted(
+        (backup for backup in candidates if backup.name != protected_name),
+        key=lambda backup: backup.name,
+        reverse=True,
+    )
+    backups = protected + remaining
     now = datetime.now()
     for index, backup in enumerate(backups):
-        should_prune_by_count = index >= CONFIG_OPERATION_BACKUP_KEEP_LATEST
+        should_prune_by_count = index >= OPERATION_BACKUP_KEEP_LATEST
         should_prune_by_age = (
-            index >= CONFIG_OPERATION_BACKUP_MIN_KEEP
-            and _backup_age_days(backup, now=now) > CONFIG_OPERATION_BACKUP_MAX_AGE_DAYS
+            index >= OPERATION_BACKUP_MIN_KEEP
+            and _backup_age(backup, label=label, now=now)
+            > timedelta(days=OPERATION_BACKUP_MAX_AGE_DAYS)
         )
         if not should_prune_by_count and not should_prune_by_age:
             continue
@@ -709,18 +753,22 @@ def _prune_config_operation_backups(config_path: Path) -> None:
             continue
 
 
-def _backup_age_days(path: Path, *, now: datetime) -> int:
-    prefix = f"{path.name.split(CONFIG_OPERATION_BACKUP_LABEL, 1)[0]}{CONFIG_OPERATION_BACKUP_LABEL}-"
+def _backup_age(path: Path, *, label: str, now: datetime) -> timedelta:
+    prefix = f"{path.name.split(label, 1)[0]}{label}-"
     timestamp = path.name.removeprefix(prefix)
     try:
         created_at = datetime.strptime(timestamp, "%Y%m%d-%H%M%S-%f")
     except ValueError:
         created_at = datetime.fromtimestamp(path.stat().st_mtime)
-    return (now - created_at).days
+    return now - created_at
 
 
 def _write_text_atomic(path: Path, text: str) -> None:
+    _write_bytes_atomic(path, text.encode("utf-8"))
+
+
+def _write_bytes_atomic(path: Path, raw: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-    tmp_path.write_text(text, encoding="utf-8")
+    tmp_path.write_bytes(raw)
     tmp_path.replace(path)

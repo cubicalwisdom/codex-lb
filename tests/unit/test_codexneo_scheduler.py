@@ -4,8 +4,9 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.modules.codexneo.scheduler import CodexGoRefreshScheduler
-from app.modules.codexneo.service import CodexGoAction
+from app.modules.codexneo.scheduler import CodexGoRefreshScheduler, build_codexgo_refresh_scheduler
+from app.modules.codexneo.service import CodexGoAction, CodexNeoService
+from app.modules.codexneo.sync import CodexNeoAccountsSyncService
 
 pytestmark = pytest.mark.unit
 
@@ -41,6 +42,13 @@ class _ActivityLog:
 
     def append(self, stream: str, message: str) -> None:
         self.entries.append((stream, message))
+
+
+def test_background_scheduler_wires_account_sync_for_codexgo_reconciliation() -> None:
+    scheduler = build_codexgo_refresh_scheduler()
+
+    assert isinstance(scheduler._service, CodexNeoService)
+    assert isinstance(scheduler._service._account_sync, CodexNeoAccountsSyncService)
 
 
 @pytest.mark.asyncio

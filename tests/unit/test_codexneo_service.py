@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -554,6 +556,166 @@ async def test_codexgo_use_auth_validates_and_replaces_auth_json(tmp_path) -> No
         "tokens": {"access_token": "access", "account_id": "acct_123"}
     }
     assert list(codex_home.glob("auth.json.codexgo-backup-*"))
+
+
+@pytest.mark.asyncio
+async def test_codexgo_auth_backup_retention_prunes_old_codexgo_backups_only(tmp_path) -> None:
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return {"tokens": {"access_token": "access", "account_id": "acct_123"}}
+
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    auth_path = codex_home / "auth.json"
+    auth_path.write_text('{"tokens":{"access_token":"old","account_id":"old"}}', encoding="utf-8")
+    unrelated_backup = codex_home / "auth.json.rc-switcher-backup-20000101-000000"
+    unrelated_backup.write_text("protected backup\n", encoding="utf-8")
+    existing_codexgo_backups: list[Path] = []
+    for index in range(12):
+        timestamp = (datetime.now() - timedelta(minutes=index + 1)).strftime("%Y%m%d-%H%M%S-%f")
+        backup = codex_home / f"auth.json.codexgo-backup-{timestamp}"
+        backup.write_text(f"old backup {index}\n", encoding="utf-8")
+        existing_codexgo_backups.append(backup)
+
+    service = CodexNeoService(
+        settings_path=tmp_path / "settings.json",
+        codex_home=codex_home,
+        encryptor=_encryptor(),
+        codexgo_provider=provider,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+
+    result = await service.apply_codexgo_auth(CodexGoAction.USE)
+
+    codexgo_backups = list(codex_home.glob("auth.json.codexgo-backup-*"))
+    assert len(codexgo_backups) == 10
+    assert result.backup_path is not None
+    assert Path(result.backup_path).is_file()
+    expected_names = {
+        Path(result.backup_path).name,
+        *(backup.name for backup in sorted(existing_codexgo_backups, reverse=True)[:9]),
+    }
+    assert {backup.name for backup in codexgo_backups} == expected_names
+    assert unrelated_backup.read_text(encoding="utf-8") == "protected backup\n"
+
+
+@pytest.mark.asyncio
+async def test_codexgo_auth_backup_retention_keeps_three_when_all_older_than_age_limit(tmp_path) -> None:
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return {"tokens": {"access_token": "access", "account_id": "acct_123"}}
+
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    auth_path = codex_home / "auth.json"
+    auth_path.write_text('{"tokens":{"access_token":"old","account_id":"old"}}', encoding="utf-8")
+    old_backups: list[Path] = []
+    for index in range(6):
+        backup = codex_home / f"auth.json.codexgo-backup-20000101-0000{index:02d}-000000"
+        backup.write_text(f"old backup {index}\n", encoding="utf-8")
+        old_backups.append(backup)
+
+    service = CodexNeoService(
+        settings_path=tmp_path / "settings.json",
+        codex_home=codex_home,
+        encryptor=_encryptor(),
+        codexgo_provider=provider,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+
+    result = await service.apply_codexgo_auth(CodexGoAction.USE)
+
+    assert result.backup_path is not None
+    remaining = list(codex_home.glob("auth.json.codexgo-backup-*"))
+    assert {backup.name for backup in remaining} == {
+        Path(result.backup_path).name,
+        *(backup.name for backup in sorted(old_backups, reverse=True)[:2]),
+    }
+
+
+@pytest.mark.asyncio
+async def test_codexgo_auth_rejects_untrackable_identity_before_writing_root_or_backup(tmp_path) -> None:
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return {
+            "tokens": {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "id_token": "opaque-token-without-claims",
+            }
+        }
+
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    auth_path = codex_home / "auth.json"
+    original = '{"tokens":{"access_token":"old","account_id":"old"}}'
+    auth_path.write_text(original, encoding="utf-8")
+    service = CodexNeoService(
+        settings_path=tmp_path / "settings.json",
+        codex_home=codex_home,
+        encryptor=_encryptor(),
+        codexgo_provider=provider,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+
+    with pytest.raises(DashboardBadRequestError, match="stable account identity"):
+        await service.apply_codexgo_auth(CodexGoAction.REFRESH)
+
+    assert auth_path.read_text(encoding="utf-8") == original
+    assert list(codex_home.glob("auth.json.codexgo-backup-*")) == []
+    assert not (tmp_path / "codexgo-root-state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_codexgo_auth_backup_retention_protects_current_backup_from_future_dated_names(tmp_path) -> None:
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return {"tokens": {"access_token": "access", "account_id": "acct_123"}}
+
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    auth_path = codex_home / "auth.json"
+    auth_path.write_text('{"tokens":{"access_token":"old","account_id":"old"}}', encoding="utf-8")
+    for index in range(10):
+        backup = codex_home / f"auth.json.codexgo-backup-29990101-0000{index:02d}-000000"
+        backup.write_text(f"future backup {index}\n", encoding="utf-8")
+    service = CodexNeoService(
+        settings_path=tmp_path / "settings.json",
+        codex_home=codex_home,
+        encryptor=_encryptor(),
+        codexgo_provider=provider,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+
+    result = await service.apply_codexgo_auth(CodexGoAction.USE)
+
+    assert result.backup_path is not None
+    assert Path(result.backup_path).is_file()
+    assert len(list(codex_home.glob("auth.json.codexgo-backup-*"))) == 10
+
+
+@pytest.mark.asyncio
+async def test_codexgo_auth_backup_retention_prunes_after_exact_fourteen_day_boundary(tmp_path) -> None:
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return {"tokens": {"access_token": "access", "account_id": "acct_123"}}
+
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    auth_path = codex_home / "auth.json"
+    auth_path.write_text('{"tokens":{"access_token":"old","account_id":"old"}}', encoding="utf-8")
+    for minutes in (1, 2):
+        timestamp = (datetime.now() - timedelta(minutes=minutes)).strftime("%Y%m%d-%H%M%S-%f")
+        (codex_home / f"auth.json.codexgo-backup-{timestamp}").write_text("recent\n", encoding="utf-8")
+    old_timestamp = (datetime.now() - timedelta(days=14, hours=23)).strftime("%Y%m%d-%H%M%S-%f")
+    old_backup = codex_home / f"auth.json.codexgo-backup-{old_timestamp}"
+    old_backup.write_text("older than boundary\n", encoding="utf-8")
+    service = CodexNeoService(
+        settings_path=tmp_path / "settings.json",
+        codex_home=codex_home,
+        encryptor=_encryptor(),
+        codexgo_provider=provider,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+
+    await service.apply_codexgo_auth(CodexGoAction.USE)
+
+    assert not old_backup.exists()
 
 
 @pytest.mark.asyncio

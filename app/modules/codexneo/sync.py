@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from app.core.auth import claims_from_auth, parse_auth_json
+from app.core.auth import DEFAULT_EMAIL, claims_from_auth, extract_id_token_claims, parse_auth_json
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.plan_types import normalize_account_plan_type
 from app.core.usage.quota import apply_usage_quota
@@ -21,6 +24,9 @@ from app.modules.codexneo.locations import CodexNeoAccountLocationService, regis
 from app.modules.codexneo.snapshots import account_key_from_snapshot, existing_snapshot_path
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
+
+_CODEXGO_ROOT_STATE_FILENAME = "codexgo-root-state.json"
+_CODEXGO_ROOT_STATE_LOCK = asyncio.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +84,11 @@ class CodexNeoAccountsSyncService:
         )
 
     async def sync_codex_home_to_accounts(self) -> CodexNeoSyncResult:
+        async with codexgo_root_state_guard():
+            return await self._sync_codex_home_to_accounts_unlocked()
+
+    async def _sync_codex_home_to_accounts_unlocked(self) -> CodexNeoSyncResult:
+        retired = await self._retire_tracked_codexgo_root_accounts()
         candidates = _discover_auth_snapshots(self._codex_home, self._data_dir)
         imported = 0
         skipped = 0
@@ -121,18 +132,27 @@ class CodexNeoAccountsSyncService:
 
         if imported == 0 and skipped == 0:
             return CodexNeoSyncResult(success=True, message="No Codex Home auth snapshots found", count=0)
+        retirement_message = f"; retired {retired} stale CodexGO root account(s)" if retired else ""
         return CodexNeoSyncResult(
             success=True,
-            message=f"Synced {imported} unique account snapshot(s) into Accounts; skipped {skipped}{backup_message}",
+            message=(
+                f"Synced {imported} unique account snapshot(s) into Accounts; "
+                f"skipped {skipped}{backup_message}{retirement_message}"
+            ),
             count=imported,
         )
 
     async def sync_all_accounts(self) -> CodexNeoSyncResult:
-        inbound = await self.sync_codex_home_to_accounts()
+        async with codexgo_root_state_guard():
+            return await self._sync_all_accounts_unlocked()
+
+    async def _sync_all_accounts_unlocked(self) -> CodexNeoSyncResult:
+        inbound = await self._sync_codex_home_to_accounts_unlocked()
         existing_identities = _snapshot_identities(
             _discover_auth_snapshots(self._codex_home, self._data_dir),
             include_root=False,
         )
+        tracked_codexgo_identities = _tracked_codexgo_root_fingerprints(self._data_dir)
         registered = 0
         skipped = 0
         async with get_background_session() as session:
@@ -143,6 +163,9 @@ class CodexNeoAccountsSyncService:
             for account in accounts:
                 identity = _account_identity(account)
                 if identity in existing_identities:
+                    continue
+                if _identity_fingerprint(identity) in tracked_codexgo_identities:
+                    skipped += 1
                     continue
                 if account.status in {AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}:
                     skipped += 1
@@ -168,6 +191,39 @@ class CodexNeoAccountsSyncService:
             ),
             count=master_count,
         )
+
+    async def _retire_tracked_codexgo_root_accounts(self) -> int:
+        state = _read_codexgo_root_state(self._data_dir)
+        retired_fingerprints = set(_string_list(state.get("retired_identity_sha256")))
+        if not retired_fingerprints:
+            return 0
+
+        preserved_fingerprints: set[str] = set()
+        for candidate in _discover_auth_snapshots(self._codex_home, self._data_dir):
+            if candidate.source == "root":
+                continue
+            try:
+                fingerprint = _auth_fingerprint(candidate.path.read_bytes())
+            except Exception:
+                continue
+            if fingerprint in retired_fingerprints:
+                preserved_fingerprints.add(fingerprint)
+
+        removable_fingerprints = retired_fingerprints - preserved_fingerprints
+
+        deleted = 0
+        async with get_background_session() as session:
+            repo = AccountsRepository(session)
+            accounts = await repo.list_accounts(refresh_existing=True, include_generated_copies=True)
+            for account in accounts:
+                if _identity_fingerprint(_account_identity(account)) not in removable_fingerprints:
+                    continue
+                if await repo.delete(account.id, delete_history=False):
+                    deleted += 1
+
+        state["retired_identity_sha256"] = []
+        _write_codexgo_root_state(self._data_dir, state)
+        return deleted
 
     async def refresh_master_registry(self) -> int:
         entries: dict[tuple[str, str, str, str] | tuple[str, str], dict[str, Any]] = {}
@@ -679,6 +735,110 @@ def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+@asynccontextmanager
+async def codexgo_root_state_guard():
+    async with _CODEXGO_ROOT_STATE_LOCK:
+        yield
+
+
+def record_codexgo_root_replacement(
+    data_dir: Path,
+    *,
+    current_raw: bytes,
+) -> None:
+    current_fingerprint = _auth_fingerprint(current_raw)
+    if current_fingerprint is None:
+        return
+    state = _read_codexgo_root_state(data_dir)
+    retired = _string_list(state.get("retired_identity_sha256"))
+    tracked_fingerprint = state.get("active_identity_sha256")
+    if (
+        isinstance(tracked_fingerprint, str)
+        and tracked_fingerprint
+        and tracked_fingerprint != current_fingerprint
+        and tracked_fingerprint not in retired
+    ):
+        retired.append(tracked_fingerprint)
+    state.update(
+        {
+            "schema_version": 1,
+            "active_identity_sha256": current_fingerprint,
+            "retired_identity_sha256": retired,
+        }
+    )
+    _write_codexgo_root_state(data_dir, state)
+
+
+def _tracked_codexgo_root_fingerprints(data_dir: Path) -> set[str]:
+    state = _read_codexgo_root_state(data_dir)
+    tracked = set(_string_list(state.get("retired_identity_sha256")))
+    active = state.get("active_identity_sha256")
+    if isinstance(active, str) and active:
+        tracked.add(active)
+    return tracked
+
+
+def _read_codexgo_root_state(data_dir: Path) -> dict[str, Any]:
+    path = data_dir / _CODEXGO_ROOT_STATE_FILENAME
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"schema_version": 1, "active_identity_sha256": None, "retired_identity_sha256": []}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_codexgo_root_state(data_dir: Path, state: dict[str, Any]) -> None:
+    _write_json_atomic(data_dir / _CODEXGO_ROOT_STATE_FILENAME, state)
+
+
+def codexgo_auth_identity_fingerprint(raw: bytes | None) -> str | None:
+    return _auth_fingerprint(raw)
+
+
+def _auth_fingerprint(raw: bytes | None) -> str | None:
+    if raw is None:
+        return None
+    try:
+        claims = claims_from_auth(parse_auth_json(raw))
+        identity = (
+            claims.account_id or "",
+            claims.email or "",
+            claims.workspace_id or "",
+            claims.workspace_label or "",
+        )
+    except Exception:
+        try:
+            payload = json.loads(raw)
+            tokens = payload.get("tokens") if isinstance(payload, dict) else None
+            if not isinstance(tokens, dict):
+                return None
+            id_token = tokens.get("id_token") or tokens.get("idToken")
+            token_claims = extract_id_token_claims(id_token) if isinstance(id_token, str) else None
+            identity = (
+                str(tokens.get("account_id") or tokens.get("accountId") or ""),
+                token_claims.email if token_claims and token_claims.email else "",
+                token_claims.workspace_id if token_claims and token_claims.workspace_id else "",
+                token_claims.workspace_label if token_claims and token_claims.workspace_label else "",
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            return None
+    return _identity_fingerprint(identity) if any(identity) else None
+
+
+def _identity_fingerprint(identity: tuple[str, ...]) -> str:
+    normalized = list(identity)
+    if len(normalized) > 1 and normalized[1] == DEFAULT_EMAIL:
+        normalized[1] = ""
+    encoded = json.dumps(normalized, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
 
 
 @dataclass(frozen=True, slots=True)

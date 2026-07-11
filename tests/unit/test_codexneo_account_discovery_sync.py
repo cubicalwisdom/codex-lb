@@ -5,13 +5,17 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from cryptography.fernet import Fernet
+from sqlalchemy import select
 
 from app.core.auth import generate_unique_account_id
-from app.db.models import AccountStatus, DashboardSettings
+from app.core.crypto import TokenEncryptor
+from app.db.models import AccountStatus, DashboardSettings, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
 from app.modules.codexneo.locations import CodexNeoAccountLocationService
+from app.modules.codexneo.service import CodexGoAction, CodexNeoService
 from app.modules.codexneo.sync import CodexNeoAccountsSyncService
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -84,6 +88,32 @@ def _auth_json(*, email: str, account_id: str, plan: str = "pro") -> bytes:
             "lastRefreshAt": "2026-06-24T00:00:00Z",
         }
     ).encode("utf-8")
+
+
+def _provider_auth_json(*, email: str, account_id: str) -> dict[str, object]:
+    auth = json.loads(_auth_json(email=email, account_id=account_id))
+    tokens = auth["tokens"]
+    return {
+        "tokens": {
+            "id_token": tokens["idToken"],
+            "access_token": tokens["accessToken"],
+            "refresh_token": tokens["refreshToken"],
+            "account_id": tokens["accountId"],
+        },
+        "last_refresh": auth["lastRefreshAt"],
+    }
+
+
+def _provider_auth_json_without_email(*, account_id: str) -> dict[str, object]:
+    return {
+        "tokens": {
+            "id_token": _encode_jwt({"https://api.openai.com/auth": {"chatgpt_plan_type": "pro"}}),
+            "access_token": f"secret-access-{account_id}",
+            "refresh_token": f"secret-refresh-{account_id}",
+            "account_id": account_id,
+        },
+        "last_refresh": "2026-06-24T00:00:00Z",
+    }
 
 
 def _write_live_account(
@@ -244,6 +274,278 @@ async def test_sync_root_auth_json_without_managed_snapshot_to_accounts(tmp_path
     assert result.count == 1
     assert generate_unique_account_id(raw_account_id, email) in await _account_ids()
     assert "secret-access" not in result.message
+
+
+@pytest.mark.asyncio
+async def test_codexgo_refresh_retires_previous_managed_root_account(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    responses = [
+        _provider_auth_json(email="old-root@example.com", account_id="acc_old_root"),
+        _provider_auth_json(email="new-root@example.com", account_id="acc_new_root"),
+    ]
+
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return responses.pop(0)
+
+    runner = RecordingCommandRunner()
+    account_sync = CodexNeoAccountsSyncService(codex_home=codex_home, data_dir=data_dir, command_runner=runner)
+    service = CodexNeoService(
+        settings_path=data_dir / "codexneo-settings.json",
+        codex_home=codex_home,
+        encryptor=TokenEncryptor(key=Fernet.generate_key()),
+        codexgo_provider=provider,
+        account_sync=account_sync,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+
+    await service.apply_codexgo_auth(CodexGoAction.USE)
+    old_account_id = generate_unique_account_id("acc_old_root", "old-root@example.com")
+    await _set_account_usage(old_account_id, primary_used=25.0, weekly_used=50.0)
+    await account_sync.sync_all_accounts()
+    result = await service.apply_codexgo_auth(CodexGoAction.REFRESH)
+
+    assert result.success is True
+    assert await _account_ids() == [generate_unique_account_id("acc_new_root", "new-root@example.com")]
+    old_account_key = generate_unique_account_id("acc_old_root", "old-root@example.com")
+    assert not (codex_home / "accounts" / f"{old_account_key}.auth.json").exists()
+    current_root = json.loads((codex_home / "auth.json").read_text(encoding="utf-8"))
+    assert current_root["tokens"]["account_id"] == "acc_new_root"
+    async with get_background_session() as session:
+        usage_account_ids = list((await session.execute(select(UsageHistory.account_id))).scalars())
+    assert usage_account_ids
+    assert set(usage_account_ids) == {None}
+
+
+@pytest.mark.asyncio
+async def test_sync_all_does_not_register_tracked_codexgo_root_account(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return _provider_auth_json(email="transient-root@example.com", account_id="acc_transient_root")
+
+    runner = RecordingCommandRunner()
+    account_sync = CodexNeoAccountsSyncService(codex_home=codex_home, data_dir=data_dir, command_runner=runner)
+    service = CodexNeoService(
+        settings_path=data_dir / "codexneo-settings.json",
+        codex_home=codex_home,
+        encryptor=TokenEncryptor(key=Fernet.generate_key()),
+        codexgo_provider=provider,
+        account_sync=account_sync,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+
+    await service.apply_codexgo_auth(CodexGoAction.USE)
+    result = await account_sync.sync_all_accounts()
+
+    assert result.success is True
+    assert runner.calls == []
+    assert not (codex_home / "accounts").exists()
+    state_text = (data_dir / "codexgo-root-state.json").read_text(encoding="utf-8")
+    state = json.loads(state_text)
+    assert len(state["active_identity_sha256"]) == 64
+    assert set(state["active_identity_sha256"]) <= set("0123456789abcdef")
+    assert "transient-root@example.com" not in state_text
+    assert "secret-access" not in state_text
+
+
+@pytest.mark.asyncio
+async def test_codexgo_refresh_preserves_user_owned_snapshot_with_same_identity(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    _write_live_account(
+        codex_home,
+        "user-owned-key",
+        email="shared-root@example.com",
+        raw_account_id="acc_shared_root",
+    )
+    _write_backup_account(
+        data_dir,
+        "user-owned-backup-key",
+        email="shared-root@example.com",
+        raw_account_id="acc_shared_root",
+    )
+    responses = [
+        _provider_auth_json(email="shared-root@example.com", account_id="acc_shared_root"),
+        _provider_auth_json(email="next-root@example.com", account_id="acc_next_root"),
+    ]
+
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return responses.pop(0)
+
+    account_sync = CodexNeoAccountsSyncService(codex_home=codex_home, data_dir=data_dir)
+    service = CodexNeoService(
+        settings_path=data_dir / "codexneo-settings.json",
+        codex_home=codex_home,
+        encryptor=TokenEncryptor(key=Fernet.generate_key()),
+        codexgo_provider=provider,
+        account_sync=account_sync,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+
+    await service.apply_codexgo_auth(CodexGoAction.USE)
+    await service.apply_codexgo_auth(CodexGoAction.REFRESH)
+
+    assert (codex_home / "accounts" / "user-owned-key.auth.json").is_file()
+    assert (data_dir / "account-backups" / "user-owned-backup-key.auth.json").is_file()
+    assert await _account_ids() == sorted(
+        [
+            generate_unique_account_id("acc_shared_root", "shared-root@example.com"),
+            generate_unique_account_id("acc_next_root", "next-root@example.com"),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_codexgo_refresh_retires_tracked_identity_after_manual_root_switch(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    responses = [
+        _provider_auth_json(email="tracked-root@example.com", account_id="acc_tracked_root"),
+        _provider_auth_json(email="next-root@example.com", account_id="acc_next_root"),
+    ]
+
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return responses.pop(0)
+
+    account_sync = CodexNeoAccountsSyncService(codex_home=codex_home, data_dir=data_dir)
+    service = CodexNeoService(
+        settings_path=data_dir / "codexneo-settings.json",
+        codex_home=codex_home,
+        encryptor=TokenEncryptor(key=Fernet.generate_key()),
+        codexgo_provider=provider,
+        account_sync=account_sync,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+
+    await service.apply_codexgo_auth(CodexGoAction.USE)
+    manual_raw = _auth_json(email="manual-root@example.com", account_id="acc_manual_root")
+    (codex_home / "auth.json").write_bytes(manual_raw)
+    await account_sync.sync_codex_home_to_accounts()
+    await service.apply_codexgo_auth(CodexGoAction.REFRESH)
+
+    assert await _account_ids() == sorted(
+        [
+            generate_unique_account_id("acc_manual_root", "manual-root@example.com"),
+            generate_unique_account_id("acc_next_root", "next-root@example.com"),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_codexgo_refresh_retires_no_email_identity_using_database_normalization(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    responses = [
+        _provider_auth_json_without_email(account_id="acc_no_email_old"),
+        _provider_auth_json_without_email(account_id="acc_no_email_new"),
+    ]
+
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return responses.pop(0)
+
+    account_sync = CodexNeoAccountsSyncService(codex_home=codex_home, data_dir=data_dir)
+    service = CodexNeoService(
+        settings_path=data_dir / "codexneo-settings.json",
+        codex_home=codex_home,
+        encryptor=TokenEncryptor(key=Fernet.generate_key()),
+        codexgo_provider=provider,
+        account_sync=account_sync,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+
+    await service.apply_codexgo_auth(CodexGoAction.USE)
+    await service.apply_codexgo_auth(CodexGoAction.REFRESH)
+
+    assert await _account_ids() == ["acc_no_email_new"]
+
+
+@pytest.mark.asyncio
+async def test_codexgo_token_renewal_keeps_same_tracked_identity(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    first = _provider_auth_json(email="same-root@example.com", account_id="acc_same_root")
+    second = _provider_auth_json(email="same-root@example.com", account_id="acc_same_root")
+    second_tokens = second["tokens"]
+    assert isinstance(second_tokens, dict)
+    second_tokens["access_token"] = "renewed-access-token"
+    responses = [first, second]
+
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return responses.pop(0)
+
+    account_sync = CodexNeoAccountsSyncService(codex_home=codex_home, data_dir=data_dir)
+    service = CodexNeoService(
+        settings_path=data_dir / "codexneo-settings.json",
+        codex_home=codex_home,
+        encryptor=TokenEncryptor(key=Fernet.generate_key()),
+        codexgo_provider=provider,
+        account_sync=account_sync,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+
+    await service.apply_codexgo_auth(CodexGoAction.USE)
+    await service.apply_codexgo_auth(CodexGoAction.REFRESH)
+
+    expected_id = generate_unique_account_id("acc_same_root", "same-root@example.com")
+    assert await _account_ids() == [expected_id]
+    state = json.loads((data_dir / "codexgo-root-state.json").read_text(encoding="utf-8"))
+    assert state["retired_identity_sha256"] == []
+    current_root = json.loads((codex_home / "auth.json").read_text(encoding="utf-8"))
+    assert current_root["tokens"]["access_token"] == "renewed-access-token"
+
+
+@pytest.mark.asyncio
+async def test_codexgo_retirement_failure_keeps_pending_state_for_retry(tmp_path, db_setup, monkeypatch) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    responses = [
+        _provider_auth_json(email="retry-old@example.com", account_id="acc_retry_old"),
+        _provider_auth_json(email="retry-new@example.com", account_id="acc_retry_new"),
+    ]
+
+    async def provider(_url: str, _token: str) -> dict[str, object]:
+        return responses.pop(0)
+
+    account_sync = CodexNeoAccountsSyncService(codex_home=codex_home, data_dir=data_dir)
+    service = CodexNeoService(
+        settings_path=data_dir / "codexneo-settings.json",
+        codex_home=codex_home,
+        encryptor=TokenEncryptor(key=Fernet.generate_key()),
+        codexgo_provider=provider,
+        account_sync=account_sync,
+    )
+    await service.update_settings(buyer_token="buyer-token")
+    await service.apply_codexgo_auth(CodexGoAction.USE)
+
+    original_delete = AccountsRepository.delete
+
+    async def fail_delete_once(self, account_id: str, *, delete_history: bool = False) -> bool:
+        del self, account_id, delete_history
+        raise RuntimeError("injected retirement failure")
+
+    monkeypatch.setattr(AccountsRepository, "delete", fail_delete_once)
+    with pytest.raises(RuntimeError, match="injected retirement failure"):
+        await service.apply_codexgo_auth(CodexGoAction.REFRESH)
+
+    pending_state = json.loads((data_dir / "codexgo-root-state.json").read_text(encoding="utf-8"))
+    assert len(pending_state["retired_identity_sha256"]) == 1
+
+    monkeypatch.setattr(AccountsRepository, "delete", original_delete)
+    retry = await account_sync.sync_codex_home_to_accounts()
+
+    assert retry.success is True
+    assert await _account_ids() == [generate_unique_account_id("acc_retry_new", "retry-new@example.com")]
+    final_state = json.loads((data_dir / "codexgo-root-state.json").read_text(encoding="utf-8"))
+    assert final_state["retired_identity_sha256"] == []
 
 
 @pytest.mark.asyncio
