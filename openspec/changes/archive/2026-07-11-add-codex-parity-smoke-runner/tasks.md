@@ -13,8 +13,8 @@
 
 ## 3. Verification and closeout
 
-- [ ] 3.1 Confirm marker collection selects exactly 16 nodes / 18 cases and no unintended tests.
-- [ ] 3.2 Run the focused Make target and the direct explicit-node selection to green.
-- [ ] 3.3 Run the relevant full affected test files, Ruff, strict OpenSpec validation, and `git diff --check`.
-- [ ] 3.4 Complete an independent exact-diff review and address every Critical or Important finding.
-- [ ] 3.5 Sync/archive the OpenSpec change, update the implementation list and handover, and commit without pushing.
+- [x] 3.1 Confirm marker collection selects exactly 16 nodes / 18 cases and no unintended tests.
+- [x] 3.2 Run the focused Make target and the direct explicit-node selection to green.
+- [x] 3.3 Run the relevant full affected test files, Ruff, strict OpenSpec validation, and `git diff --check`.
+- [x] 3.4 Complete an independent exact-diff review and address every Critical or Important finding.
+- [x] 3.5 Sync/archive the OpenSpec change, update the implementation list and handover, and commit without pushing.
