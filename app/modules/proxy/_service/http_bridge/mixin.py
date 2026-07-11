@@ -373,6 +373,7 @@ class _HTTPBridgeMixin(
                 task.get_name().startswith("proxy-http_bridge_session_close-")
                 or task.get_name().startswith("http-bridge-close-")
                 or task.get_name().startswith("http-bridge-reconnect-cleanup-")
+                or task.get_name().startswith("http-bridge-reconnect-displaced-")
                 or task.get_name().startswith("http-bridge-terminal-settlement-")
             )
         ]
@@ -488,6 +489,82 @@ class _HTTPBridgeMixin(
                 return
             except Exception:
                 return
+
+    async def _settle_http_bridge_reconnect_displaced_resources(
+        self,
+        displaced_upstream: UpstreamResponsesWebSocket,
+        displaced_account_lease: AccountLease | None,
+    ) -> None:
+        async def settle_upstream() -> None:
+            while True:
+                try:
+                    await displaced_upstream.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Failed to close displaced HTTP bridge upstream during reconnect; retrying",
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(_HTTP_BRIDGE_PROVISIONAL_CLEANUP_RETRY_SECONDS)
+                    continue
+                return
+
+        async def settle_account_lease() -> None:
+            if displaced_account_lease is None:
+                return
+            while True:
+                try:
+                    await self._load_balancer.release_account_lease(displaced_account_lease)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Failed to release displaced HTTP bridge lease during reconnect; retrying",
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(_HTTP_BRIDGE_PROVISIONAL_CLEANUP_RETRY_SECONDS)
+                    continue
+                return
+
+        await asyncio.gather(
+            settle_upstream(),
+            settle_account_lease(),
+        )
+
+    def _start_http_bridge_reconnect_displaced_resource_settlement(
+        self,
+        displaced_upstream: UpstreamResponsesWebSocket,
+        displaced_account_lease: AccountLease | None,
+        *,
+        request_id: str,
+    ) -> None:
+        settlement_task = asyncio.create_task(
+            self._settle_http_bridge_reconnect_displaced_resources(
+                displaced_upstream,
+                displaced_account_lease,
+            ),
+            name=f"http-bridge-reconnect-displaced-{_hash_identifier(request_id)}",
+        )
+        self._background_cleanup_tasks.add(settlement_task)
+
+        def _settlement_done(done_task: asyncio.Task[None]) -> None:
+            self._background_cleanup_tasks.discard(done_task)
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                logger.warning(
+                    "HTTP bridge displaced reconnect settlement task was cancelled request_id=%s",
+                    _hash_identifier(request_id),
+                )
+            except Exception:
+                logger.warning(
+                    "HTTP bridge displaced reconnect settlement task failed request_id=%s",
+                    _hash_identifier(request_id),
+                    exc_info=True,
+                )
+
+        settlement_task.add_done_callback(_settlement_done)
 
     async def _settle_http_bridge_terminal_resources(
         self,
@@ -2394,7 +2471,6 @@ class _HTTPBridgeMixin(
                 openai_error("upstream_unavailable", "HTTP responses session bridge generation is retired"),
             )
         old_account_id = session.account.id
-        old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
@@ -2622,15 +2698,6 @@ class _HTTPBridgeMixin(
                     await release_provisional_account_lease()
                     raise
             assert provisional_upstream is not None
-            try:
-                await old_upstream.close()
-            except Exception:
-                logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
-            if effective_account_lease is not session.account_lease:
-                old_account_lease = session.account_lease
-                await self._load_balancer.release_account_lease(old_account_lease)
-                if session.account_lease is old_account_lease:
-                    session.account_lease = None
             upstream_turn_state = (
                 _upstream_turn_state_from_socket(provisional_upstream) or session.upstream_turn_state
             )
@@ -2643,6 +2710,9 @@ class _HTTPBridgeMixin(
                             "HTTP responses session bridge generation is retired",
                         ),
                     )
+                displaced_upstream = session.upstream
+                displaced_account_lease = session.account_lease
+                replacement_reuses_displaced_lease = effective_account_lease is displaced_account_lease
                 session.account_lease = effective_account_lease
                 session.account = account
                 session.headers = connect_headers
@@ -2658,6 +2728,11 @@ class _HTTPBridgeMixin(
                 provisional_upstream = None
                 provisional_account_lease = None
                 effective_account_lease = None
+                self._start_http_bridge_reconnect_displaced_resource_settlement(
+                    displaced_upstream,
+                    None if replacement_reuses_displaced_lease else displaced_account_lease,
+                    request_id=request_state.request_log_id or request_state.request_id,
+                )
         except BaseException:
             await self._await_http_bridge_reconnect_provisional_cleanup(
                 provisional_upstream,

@@ -13,4 +13,5 @@ Live Codex traffic produced repeated `response_create_gate_timeout` failures whi
 - Make retirement and reconnect cleanup cancellation-safe so tombstoned generations cannot resend and provisional sockets or leases remain tracked until settled.
 - Register initial and retry upstream sends as cancellable session activity without holding the lifecycle lock across network I/O.
 - Settle terminal account leases, durable ownership, and upstream sockets in an independently tracked retry task so transient failures retain ownership without delaying pending-request or gate cleanup.
+- Commit reconnect replacements and transfer their displaced sockets and leases under one lifecycle boundary so reconnect cleanup and terminal retirement never own the same handle.
 - Mirror and verify the portable runtime without restarting Codex Desktop.

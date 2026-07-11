@@ -52,3 +52,11 @@
 - [x] 7.3 Settle pending work and gates before the bounded shielded settlement wait, preserve caller cancellation, and include terminal settlement in background drain.
 - [x] 7.4 Run affected/full bridge verification, selected integration, Ruff, scoped ty, strict OpenSpec, and diff checks; append evidence and commit separately.
 - [ ] 7.5 Complete an independent exact-commit review and address any Critical or Important finding before Task 2 closes.
+
+## 8. Atomic reconnect ownership-handoff correction
+
+- [x] 8.1 Add RED coverage for fail-once displaced-socket settlement and a barrier-controlled retirement-winning reconnect race with exact per-handle accounting.
+- [x] 8.2 Remove pre-install old-resource awaits and atomically install the replacement plus transfer displaced socket and non-reused lease ownership under lifecycle.
+- [x] 8.3 Settle displaced resources independently in one tracked retry task, preserve reused leases, and include the task in bridge background drain.
+- [x] 8.4 Run focused/full verification, static and strict checks, update evidence, and commit the correction separately.
+- [ ] 8.5 Complete an independent exact-commit review and address any Critical or Important finding before Task 2 closes.

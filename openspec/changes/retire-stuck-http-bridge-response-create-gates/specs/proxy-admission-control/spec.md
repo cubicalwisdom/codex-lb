@@ -10,9 +10,11 @@ Terminal account-lease release, durable-ownership release, and upstream-socket c
 
 Initial submission and retry sends MUST register their actual upstream-send tasks during lifecycle validation and MUST await network I/O only after releasing the lifecycle lock. A blocked initial send MUST NOT prevent a gate-timeout waiter from entering retirement, receiving the stable timeout response, or fully settling the terminal generation.
 
-If reconnect acquires a provisional upstream socket or a new account lease but exits before installing them, including because cancellation interrupts old-socket settlement, old-lease settlement, or a named error handler, the proxy MUST transfer those resources to separately tracked cancellation-safe cleanup before preserving the original cancellation or exception. Repeated caller cancellation MUST NOT interrupt that ownership, and cleanup failures MUST retain and retry each unresolved resource. A reused session lease MUST NOT be released as provisional ownership or on a pre-install terminal failure. The old session lease MUST remain discoverable by session retirement until its release completes. Final tombstone validation and replacement installation MUST contain no intervening await.
+If reconnect acquires a provisional upstream socket or a new account lease but exits before installing them, including because cancellation interrupts a named error handler or the final lifecycle wait, the proxy MUST transfer those resources to separately tracked cancellation-safe cleanup before preserving the original cancellation or exception. Repeated caller cancellation MUST NOT interrupt that ownership, and cleanup failures MUST retain and retry each unresolved resource. A reused session lease MUST NOT be released as provisional ownership or on a pre-install terminal failure. Old installed handles MUST remain session-discoverable until either retirement takes terminal ownership or a successful replacement commit transfers them. Final tombstone validation and replacement installation MUST contain no intervening await.
 
-Concurrent reconnect attempts for one session MUST serialize their complete resource handoff so each attempt snapshots the currently installed socket, reader, and lease only after the preceding attempt has completed. A later reconnect MUST close and release the preceding installed resources exactly once before installing its own replacement; it MUST NOT overwrite an untracked socket/reader or release the lease belonging to a concurrently installed winner.
+The final reconnect lifecycle commit MUST assign each old and provisional handle to exactly one cleanup owner. If retirement wins lifecycle, reconnect MUST leave the old session handles for terminal settlement and MUST clean only its losing provisional resources. If reconnect wins, it MUST atomically capture the exact displaced installed socket and lease, install the provisional replacement, and synchronously transfer the displaced handles to one tracked retry task before releasing lifecycle. Displaced socket close and lease release MUST retry independently, MUST NOT mutate the newly installed session fields, and MUST NOT release an identical lease reused by the replacement.
+
+Concurrent reconnect attempts for one session MUST serialize their complete resource handoff so each attempt captures the currently installed socket, reader, and lease only in its final lifecycle commit after the preceding attempt has installed. A later reconnect MUST transfer the preceding installed resources to tracked settlement exactly once while installing its own replacement; it MUST NOT overwrite an untracked socket/reader or release the lease belonging to a concurrently installed winner.
 
 #### Scenario: Old event-free request blocks a visible waiter
 
@@ -31,14 +33,14 @@ Concurrent reconnect attempts for one session MUST serialize their complete reso
 - **AND** the reader is cancelled and awaited without reconnecting or resending
 - **AND** all pending queues, gates, reservations, leases, durable ownership, and aliases are settled
 
-#### Scenario: Reader cancellation interrupts reconnect before replacement installation
+#### Scenario: Reconnect exits before replacement installation
 
 - **WHEN** reconnect has acquired a provisional socket and lease
-- **AND** cancellation interrupts old-socket close or old-lease release before the replacement is installed
+- **AND** cancellation or retirement prevents the final replacement commit
 - **THEN** the provisional socket is closed
 - **AND** a newly acquired provisional lease is released exactly once
 - **AND** a reused session lease is not released as provisional ownership
-- **AND** the old generation retains discoverable ownership of any old lease whose release did not complete
+- **AND** the old generation retains ownership of its installed socket and lease
 - **AND** the original cancellation is propagated
 
 #### Scenario: Healthy or ineligible pending work is preserved
@@ -117,4 +119,18 @@ Concurrent reconnect attempts for one session MUST serialize their complete reso
 - **WHEN** two callers request reconnect for the same bridge session concurrently
 - **THEN** only one attempt provisions and installs at a time
 - **AND** the later attempt snapshots the first attempt's installed socket, reader, and lease
-- **AND** it cancels or closes and releases those resources exactly once before installing its replacement
+- **AND** its final lifecycle commit installs the replacement and transfers those displaced resources to tracked settlement exactly once
+
+#### Scenario: Reconnect wins lifecycle against retirement
+
+- **WHEN** reconnect reaches the final lifecycle commit before retirement
+- **THEN** it installs the provisional socket and lease
+- **AND** one tracked child owns the exact displaced socket and any non-reused displaced lease
+- **AND** transient close or release failures retry without clearing or closing the replacement fields
+
+#### Scenario: Retirement wins lifecycle against reconnect
+
+- **WHEN** retirement tombstones the generation before reconnect's final lifecycle commit
+- **THEN** terminal settlement alone owns the old installed socket and lease
+- **AND** reconnect rejects the installation and provisional cleanup alone owns the losing new socket and lease
+- **AND** every old and provisional handle is closed or released exactly once
