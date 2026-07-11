@@ -9,7 +9,7 @@ The repository needs a small, explicit fast lane that gives developers early fee
 ## What Changes
 
 - Register a semantic `codex_parity_smoke` pytest marker.
-- Apply it to the agreed 16 high-signal test nodes, which currently collect as 18 cases.
+- Apply it to the agreed 16 high-signal test functions, which currently collect as 18 cases.
 - Add a documented `make test-codex-parity-smoke` target that runs only that marked selection with the repository's standard pytest safety options.
 - Keep every existing test and the current `ci-fast`, `ci`, affected-suite, and release gates unchanged.
 - Treat the focused target as an iteration aid only; full affected suites remain required before final behavior commits and releases.

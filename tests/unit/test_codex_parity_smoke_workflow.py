@@ -20,16 +20,29 @@ def _assert_codex_parity_smoke_make_contract(makefile: str) -> None:
     }
     assert TARGET in phony_targets, f"{TARGET} must be declared .PHONY"
 
-    match = re.search(
-        rf"(?m)^{re.escape(TARGET)}:(?P<prerequisites>[^\n]*)\n"
-        r"(?P<body>(?:\t[^\n]*(?:\n|$))+)",
-        makefile,
-    )
-    assert match is not None, f"missing Make target: {TARGET}"
-    assert not match.group("prerequisites").strip(), f"{TARGET} must not have prerequisites"
+    lines = makefile.splitlines()
+    declaration_pattern = re.compile(rf"^{re.escape(TARGET)}\s*:(?P<prerequisites>.*)$")
+    rules: list[tuple[str, tuple[str, ...]]] = []
+    for index, line in enumerate(lines):
+        match = declaration_pattern.fullmatch(line)
+        if match is None:
+            continue
 
-    recipe = tuple(line.removeprefix("\t").strip() for line in match.group("body").splitlines())
-    assert recipe == EXPECTED_RECIPE
+        recipe: list[str] = []
+        for body_line in lines[index + 1 :]:
+            if not body_line.startswith("\t"):
+                break
+            command = body_line.removeprefix("\t").strip()
+            if command:
+                recipe.append(command)
+        rules.append((match.group("prerequisites"), tuple(recipe)))
+
+    assert rules, f"missing Make target: {TARGET}"
+    for prerequisites, _recipe in rules:
+        assert not prerequisites.strip(), f"{TARGET} must not have prerequisites"
+
+    recipes = tuple(recipe for _prerequisites, recipe in rules if recipe)
+    assert recipes == (EXPECTED_RECIPE,)
 
 
 def test_codex_parity_smoke_workflow_contract() -> None:
@@ -45,9 +58,10 @@ def test_codex_parity_smoke_workflow_contract() -> None:
 def test_codex_parity_smoke_workflow_rejects_prerequisites() -> None:
     makefile = """\
 .PHONY: test-codex-parity-smoke
-test-codex-parity-smoke: ci-fast
+test-codex-parity-smoke:
 \tuv sync --dev --frozen
 \tPYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) --strict-markers -m codex_parity_smoke
+test-codex-parity-smoke: ci-fast
 """
 
     with pytest.raises(AssertionError, match="must not have prerequisites"):
