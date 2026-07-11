@@ -2822,6 +2822,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
         http_responses_session_bridge_gateway_safe_mode=False,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
         log_proxy_request_payload=False,
         log_proxy_request_shape=False,
         log_proxy_request_shape_raw_cache_key=False,
