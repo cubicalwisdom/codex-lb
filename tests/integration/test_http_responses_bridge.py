@@ -1411,30 +1411,24 @@ class _FailingSendThenCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
         raise RuntimeError("socket closed during send")
 
 
-def _make_dummy_bridge_session(session_key: proxy_module._HTTPBridgeSessionKey) -> SimpleNamespace:
+def _make_dummy_bridge_session(session_key: proxy_module._HTTPBridgeSessionKey) -> proxy_module._HTTPBridgeSession:
     async def _close() -> None:
         return None
 
-    return SimpleNamespace(
+    return proxy_module._HTTPBridgeSession(
         key=session_key,
         headers={},
-        closed=False,
-        account=SimpleNamespace(id=None, status=AccountStatus.ACTIVE),
+        affinity=proxy_module._AffinityPolicy(),
         request_model="gpt-5.4",
-        pending_lock=anyio.Lock(),
+        account=cast(Any, SimpleNamespace(id=None, status=AccountStatus.ACTIVE)),
+        upstream=cast(Any, SimpleNamespace(close=_close)),
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
         pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
         queued_request_count=0,
         last_used_at=time.monotonic(),
         idle_ttl_seconds=120.0,
-        codex_session=False,
-        downstream_turn_state=None,
-        downstream_turn_state_aliases=set(),
-        previous_response_ids=set(),
-        durable_session_id=None,
-        durable_owner_epoch=None,
-        upstream_reader=None,
-        upstream_control=proxy_module._WebSocketUpstreamControl(),
-        upstream=SimpleNamespace(close=_close),
     )
 
 
@@ -2633,7 +2627,7 @@ async def test_v1_responses_http_bridge_closes_disallowed_session_before_owner_m
     stale_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=["acc-stale"])
     refreshed_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=["acc-fresh"])
     upstream = _FakeBridgeUpstreamWebSocket()
-    stale_session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
+    stale_session = _make_dummy_bridge_session(key)
     alias_key = proxy_module._http_bridge_turn_state_alias_key("http_turn_owner_retry", key.api_key_id)
 
     cast(Any, stale_session).account = SimpleNamespace(id="acc-stale", status=AccountStatus.ACTIVE)
@@ -7010,12 +7004,12 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         if len(create_calls) == 1:
             create_started.set()
             await _wait_for_event(release_create)
-            session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
+            session = _make_dummy_bridge_session(key)
             cast(Any, session).account = SimpleNamespace(id=stale_account_id, status=AccountStatus.ACTIVE)
             session.queued_request_count = 1
             session.upstream_control.retire_after_drain = True
             return session
-        session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
+        session = _make_dummy_bridge_session(key)
         cast(Any, session).account = SimpleNamespace(id=fresh_account_id, status=AccountStatus.ACTIVE)
         return session
 
@@ -7143,7 +7137,7 @@ async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
 
     key = proxy_module._HTTPBridgeSessionKey("request", "bridge-stale-replace", None)
-    stale_session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
+    stale_session = _make_dummy_bridge_session(key)
     stale_session.closed = True
     service._http_bridge_sessions[key] = stale_session
 
@@ -7521,7 +7515,7 @@ async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_ins
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
 
     key = proxy_module._HTTPBridgeSessionKey("request", "bridge-idle-prune", None)
-    stale_session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
+    stale_session = _make_dummy_bridge_session(key)
     stale_session.last_used_at = time.monotonic() - 300.0
     stale_session.idle_ttl_seconds = 120.0
     service._http_bridge_sessions[key] = stale_session
