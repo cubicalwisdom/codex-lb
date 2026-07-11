@@ -559,6 +559,7 @@ def test_backend_responses_websocket_generic_auth_refresh_budget_is_per_account(
     assert permanent_failures == [("acct_ws_auth_a", "account_auth_invalidated")]
 
 
+@pytest.mark.codex_parity_smoke
 def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_instance, monkeypatch):
     upstream_messages = [
         _FakeUpstreamMessage(

@@ -1010,6 +1010,7 @@ def test_compact_strips_tool_fields():
     assert dumped["parallel_tool_calls"] is False
 
 
+@pytest.mark.codex_parity_smoke
 def test_v1_compact_strips_tool_fields():
     payload = {
         "model": "gpt-5.1",

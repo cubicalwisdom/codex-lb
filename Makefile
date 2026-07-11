@@ -19,6 +19,7 @@ help:
 	  '  make typecheck               ty check' \
 	  '  make frontend-test           vitest coverage, same as CI' \
 	  '  make test-unit               unit pytest slice, same as CI' \
+	  '  make test-codex-parity-smoke focused native Codex/proxy parity tests' \
 	  '  make test-integration-core   integration-core pytest slice' \
 	  '  make package                 build and verify sdist/wheel' \
 	  '  make ci-fast                 lint/type/frontend/unit/package' \
@@ -51,6 +52,11 @@ architecture-check:
 typecheck:
 	uv sync --dev --frozen
 	uv run ty check
+
+.PHONY: test-codex-parity-smoke
+test-codex-parity-smoke:
+	uv sync --dev --frozen
+	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) --strict-markers -m codex_parity_smoke
 
 .PHONY: test-unit test-integration-core test-integration-bridge test-e2e test-postgres
 test-unit: frontend-build

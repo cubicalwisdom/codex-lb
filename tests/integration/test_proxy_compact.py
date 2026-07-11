@@ -102,6 +102,7 @@ async def test_proxy_compact_no_accounts(async_client):
     assert error["code"] == "no_accounts"
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, monkeypatch):
     email = "compact-tools@example.com"

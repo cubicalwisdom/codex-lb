@@ -4215,6 +4215,7 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
     assert json.loads(fake_upstream.sent_text[1])["previous_response_id"] == "resp_bridge_1"
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_preserves_previous_response_id(
     async_client,

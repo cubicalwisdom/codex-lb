@@ -241,6 +241,7 @@ async def test_v1_models_list(async_client):
         assert item["supports_vision"] is True
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_v1_models_with_client_version_returns_codex_catalog(async_client):
     await _populate_test_registry()
@@ -261,6 +262,7 @@ async def test_v1_models_with_client_version_returns_codex_catalog(async_client)
     assert payload == codex_response.json()
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_v1_models_with_empty_client_version_keeps_openai_shape(async_client):
     await _populate_test_registry()
@@ -469,6 +471,7 @@ async def test_backend_codex_models_filters_disallowed_models(async_client):
     assert entries[0]["base_instructions"] == "allowed"
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_v1_models_codex_negotiation_preserves_api_key_filtering(async_client):
     registry = get_model_registry()
@@ -513,6 +516,7 @@ async def test_v1_models_codex_negotiation_preserves_api_key_filtering(async_cli
     assert [entry["id"] for entry in payload["data"]] == ["gpt-5.2"]
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_backend_codex_models_rewrites_visibility_when_opted_in(async_client):
     registry = get_model_registry()
@@ -782,6 +786,7 @@ async def test_backend_codex_models_uses_bootstrap_models_when_registry_not_popu
     assert all(not slug.startswith("gpt-image-") for slug in slugs)
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_model_sets_are_consistent_across_api_endpoints(async_client):
     registry = get_model_registry()

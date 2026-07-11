@@ -559,6 +559,7 @@ def test_response_create_client_metadata_strips_untrusted_responses_lite_markers
     assert metadata == {"keep": "yes"}
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_websocket_lite_acceptance_allows_only_linked_same_model_incremental_marker(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -617,6 +618,7 @@ async def test_websocket_lite_acceptance_allows_only_linked_same_model_increment
     assert prepared.request_state.responses_lite_model == "gpt-5.6-sol"
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 @pytest.mark.parametrize("previous_response_id", [None, "resp_ws_other"])
 async def test_websocket_lite_incremental_marker_requires_accepted_response_linkage(
@@ -4291,6 +4293,7 @@ async def test_stream_responses_falls_back_to_http_post_without_native_codex_hea
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_stream_responses_derives_http_lite_signal_from_body(monkeypatch):
     class Settings:
@@ -4360,6 +4363,7 @@ async def test_stream_responses_derives_http_lite_signal_from_body(monkeypatch):
     )
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_stream_responses_websocket_derives_lite_marker_from_body(monkeypatch):
     class Settings:
@@ -6081,6 +6085,7 @@ async def test_stream_responses_websocket_emits_incomplete_when_upstream_closes_
     assert terminal["response"]["error"]["code"] == "stream_incomplete"
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_compact_responses_derives_http_lite_signal_from_body(monkeypatch):
     class Settings:
@@ -10793,6 +10798,7 @@ async def test_prepare_websocket_response_create_request_trims_codex_session_ful
     assert fresh_payload["input"] == [*historical_input, new_input]
 
 
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_prepare_websocket_response_create_request_captures_client_full_resend_anchor_replay(monkeypatch):
     request_logs = _RequestLogsRecorder()

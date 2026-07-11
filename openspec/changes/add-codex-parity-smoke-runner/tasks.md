@@ -2,14 +2,14 @@
 
 ## 1. Contract and red evidence
 
-- [ ] 1.1 Validate this change strictly and confirm the exact 16-node / 18-case inventory still exists.
-- [ ] 1.2 Run marker-only collection before implementation and record the expected empty-selection failure.
+- [x] 1.1 Validate this change strictly and confirm the exact 16-node / 18-case inventory still exists.
+- [x] 1.2 Run marker-only collection before implementation and record the expected empty-selection failure.
 
 ## 2. Focused runner implementation
 
-- [ ] 2.1 Register the `codex_parity_smoke` pytest marker.
-- [ ] 2.2 Mark the agreed 16 test nodes without changing their bodies, parameters, or ordinary full-suite behavior.
-- [ ] 2.3 Add and document `make test-codex-parity-smoke` without changing `ci-fast`, `ci`, or existing required targets.
+- [x] 2.1 Register the `codex_parity_smoke` pytest marker.
+- [x] 2.2 Mark the agreed 16 test nodes without changing their bodies, parameters, or ordinary full-suite behavior.
+- [x] 2.3 Add and document `make test-codex-parity-smoke` without changing `ci-fast`, `ci`, or existing required targets.
 
 ## 3. Verification and closeout
 

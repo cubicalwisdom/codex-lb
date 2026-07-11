@@ -260,6 +260,7 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
         ),
     ],
 )
+@pytest.mark.codex_parity_smoke
 @pytest.mark.asyncio
 async def test_proxy_responses_compaction_trigger_streams_single_compaction_item(
     async_client,
