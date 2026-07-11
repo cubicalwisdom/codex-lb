@@ -218,6 +218,7 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 )
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
+_HTTP_BRIDGE_PROVISIONAL_CLEANUP_RETRY_SECONDS = 0.1
 
 
 class _HTTPBridgeMixin(
@@ -370,6 +371,7 @@ class _HTTPBridgeMixin(
             and (
                 task.get_name().startswith("proxy-http_bridge_session_close-")
                 or task.get_name().startswith("http-bridge-close-")
+                or task.get_name().startswith("http-bridge-reconnect-cleanup-")
             )
         ]
         if not tasks:
@@ -386,6 +388,104 @@ class _HTTPBridgeMixin(
                 len(tasks),
                 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
             )
+
+    async def _settle_http_bridge_reconnect_provisional_ownership(
+        self,
+        provisional_upstream: UpstreamResponsesWebSocket | None,
+        provisional_account_lease: AccountLease | None,
+    ) -> None:
+        unsettled_upstream = provisional_upstream
+        unsettled_account_lease = provisional_account_lease
+        while unsettled_upstream is not None or unsettled_account_lease is not None:
+            if unsettled_upstream is not None:
+                try:
+                    await unsettled_upstream.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Failed to close provisional HTTP bridge upstream during reconnect cleanup; retrying",
+                        exc_info=True,
+                    )
+                else:
+                    unsettled_upstream = None
+            if unsettled_account_lease is not None:
+                try:
+                    await self._load_balancer.release_account_lease(unsettled_account_lease)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Failed to release provisional HTTP bridge lease during reconnect cleanup; retrying",
+                        exc_info=True,
+                    )
+                else:
+                    unsettled_account_lease = None
+            if unsettled_upstream is not None or unsettled_account_lease is not None:
+                await asyncio.sleep(_HTTP_BRIDGE_PROVISIONAL_CLEANUP_RETRY_SECONDS)
+
+    async def _await_http_bridge_reconnect_provisional_cleanup(
+        self,
+        provisional_upstream: UpstreamResponsesWebSocket | None,
+        provisional_account_lease: AccountLease | None,
+        *,
+        request_id: str,
+    ) -> None:
+        if provisional_upstream is None and provisional_account_lease is None:
+            return
+        cleanup_task = asyncio.create_task(
+            self._settle_http_bridge_reconnect_provisional_ownership(
+                provisional_upstream,
+                provisional_account_lease,
+            ),
+            name=f"http-bridge-reconnect-cleanup-{_hash_identifier(request_id)}",
+        )
+        self._background_cleanup_tasks.add(cleanup_task)
+
+        def _cleanup_done(done_task: asyncio.Task[None]) -> None:
+            self._background_cleanup_tasks.discard(done_task)
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                logger.warning(
+                    "HTTP bridge provisional reconnect cleanup task was cancelled request_id=%s",
+                    _hash_identifier(request_id),
+                )
+            except Exception:
+                logger.warning(
+                    "HTTP bridge provisional reconnect cleanup task failed request_id=%s",
+                    _hash_identifier(request_id),
+                    exc_info=True,
+                )
+
+        cleanup_task.add_done_callback(_cleanup_done)
+        deadline = asyncio.get_running_loop().time() + _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS
+        while True:
+            remaining_seconds = deadline - asyncio.get_running_loop().time()
+            if remaining_seconds <= 0:
+                logger.warning(
+                    "HTTP bridge provisional reconnect cleanup continues in background request_id=%s",
+                    _hash_identifier(request_id),
+                )
+                return
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(cleanup_task),
+                    timeout=remaining_seconds,
+                )
+                return
+            except asyncio.CancelledError:
+                if cleanup_task.cancelled():
+                    return
+                continue
+            except TimeoutError:
+                logger.warning(
+                    "HTTP bridge provisional reconnect cleanup timed out; continuing in background request_id=%s",
+                    _hash_identifier(request_id),
+                )
+                return
+            except Exception:
+                return
 
     async def _fail_http_bridge_inflight_session_creation(
         self,
@@ -1562,6 +1662,26 @@ class _HTTPBridgeMixin(
         turn_state_lock_held: bool = False,
     ) -> None:
         session.closed = True
+        current_task = asyncio.current_task()
+        upstream_reader = session.upstream_reader
+        if upstream_reader is current_task:
+            session.upstream_reader = None
+        elif upstream_reader is not None:
+            upstream_reader.cancel()
+        retry_send_tasks = tuple(session.retry_send_tasks)
+        for retry_send_task in retry_send_tasks:
+            if retry_send_task is not current_task:
+                retry_send_task.cancel()
+        if upstream_reader is not None and upstream_reader is not current_task:
+            await _await_cancelled_task(upstream_reader, label="http bridge upstream reader")
+            if session.upstream_reader is upstream_reader:
+                session.upstream_reader = None
+        for retry_send_task in retry_send_tasks:
+            if retry_send_task is current_task:
+                session.retry_send_tasks.discard(retry_send_task)
+                continue
+            await _await_cancelled_task(retry_send_task, label="http bridge retry send")
+            session.retry_send_tasks.discard(retry_send_task)
         if turn_state_lock_held:
             self._unregister_http_bridge_turn_states_locked(session)
             self._unregister_http_bridge_previous_response_ids_locked(session)
@@ -1585,14 +1705,6 @@ class _HTTPBridgeMixin(
                 )
             except Exception:
                 logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
-        upstream_reader = session.upstream_reader
-        if upstream_reader is not None:
-            if upstream_reader is asyncio.current_task():
-                session.upstream_reader = None
-            else:
-                await _await_cancelled_task(upstream_reader, label="http bridge upstream reader")
-                if session.upstream_reader is upstream_reader:
-                    session.upstream_reader = None
         try:
             await session.upstream.close()
         except Exception:
@@ -2126,6 +2238,22 @@ class _HTTPBridgeMixin(
         restart_reader: bool = False,
         require_security_work_authorized: bool = False,
     ) -> None:
+        async with session.reconnect_lock:
+            await self._reconnect_http_bridge_session_serialized(
+                session,
+                request_state=request_state,
+                restart_reader=restart_reader,
+                require_security_work_authorized=require_security_work_authorized,
+            )
+
+    async def _reconnect_http_bridge_session_serialized(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        restart_reader: bool = False,
+        require_security_work_authorized: bool = False,
+    ) -> None:
         if session.retired:
             raise ProxyResponseError(
                 502,
@@ -2168,160 +2296,118 @@ class _HTTPBridgeMixin(
             preferred_candidate_id = session.account.id
         else:
             preferred_candidate_id = None
-        selected_account_lease: AccountLease | None = None
-        selected_account_lease_reused = False
+        effective_account_lease: AccountLease | None = None
+        provisional_account_lease: AccountLease | None = None
+        provisional_upstream: UpstreamResponsesWebSocket | None = None
 
-        async def release_selected_account_lease() -> None:
-            nonlocal selected_account_lease, selected_account_lease_reused
-            lease = selected_account_lease
-            selected_account_lease = None
-            selected_account_lease_reused = False
+        async def release_provisional_account_lease() -> None:
+            nonlocal effective_account_lease, provisional_account_lease
+            lease = provisional_account_lease
             if lease is None:
                 return
-            if lease is session.account_lease:
-                session.account_lease = None
             await self._load_balancer.release_account_lease(lease)
+            if provisional_account_lease is lease:
+                provisional_account_lease = None
+            if effective_account_lease is lease:
+                effective_account_lease = None
 
-        async def cleanup_provisional_ownership(
-            provisional_upstream: UpstreamResponsesWebSocket | None,
-        ) -> None:
-            if provisional_upstream is not None:
-                try:
-                    await provisional_upstream.close()
-                except BaseException:
-                    logger.warning(
-                        "Failed to close provisional HTTP bridge upstream during reconnect cleanup",
-                        exc_info=True,
-                    )
-            if selected_account_lease_reused:
-                return
-            try:
-                await release_selected_account_lease()
-            except BaseException:
-                logger.warning(
-                    "Failed to release provisional HTTP bridge lease during reconnect cleanup",
-                    exc_info=True,
+        try:
+            while True:
+                effective_account_lease = None
+                provisional_account_lease = None
+                provisional_upstream = None
+                reuse_current_account_lease = (
+                    preferred_candidate_id == session.account.id and session.account_lease is not None
                 )
-
-        upstream: UpstreamResponsesWebSocket | None = None
-        while True:
-            upstream = None
-            reuse_current_account_lease = (
-                preferred_candidate_id == session.account.id and session.account_lease is not None
-            )
-            selection = await self._select_account_with_budget_for_stream(
-                deadline,
-                request_id=request_state.request_log_id or request_state.request_id,
-                kind="http_bridge",
-                request_stage="reattach",
-                api_key=session.api_key,
-                sticky_key=session.affinity.key,
-                sticky_kind=session.affinity.kind,
-                reallocate_sticky=session.affinity.reallocate_sticky,
-                sticky_max_age_seconds=session.affinity.max_age_seconds,
-                prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
-                prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
-                routing_strategy=_routing_strategy(settings),
-                model=session.request_model,
-                exclude_account_ids=excluded_account_ids,
-                preferred_account_id=preferred_candidate_id,
-                require_security_work_authorized=require_security_work_authorized,
-                lease_kind=None if reuse_current_account_lease else "stream",
-                estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
-                    request_state.request_usage_budget
-                ),
-                fallback_on_preferred_account_unavailable=not reuse_current_account_lease,
-            )
-            account = selection.account
-            if account is None:
-                await release_selected_account_lease()
-                if reuse_current_account_lease and _remaining_budget_seconds(deadline) > 0:
-                    preferred_candidate_id = None
-                    continue
-                if await _sleep_for_account_selection_recovery(
-                    selection,
+                selection = await self._select_account_with_budget_for_stream(
+                    deadline,
                     request_id=request_state.request_log_id or request_state.request_id,
                     kind="http_bridge",
                     request_stage="reattach",
+                    api_key=session.api_key,
+                    sticky_key=session.affinity.key,
+                    sticky_kind=session.affinity.kind,
+                    reallocate_sticky=session.affinity.reallocate_sticky,
+                    sticky_max_age_seconds=session.affinity.max_age_seconds,
+                    prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                    prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
+                    routing_strategy=_routing_strategy(settings),
                     model=session.request_model,
-                    max_sleep_seconds=_remaining_budget_seconds(deadline),
-                    request_state=request_state,
-                ):
-                    excluded_account_ids.update(request_state.excluded_account_ids)
-                    if skip_same_account:
-                        excluded_account_ids.add(session.account.id)
-                    retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids
-                    if skip_same_account:
-                        preferred_candidate_id = None
-                    elif forced_refresh_account_id is not None:
-                        preferred_candidate_id = forced_refresh_account_id
-                    elif request_state.preferred_account_id is not None:
-                        preferred_candidate_id = request_state.preferred_account_id
-                    elif session.account.id not in excluded_account_ids:
-                        preferred_candidate_id = session.account.id
-                    else:
-                        preferred_candidate_id = None
-                    continue
-                _record_same_account_takeover(
-                    preferred_account_id=session.account.id,
-                    selected_account_id=None,
-                )
-                status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
-                raise ProxyResponseError(
-                    status_code,
-                    openai_error(
-                        selection.error_code or "no_accounts",
-                        selection.error_message or "No active accounts available",
-                        error_type="rate_limit_error" if status_code == 429 else "server_error",
+                    exclude_account_ids=excluded_account_ids,
+                    preferred_account_id=preferred_candidate_id,
+                    require_security_work_authorized=require_security_work_authorized,
+                    lease_kind=None if reuse_current_account_lease else "stream",
+                    estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
+                        request_state.request_usage_budget
                     ),
+                    fallback_on_preferred_account_unavailable=not reuse_current_account_lease,
                 )
-            selected_account_lease_reused = reuse_current_account_lease and account.id == session.account.id
-            selected_account_lease = session.account_lease if selected_account_lease_reused else selection.lease
-            selected_is_preferred = account.id == session.account.id
-            force_refresh = forced_refresh_account_id == account.id
-            if forced_refresh_account_id is not None and account.id != forced_refresh_account_id:
-                request_state.force_refresh_account_id = None
-                if request_state.preferred_account_id == forced_refresh_account_id:
-                    request_state.preferred_account_id = None
-            try:
-                account = await self._ensure_fresh_with_budget(
-                    account,
-                    force=force_refresh,
-                    timeout_seconds=_remaining_budget_seconds(deadline),
-                )
-                if force_refresh and request_state.force_refresh_account_id == account.id:
+                account = selection.account
+                if account is None:
+                    if reuse_current_account_lease and _remaining_budget_seconds(deadline) > 0:
+                        preferred_candidate_id = None
+                        continue
+                    if await _sleep_for_account_selection_recovery(
+                        selection,
+                        request_id=request_state.request_log_id or request_state.request_id,
+                        kind="http_bridge",
+                        request_stage="reattach",
+                        model=session.request_model,
+                        max_sleep_seconds=_remaining_budget_seconds(deadline),
+                        request_state=request_state,
+                    ):
+                        excluded_account_ids.update(request_state.excluded_account_ids)
+                        if skip_same_account:
+                            excluded_account_ids.add(session.account.id)
+                        retry_same_account_once = (
+                            not skip_same_account and session.account.id not in excluded_account_ids
+                        )
+                        if skip_same_account:
+                            preferred_candidate_id = None
+                        elif forced_refresh_account_id is not None:
+                            preferred_candidate_id = forced_refresh_account_id
+                        elif request_state.preferred_account_id is not None:
+                            preferred_candidate_id = request_state.preferred_account_id
+                        elif session.account.id not in excluded_account_ids:
+                            preferred_candidate_id = session.account.id
+                        else:
+                            preferred_candidate_id = None
+                        continue
+                    _record_same_account_takeover(
+                        preferred_account_id=session.account.id,
+                        selected_account_id=None,
+                    )
+                    status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
+                    raise ProxyResponseError(
+                        status_code,
+                        openai_error(
+                            selection.error_code or "no_accounts",
+                            selection.error_message or "No active accounts available",
+                            error_type="rate_limit_error" if status_code == 429 else "server_error",
+                        ),
+                    )
+                account_lease_reused = reuse_current_account_lease and account.id == session.account.id
+                effective_account_lease = session.account_lease if account_lease_reused else selection.lease
+                provisional_account_lease = None if account_lease_reused else selection.lease
+                selected_is_preferred = account.id == session.account.id
+                force_refresh = forced_refresh_account_id == account.id
+                if forced_refresh_account_id is not None and account.id != forced_refresh_account_id:
                     request_state.force_refresh_account_id = None
-                connect_headers = _headers_with_turn_state(
-                    session.headers,
-                    _preferred_http_bridge_reconnect_turn_state(session),
-                )
-                upstream = await self._open_upstream_websocket_with_budget(
-                    account,
-                    connect_headers,
-                    timeout_seconds=_remaining_budget_seconds(deadline),
-                    request_state=request_state,
-                )
-                _copy_websocket_route_metadata_to_session(session, request_state)
-                _record_same_account_takeover(
-                    preferred_account_id=session.account.id,
-                    selected_account_id=account.id,
-                )
-                break
-            except ProxyResponseError as exc:
-                if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
-                    await release_selected_account_lease()
-                    raise
+                    if request_state.preferred_account_id == forced_refresh_account_id:
+                        request_state.preferred_account_id = None
                 try:
                     account = await self._ensure_fresh_with_budget(
                         account,
-                        force=True,
+                        force=force_refresh,
                         timeout_seconds=_remaining_budget_seconds(deadline),
                     )
+                    if force_refresh and request_state.force_refresh_account_id == account.id:
+                        request_state.force_refresh_account_id = None
                     connect_headers = _headers_with_turn_state(
                         session.headers,
                         _preferred_http_bridge_reconnect_turn_state(session),
                     )
-                    upstream = await self._open_upstream_websocket_with_budget(
+                    provisional_upstream = await self._open_upstream_websocket_with_budget(
                         account,
                         connect_headers,
                         timeout_seconds=_remaining_budget_seconds(deadline),
@@ -2333,84 +2419,118 @@ class _HTTPBridgeMixin(
                         selected_account_id=account.id,
                     )
                     break
-                except ProxyResponseError as retry_exc:
-                    if retry_exc.status_code != 401:
-                        await release_selected_account_lease()
+                except ProxyResponseError as exc:
+                    if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
+                        await release_provisional_account_lease()
                         raise
-                    await self._handle_proxy_error(account, retry_exc)
-                    excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
-                    await release_selected_account_lease()
-                    continue
-                except RefreshError as refresh_exc:
-                    if refresh_exc.is_permanent:
-                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                    excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
-                    await release_selected_account_lease()
-                    continue
-                except BaseException:
-                    await cleanup_provisional_ownership(upstream)
+                    try:
+                        account = await self._ensure_fresh_with_budget(
+                            account,
+                            force=True,
+                            timeout_seconds=_remaining_budget_seconds(deadline),
+                        )
+                        connect_headers = _headers_with_turn_state(
+                            session.headers,
+                            _preferred_http_bridge_reconnect_turn_state(session),
+                        )
+                        provisional_upstream = await self._open_upstream_websocket_with_budget(
+                            account,
+                            connect_headers,
+                            timeout_seconds=_remaining_budget_seconds(deadline),
+                            request_state=request_state,
+                        )
+                        _copy_websocket_route_metadata_to_session(session, request_state)
+                        _record_same_account_takeover(
+                            preferred_account_id=session.account.id,
+                            selected_account_id=account.id,
+                        )
+                        break
+                    except ProxyResponseError as retry_exc:
+                        if retry_exc.status_code != 401:
+                            await release_provisional_account_lease()
+                            raise
+                        await self._handle_proxy_error(account, retry_exc)
+                        excluded_account_ids.add(account.id)
+                        preferred_candidate_id = None
+                        await release_provisional_account_lease()
+                        continue
+                    except RefreshError as refresh_exc:
+                        if refresh_exc.is_permanent:
+                            await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                        excluded_account_ids.add(account.id)
+                        preferred_candidate_id = None
+                        await release_provisional_account_lease()
+                        continue
+                except RefreshError as exc:
+                    if exc.is_permanent:
+                        await self._load_balancer.mark_permanent_failure(account, exc.code)
+                    if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                        if retry_same_account_once and not exc.is_permanent:
+                            retry_same_account_once = False
+                            await release_provisional_account_lease()
+                            continue
+                        excluded_account_ids.add(account.id)
+                        preferred_candidate_id = None
+                        await release_provisional_account_lease()
+                        continue
+                    await release_provisional_account_lease()
                     raise
-            except RefreshError as exc:
-                if exc.is_permanent:
-                    await self._load_balancer.mark_permanent_failure(account, exc.code)
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
-                    if retry_same_account_once and not exc.is_permanent:
-                        retry_same_account_once = False
-                        await release_selected_account_lease()
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                        if retry_same_account_once:
+                            retry_same_account_once = False
+                            await release_provisional_account_lease()
+                            continue
+                        excluded_account_ids.add(account.id)
+                        preferred_candidate_id = None
+                        await release_provisional_account_lease()
                         continue
-                    excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
-                    await release_selected_account_lease()
-                    continue
-                await release_selected_account_lease()
-                raise
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
-                    if retry_same_account_once:
-                        retry_same_account_once = False
-                        await release_selected_account_lease()
-                        continue
-                    excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
-                    await release_selected_account_lease()
-                    continue
-                await release_selected_account_lease()
-                raise
-            except BaseException:
-                await cleanup_provisional_ownership(upstream)
-                raise
-        assert upstream is not None
-        try:
+                    await release_provisional_account_lease()
+                    raise
+            assert provisional_upstream is not None
             try:
                 await old_upstream.close()
             except Exception:
                 logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
-            if selected_account_lease is not session.account_lease:
+            if effective_account_lease is not session.account_lease:
                 old_account_lease = session.account_lease
                 await self._load_balancer.release_account_lease(old_account_lease)
                 if session.account_lease is old_account_lease:
                     session.account_lease = None
-            if session.retired:
-                raise ProxyResponseError(
-                    502,
-                    openai_error("upstream_unavailable", "HTTP responses session bridge generation is retired"),
-                )
-            upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
+            upstream_turn_state = (
+                _upstream_turn_state_from_socket(provisional_upstream) or session.upstream_turn_state
+            )
+            async with session.lifecycle_lock:
+                if session.retired:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "upstream_unavailable",
+                            "HTTP responses session bridge generation is retired",
+                        ),
+                    )
+                session.account_lease = effective_account_lease
+                session.account = account
+                session.headers = connect_headers
+                session.upstream = provisional_upstream
+                session.upstream_control = _WebSocketUpstreamControl()
+                session.closed = False
+                session.last_upstream_close_code = None
+                session.upstream_turn_state = upstream_turn_state
+                if restart_reader:
+                    session.upstream_reader = asyncio.create_task(
+                        self._relay_http_bridge_upstream_messages(session)
+                    )
+                provisional_upstream = None
+                provisional_account_lease = None
+                effective_account_lease = None
         except BaseException:
-            await cleanup_provisional_ownership(upstream)
+            await self._await_http_bridge_reconnect_provisional_cleanup(
+                provisional_upstream,
+                provisional_account_lease,
+                request_id=request_state.request_log_id or request_state.request_id,
+            )
             raise
-        session.account_lease = selected_account_lease
-        session.account = account
-        session.headers = connect_headers
-        session.upstream = upstream
-        session.upstream_control = _WebSocketUpstreamControl()
-        session.closed = False
-        session.last_upstream_close_code = None
-        session.upstream_turn_state = upstream_turn_state
-        if restart_reader:
-            session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         _log_http_bridge_event(
             "reconnect",
             session.key,

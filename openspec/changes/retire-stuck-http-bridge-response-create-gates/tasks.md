@@ -28,3 +28,12 @@
 - [x] 4.3 Clean provisional ownership on every pre-install cancellation/exception while preserving the original failure and reader recovery behavior.
 - [x] 4.4 Run focused/full bridge verification, selected integration, Ruff, scoped ty, strict OpenSpec, and diff checks.
 - [x] 4.5 Append correction evidence to the Task 2 report and commit the correction separately.
+
+## 5. Cancellation-safe terminal lifecycle correction
+
+- [x] 5.1 Add RED coverage for caller cancellation after detach, retirement winning all four replay/resend paths, and request age diverging from gate-hold age.
+- [x] 5.2 Add RED coverage for repeated cancellation during provisional close/release, cancellation inside refresh/proxy-error handlers, and terminal failures with a reused lease.
+- [x] 5.3 Cancel readers and registered sends before close awaits, use bounded tracked retirement cleanup, and apply the threshold to the gate-acquisition timestamp.
+- [x] 5.4 Transfer provisional reconnect ownership to bounded shielded cleanup that retains and retries unresolved resources; install replacements in a no-await lifecycle commit.
+- [x] 5.5 Run focused/full bridge verification, selected integration, Ruff, scoped ty, strict OpenSpec, and diff checks; append evidence and commit separately.
+- [x] 5.6 Add RED coverage for concurrent reconnect handoff, serialize reconnect provisioning per session, and rerun the verification ladder.

@@ -1258,6 +1258,7 @@ class ProxyService(
             await self._release_request_state_account_response_create_lease(request_state)
             request_state.response_create_gate = None
             request_state.response_create_gate_acquired = False
+            request_state.response_create_gate_acquired_at = None
             request_state.awaiting_response_created = False
             pending_count = None
             queued_count = None
@@ -1301,9 +1302,11 @@ class ProxyService(
             await self._release_request_state_account_response_create_lease(request_state)
             request_state.response_create_gate = None
             request_state.response_create_gate_acquired = False
+            request_state.response_create_gate_acquired_at = None
             request_state.awaiting_response_created = False
             raise
         request_state.response_create_gate_acquired = True
+        request_state.response_create_gate_acquired_at = time.monotonic()
         request_state.awaiting_response_created = True
         try:
             request_state.response_create_admission = await self._get_work_admission().acquire_response_create(

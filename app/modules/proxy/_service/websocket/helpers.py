@@ -1268,6 +1268,7 @@ async def _release_websocket_response_create_gate(
     account_response_create_release = request_state.account_response_create_release
     request_state.account_response_create_lease = None
     request_state.account_response_create_release = None
+    request_state.response_create_gate_acquired_at = None
     if request_state.response_create_admission is not None:
         request_state.response_create_admission.release()
         request_state.response_create_admission = None

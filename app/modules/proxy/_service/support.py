@@ -315,6 +315,7 @@ class _WebSocketRequestState:
     upstream_event_seen: bool = False
     previous_response_not_found_rewritten: bool = False
     response_create_gate_acquired: bool = False
+    response_create_gate_acquired_at: float | None = None
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
     account_response_create_lease: AccountLease | None = None
@@ -385,6 +386,7 @@ class _HTTPBridgeSession:
     last_used_at: float
     idle_ttl_seconds: float
     lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
+    reconnect_lock: anyio.Lock = field(default_factory=anyio.Lock)
     api_key: ApiKeyData | None = None
     codex_session: bool = False
     prewarmed: bool = False
@@ -401,6 +403,7 @@ class _HTTPBridgeSession:
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
+    retry_send_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     last_upstream_close_code: int | None = None
     closed: bool = False
     retired: bool = False
@@ -427,7 +430,8 @@ def _http_bridge_request_is_stuck_gate_retirement_candidate(
         and request_state.awaiting_response_created
         and not request_state.upstream_event_seen
         and not request_state.downstream_visible
-        and max(0.0, now - request_state.started_at) >= threshold_seconds
+        and request_state.response_create_gate_acquired_at is not None
+        and max(0.0, now - request_state.response_create_gate_acquired_at) >= threshold_seconds
     )
 
 

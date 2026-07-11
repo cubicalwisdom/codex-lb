@@ -440,6 +440,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 ),
             )
         if session.closed:
+            should_recover_closed_session = False
             async with session.lifecycle_lock:
                 if session.closed:
                     current_session = session
@@ -475,35 +476,37 @@ class _HTTPBridgeRequestSubmitMixin:
                             cache_key_family=session.key.affinity_kind,
                             model_class=_extract_model_class(session.request_model) if session.request_model else None,
                         )
-                    # Try reconnecting the upstream websocket first.  For requests
-                    # carrying previous_response_id we only reconnect (send_request=
-                    # False) because the fresh upstream won't recognise the old
-                    # response id.  If reconnection itself fails, raise 502 so the
-                    # client retries with previous_response_id intact rather than
-                    # receiving 400 previous_response_not_found (which causes the
-                    # CLI to drop previous_response_id and resend the full
-                    # conversation history, inflating per-turn context by ~20x).
-                    recovered = await self._retry_http_bridge_request_on_fresh_upstream(
-                        session,
-                        request_state=request_state,
-                        text_data=text_data,
-                        send_request=False,
+                    should_recover_closed_session = True
+            if should_recover_closed_session:
+                # Try reconnecting the upstream websocket first.  For requests
+                # carrying previous_response_id we only reconnect (send_request=
+                # False) because the fresh upstream won't recognise the old
+                # response id.  If reconnection itself fails, raise 502 so the
+                # client retries with previous_response_id intact rather than
+                # receiving 400 previous_response_not_found (which causes the
+                # CLI to drop previous_response_id and resend the full
+                # conversation history, inflating per-turn context by ~20x).
+                recovered = await self._retry_http_bridge_request_on_fresh_upstream(
+                    session,
+                    request_state=request_state,
+                    text_data=text_data,
+                    send_request=False,
+                )
+                if recovered:
+                    session.closed = False
+                else:
+                    _log_http_bridge_event(
+                        "submit_on_closed",
+                        session.key,
+                        account_id=session.account.id,
+                        model=session.request_model,
+                        cache_key_family=session.key.affinity_kind,
+                        model_class=_extract_model_class(session.request_model) if session.request_model else None,
                     )
-                    if recovered:
-                        session.closed = False
-                    else:
-                        _log_http_bridge_event(
-                            "submit_on_closed",
-                            session.key,
-                            account_id=session.account.id,
-                            model=session.request_model,
-                            cache_key_family=session.key.affinity_kind,
-                            model_class=_extract_model_class(session.request_model) if session.request_model else None,
-                        )
-                        raise ProxyResponseError(
-                            502,
-                            openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
-                        )
+                    raise ProxyResponseError(
+                        502,
+                        openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
+                    )
         if session.upstream_control.retire_after_drain:
             await self._retire_http_bridge_after_drain_if_ready(session)
             raise ProxyResponseError(
@@ -969,7 +972,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     expected_session=session,
                 )
 
-        await self._close_http_bridge_session(session)
+        await self._close_http_bridge_session_bounded(session, reason=detail)
         _log_http_bridge_event(
             "retire_stale_pending",
             session.key,
@@ -980,6 +983,32 @@ class _HTTPBridgeRequestSubmitMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+        return True
+
+    async def _send_http_bridge_retry_text_if_active(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        text_data: str,
+    ) -> bool:
+        async with session.lifecycle_lock:
+            if session.retired or session.closed:
+                return False
+            send_task = asyncio.create_task(
+                session.upstream.send_text(text_data),
+                name=f"http-bridge-retry-send-{_hash_identifier(session.key.affinity_key)}",
+            )
+            session.retry_send_tasks.add(send_task)
+        try:
+            await send_task
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if (session.retired or session.closed) and (
+                current_task is None or current_task.cancelling() == 0
+            ):
+                return False
+            raise
+        finally:
+            session.retry_send_tasks.discard(send_task)
         return True
 
     async def _retry_http_bridge_request_on_fresh_upstream(
@@ -1037,7 +1066,8 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
-                await session.upstream.send_text(retry_text_data)
+                if not await self._send_http_bridge_retry_text_if_active(session, retry_text_data):
+                    return False
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()
             return True
@@ -1097,7 +1127,8 @@ class _HTTPBridgeRequestSubmitMixin:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
             if session.retired:
                 return False
-            await session.upstream.send_text(request_text)
+            if not await self._send_http_bridge_retry_text_if_active(session, request_text):
+                return False
             session.last_used_at = _service_time().monotonic()
             return True
         except Exception as exc:
@@ -1167,7 +1198,8 @@ class _HTTPBridgeRequestSubmitMixin:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
             if session.retired:
                 return "not_replayable"
-            await session.upstream.send_text(request_text)
+            if not await self._send_http_bridge_retry_text_if_active(session, request_text):
+                return "not_replayable"
             session.last_used_at = _service_time().monotonic()
             return "retried"
         except Exception as exc:
@@ -1238,7 +1270,8 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             if session.retired:
                 return False
-            await session.upstream.send_text(retry_text)
+            if not await self._send_http_bridge_retry_text_if_active(session, retry_text):
+                return False
             session.last_used_at = _service_time().monotonic()
             return True
         except Exception as exc:

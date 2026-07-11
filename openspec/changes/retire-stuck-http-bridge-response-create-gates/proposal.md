@@ -7,7 +7,8 @@ Live Codex traffic produced repeated `response_create_gate_timeout` failures whi
 ## What Changes
 
 - Add a configurable stuck-gate retirement threshold with the upstream-compatible default of 300 seconds.
-- When a visible HTTP bridge gate waiter times out, retire the session only if an older visible request is still pre-`response.created`, owns the gate, has emitted no upstream/downstream event, and meets the threshold.
+- When a visible HTTP bridge gate waiter times out, retire the session only if a visible request is still pre-`response.created`, has held the gate for the threshold, and has emitted no upstream/downstream event.
 - Preserve healthy active streams, recent pre-created requests, synthetic prewarm requests, and non-HTTP work.
 - Keep the current waiter failure explicit; the next Codex reconnect creates a fresh bridge instead of looping behind the stale session.
+- Make retirement and reconnect cleanup cancellation-safe so tombstoned generations cannot resend and provisional sockets or leases remain tracked until settled.
 - Mirror and verify the portable runtime without restarting Codex Desktop.
