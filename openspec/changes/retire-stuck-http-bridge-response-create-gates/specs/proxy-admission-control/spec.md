@@ -6,6 +6,8 @@ When a visible HTTP bridge request times out waiting for a per-session response-
 
 Retirement MUST be terminal for the affected session generation. The proxy MUST detach only that registered generation, prevent its reconnect/replay/resend or ownership reacquisition, synchronously cancel its reader and all registered active sends before releasing lifecycle ownership, then await them before other cleanup awaits. It MUST fail and remove pending requests using `stream_incomplete`, terminalize pending event queues, and release response-create, admission, account-response-create, reservation, account, durable, and alias resources. Cleanup MUST occur without awaiting while the pending or registry lock is held and MUST remain tracked if the caller is cancelled. The timed-out waiter MUST retain the stable `response_create_gate_timeout` error so the client can retry safely on a fresh generation.
 
+Terminal account-lease release, durable-ownership release, and upstream-socket close MUST remain separately tracked until each operation succeeds. Failure or blocking of any one external settlement MUST NOT delay pending-request, queue, response-create-gate, admission, reservation, or alias cleanup, and MUST NOT prevent the other terminal resources from settling independently. Unresolved session references MUST be retained and retried, direct close MUST wait only for a bounded shielded interval, caller cancellation MUST be preserved, and bridge background drain MUST include the terminal-settlement task.
+
 Initial submission and retry sends MUST register their actual upstream-send tasks during lifecycle validation and MUST await network I/O only after releasing the lifecycle lock. A blocked initial send MUST NOT prevent a gate-timeout waiter from entering retirement, receiving the stable timeout response, or fully settling the terminal generation.
 
 If reconnect acquires a provisional upstream socket or a new account lease but exits before installing them, including because cancellation interrupts old-socket settlement, old-lease settlement, or a named error handler, the proxy MUST transfer those resources to separately tracked cancellation-safe cleanup before preserving the original cancellation or exception. Repeated caller cancellation MUST NOT interrupt that ownership, and cleanup failures MUST retain and retry each unresolved resource. A reused session lease MUST NOT be released as provisional ownership or on a pre-install terminal failure. The old session lease MUST remain discoverable by session retirement until its release completes. Final tombstone validation and replacement installation MUST contain no intervening await.
@@ -75,6 +77,25 @@ Concurrent reconnect attempts for one session MUST serialize their complete reso
 - **AND** bounded close startup is delayed
 - **THEN** the reader and active sends already have cancellation requested before detach completes
 - **AND** they cannot produce post-tombstone side effects during the startup delay
+
+#### Scenario: Transient terminal resource failures retain ownership
+
+- **WHEN** terminal account-lease release, durable-ownership release, or upstream-socket close fails transiently
+- **THEN** each failed operation is retried independently
+- **AND** its matching session reference is retained until the external operation succeeds
+- **AND** successfully settled resources are cleared or marked complete exactly once
+
+#### Scenario: Blocked terminal settlement does not delay local cleanup
+
+- **WHEN** one terminal external release remains blocked
+- **THEN** pending requests, event queues, response-create gates, admission ownership, reservations, and aliases settle promptly
+- **AND** the other terminal external resources can settle independently
+
+#### Scenario: Foreground interruption preserves terminal settlement ownership
+
+- **WHEN** direct close reaches its bounded wait or its caller is cancelled while terminal resources remain unresolved
+- **THEN** direct close returns or propagates the original cancellation without abandoning the settlement child
+- **AND** unresolved resource references and the settlement task remain tracked for retry and background drain
 
 #### Scenario: Repeated cancellation cannot abandon provisional ownership
 

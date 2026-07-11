@@ -44,3 +44,11 @@
 - [x] 6.2 Register the initial send while lifecycle is held, await it after releasing lifecycle, and generalize registered activity from retry-only to all active sends.
 - [x] 6.3 Cancel reader and active-send snapshots synchronously inside terminal retirement before expected-generation detach or close-child startup.
 - [x] 6.4 Run focused/full bridge verification, selected integration, Ruff, scoped ty, strict OpenSpec, and diff checks; independently review and commit separately.
+
+## 7. Terminal external-settlement correction
+
+- [x] 7.1 Add RED coverage for transient account-lease, durable-ownership, and upstream-close failures plus foreground timeout and cancellation.
+- [x] 7.2 Move terminal external resources to a separately tracked task with independent retry loops and clear exact session ownership only after success.
+- [x] 7.3 Settle pending work and gates before the bounded shielded settlement wait, preserve caller cancellation, and include terminal settlement in background drain.
+- [x] 7.4 Run affected/full bridge verification, selected integration, Ruff, scoped ty, strict OpenSpec, and diff checks; append evidence and commit separately.
+- [ ] 7.5 Complete an independent exact-commit review and address any Critical or Important finding before Task 2 closes.

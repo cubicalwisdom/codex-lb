@@ -4199,7 +4199,7 @@ async def test_close_http_bridge_session_releases_lease_before_pending_cleanup_w
 
 
 @pytest.mark.asyncio
-async def test_close_http_bridge_session_continues_when_lease_release_fails(
+async def test_close_http_bridge_session_retains_failed_lease_for_background_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -4218,11 +4218,18 @@ async def test_close_http_bridge_session_continues_when_lease_release_fails(
         raise RuntimeError("release failed")
 
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(http_bridge_mixin_module, "_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS", 0.001)
 
     await service._close_http_bridge_session(session)
 
-    assert session.account_lease is None
+    assert session.account_lease is lease
     close.assert_awaited_once()
+    assert session.upstream_close_attempted is True
+    cleanup_tasks = list(service._background_cleanup_tasks)
+    assert cleanup_tasks
+    for cleanup_task in cleanup_tasks:
+        cleanup_task.cancel()
+    await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -14247,3 +14254,211 @@ async def test_stuck_gate_retirement_quiesces_reader_and_sends_before_close_chil
             if not task.done():
                 task.cancel()
         await asyncio.gather(reader, send, retirement, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_close_http_bridge_session_retries_transient_terminal_resource_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-terminal-retry")
+    gate = session.response_create_gate
+    await gate.acquire()
+    admission_release = Mock()
+    pending = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-retry",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        skip_request_log=True,
+        event_queue=asyncio.Queue(),
+        response_create_gate=gate,
+        response_create_gate_acquired=True,
+        response_create_gate_acquired_at=time.monotonic(),
+        response_create_admission=cast(Any, SimpleNamespace(release=admission_release)),
+        awaiting_response_created=True,
+    )
+    session.pending_requests.append(pending)
+    session.queued_request_count = 1
+    session_lease = proxy_service.AccountLease(
+        lease_id="lease-terminal-retry",
+        account_id=session.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    session.account_lease = session_lease
+    session.durable_session_id = "durable-terminal-retry"
+    session.durable_owner_epoch = 17
+    attempts = {"account": 0, "durable": 0, "upstream": 0}
+    first_attempted = {name: asyncio.Event() for name in attempts}
+    allow_success = asyncio.Event()
+
+    async def release_account(lease: proxy_service.AccountLease | None) -> None:
+        assert lease is session_lease
+        attempts["account"] += 1
+        first_attempted["account"].set()
+        if attempts["account"] == 1:
+            raise RuntimeError("account release failed once")
+        await allow_success.wait()
+
+    async def release_durable(**kwargs: object) -> None:
+        assert kwargs["session_id"] == "durable-terminal-retry"
+        assert kwargs["owner_epoch"] == 17
+        attempts["durable"] += 1
+        first_attempted["durable"].set()
+        if attempts["durable"] == 1:
+            raise RuntimeError("durable release failed once")
+        await allow_success.wait()
+
+    async def close_upstream() -> None:
+        attempts["upstream"] += 1
+        first_attempted["upstream"].set()
+        if attempts["upstream"] == 1:
+            raise RuntimeError("upstream close failed once")
+        await allow_success.wait()
+
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account)
+    service._durable_bridge = cast(Any, SimpleNamespace(release_live_session=release_durable))
+    session.upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(close=close_upstream),
+    )
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    monkeypatch.setattr(http_bridge_mixin_module, "_HTTP_BRIDGE_TERMINAL_SETTLEMENT_RETRY_SECONDS", 0.0)
+    close_task = asyncio.create_task(service._close_http_bridge_session(session))
+
+    try:
+        for attempted in first_attempted.values():
+            await asyncio.wait_for(attempted.wait(), timeout=1.0)
+        with anyio.fail_after(1.0):
+            while session.pending_requests or gate.locked():
+                await asyncio.sleep(0)
+
+        assert close_task.done() is False
+        assert session.account_lease is session_lease
+        assert session.durable_session_id == "durable-terminal-retry"
+        assert session.durable_owner_epoch == 17
+        assert session.upstream_close_attempted is False
+        assert any(
+            task.get_name().startswith("http-bridge-terminal-settlement-")
+            for task in service._background_cleanup_tasks
+        )
+        admission_release.assert_called_once_with()
+
+        allow_success.set()
+        await asyncio.wait_for(close_task, timeout=1.0)
+        assert attempts == {"account": 2, "durable": 2, "upstream": 2}
+        assert session.account_lease is None
+        assert session.durable_session_id is None
+        assert session.durable_owner_epoch is None
+        assert session.upstream_close_attempted is True
+        assert service._background_cleanup_tasks == set()
+    finally:
+        allow_success.set()
+        if not close_task.done():
+            close_task.cancel()
+        await asyncio.gather(close_task, return_exceptions=True)
+        cleanup_tasks = list(service._background_cleanup_tasks)
+        for cleanup_task in cleanup_tasks:
+            cleanup_task.cancel()
+        await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("interruption", ["timeout", "cancellation"])
+@pytest.mark.asyncio
+async def test_close_http_bridge_session_terminal_settlement_survives_foreground_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value=f"bridge-terminal-{interruption}")
+    gate = session.response_create_gate
+    await gate.acquire()
+    pending = proxy_service._WebSocketRequestState(
+        request_id=f"req-terminal-{interruption}",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        skip_request_log=True,
+        event_queue=asyncio.Queue(),
+        response_create_gate=gate,
+        response_create_gate_acquired=True,
+        response_create_gate_acquired_at=time.monotonic(),
+        awaiting_response_created=True,
+    )
+    session.pending_requests.append(pending)
+    session.queued_request_count = 1
+    session_lease = proxy_service.AccountLease(
+        lease_id=f"lease-terminal-{interruption}",
+        account_id=session.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    session.account_lease = session_lease
+    session.durable_session_id = f"durable-terminal-{interruption}"
+    session.durable_owner_epoch = 23
+    account_release_started = asyncio.Event()
+    allow_settlement = asyncio.Event()
+    durable_release = AsyncMock()
+    upstream_close = AsyncMock()
+
+    async def release_account(lease: proxy_service.AccountLease | None) -> None:
+        assert lease is session_lease
+        account_release_started.set()
+        await allow_settlement.wait()
+
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account)
+    service._durable_bridge = cast(Any, SimpleNamespace(release_live_session=durable_release))
+    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(close=upstream_close))
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    if interruption == "timeout":
+        monkeypatch.setattr(http_bridge_mixin_module, "_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS", 0.001)
+    close_task = asyncio.create_task(service._close_http_bridge_session(session))
+
+    try:
+        await asyncio.wait_for(account_release_started.wait(), timeout=1.0)
+        with anyio.fail_after(1.0):
+            while session.pending_requests or gate.locked():
+                await asyncio.sleep(0)
+
+        if interruption == "timeout":
+            await asyncio.wait_for(close_task, timeout=1.0)
+        else:
+            close_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+
+        assert session.account_lease is session_lease
+        assert session.durable_session_id is None
+        assert session.durable_owner_epoch is None
+        assert session.upstream_close_attempted is True
+        assert service._background_cleanup_tasks
+        durable_release.assert_awaited_once()
+        upstream_close.assert_awaited_once_with()
+
+        allow_settlement.set()
+        await service._drain_http_bridge_background_cleanup_tasks(reason=f"test-{interruption}")
+        with anyio.fail_after(1.0):
+            while service._background_cleanup_tasks:
+                await asyncio.sleep(0)
+        assert session.account_lease is None
+        assert session.durable_session_id is None
+        assert session.durable_owner_epoch is None
+        assert session.upstream_close_attempted is True
+        durable_release.assert_awaited_once()
+        upstream_close.assert_awaited_once_with()
+    finally:
+        allow_settlement.set()
+        if not close_task.done():
+            close_task.cancel()
+        await asyncio.gather(close_task, return_exceptions=True)
+        cleanup_tasks = list(service._background_cleanup_tasks)
+        for cleanup_task in cleanup_tasks:
+            cleanup_task.cancel()
+        await asyncio.gather(*cleanup_tasks, return_exceptions=True)

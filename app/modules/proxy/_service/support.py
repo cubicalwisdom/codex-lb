@@ -409,6 +409,8 @@ class _HTTPBridgeSession:
     retired: bool = False
     account_lease: AccountLease | None = None
     upstream_close_attempted: bool = False
+    terminal_resource_settlement_task: asyncio.Task[None] | None = None
+    terminal_resources_settled: bool = False
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
     upstream_proxy_route_mode: str | None = None
     upstream_proxy_pool_id: str | None = None

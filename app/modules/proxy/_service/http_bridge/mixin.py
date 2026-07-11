@@ -219,6 +219,7 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 _HTTP_BRIDGE_PROVISIONAL_CLEANUP_RETRY_SECONDS = 0.1
+_HTTP_BRIDGE_TERMINAL_SETTLEMENT_RETRY_SECONDS = 0.1
 
 
 class _HTTPBridgeMixin(
@@ -372,6 +373,7 @@ class _HTTPBridgeMixin(
                 task.get_name().startswith("proxy-http_bridge_session_close-")
                 or task.get_name().startswith("http-bridge-close-")
                 or task.get_name().startswith("http-bridge-reconnect-cleanup-")
+                or task.get_name().startswith("http-bridge-terminal-settlement-")
             )
         ]
         if not tasks:
@@ -486,6 +488,159 @@ class _HTTPBridgeMixin(
                 return
             except Exception:
                 return
+
+    async def _settle_http_bridge_terminal_resources(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        account_lease: AccountLease | None,
+        durable_session_id: str | None,
+        durable_owner_epoch: int | None,
+        upstream: UpstreamResponsesWebSocket,
+    ) -> None:
+        async def settle_account_lease() -> None:
+            if account_lease is None:
+                return
+            while True:
+                try:
+                    await self._load_balancer.release_account_lease(account_lease)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Failed to release HTTP bridge account lease during terminal settlement; retrying",
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(_HTTP_BRIDGE_TERMINAL_SETTLEMENT_RETRY_SECONDS)
+                    continue
+                if session.account_lease is account_lease:
+                    session.account_lease = None
+                return
+
+        async def settle_durable_ownership() -> None:
+            if durable_session_id is None or durable_owner_epoch is None:
+                return
+            while True:
+                try:
+                    await self._durable_bridge.release_live_session(
+                        session_id=durable_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=durable_owner_epoch,
+                        draining=shutdown_state.is_bridge_drain_active(),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Failed to release durable HTTP bridge session during terminal settlement; retrying",
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(_HTTP_BRIDGE_TERMINAL_SETTLEMENT_RETRY_SECONDS)
+                    continue
+                if (
+                    session.durable_session_id == durable_session_id
+                    and session.durable_owner_epoch == durable_owner_epoch
+                ):
+                    session.durable_session_id = None
+                    session.durable_owner_epoch = None
+                return
+
+        async def settle_upstream() -> None:
+            while True:
+                try:
+                    await upstream.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Failed to close HTTP bridge upstream during terminal settlement; retrying",
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(_HTTP_BRIDGE_TERMINAL_SETTLEMENT_RETRY_SECONDS)
+                    continue
+                if session.upstream is upstream:
+                    session.upstream_close_attempted = True
+                return
+
+        await asyncio.gather(
+            settle_account_lease(),
+            settle_durable_ownership(),
+            settle_upstream(),
+        )
+        session.terminal_resources_settled = bool(
+            session.account_lease is None
+            and session.durable_session_id is None
+            and session.durable_owner_epoch is None
+            and session.upstream is upstream
+            and session.upstream_close_attempted
+        )
+
+    def _start_http_bridge_terminal_resource_settlement(
+        self,
+        session: "_HTTPBridgeSession",
+    ) -> asyncio.Task[None] | None:
+        if session.terminal_resources_settled:
+            return None
+        existing_task = session.terminal_resource_settlement_task
+        if existing_task is not None and not existing_task.done():
+            return existing_task
+        task = asyncio.create_task(
+            self._settle_http_bridge_terminal_resources(
+                session,
+                account_lease=session.account_lease,
+                durable_session_id=session.durable_session_id,
+                durable_owner_epoch=session.durable_owner_epoch,
+                upstream=session.upstream,
+            ),
+            name=f"http-bridge-terminal-settlement-{_hash_identifier(session.key.affinity_key)}",
+        )
+        session.terminal_resource_settlement_task = task
+        self._background_cleanup_tasks.add(task)
+
+        def _settlement_done(done_task: asyncio.Task[None]) -> None:
+            self._background_cleanup_tasks.discard(done_task)
+            if session.terminal_resource_settlement_task is done_task:
+                session.terminal_resource_settlement_task = None
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                logger.warning(
+                    "HTTP bridge terminal resource settlement task was cancelled bridge_key=%s",
+                    _hash_identifier(session.key.affinity_key),
+                )
+            except Exception:
+                logger.warning(
+                    "HTTP bridge terminal resource settlement task failed bridge_key=%s",
+                    _hash_identifier(session.key.affinity_key),
+                    exc_info=True,
+                )
+
+        task.add_done_callback(_settlement_done)
+        return task
+
+    async def _await_http_bridge_terminal_resource_settlement(
+        self,
+        session: "_HTTPBridgeSession",
+        settlement_task: asyncio.Task[None],
+    ) -> None:
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(settlement_task),
+                timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "HTTP bridge terminal resource settlement continues in background bridge_key=%s",
+                _hash_identifier(session.key.affinity_key),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "HTTP bridge terminal resource settlement failed bridge_key=%s",
+                _hash_identifier(session.key.affinity_key),
+                exc_info=True,
+            )
 
     async def _fail_http_bridge_inflight_session_creation(
         self,
@@ -1664,6 +1819,7 @@ class _HTTPBridgeMixin(
         session.closed = True
         current_task = asyncio.current_task()
         upstream_reader, active_send_tasks = self._cancel_http_bridge_session_activity_nowait(session)
+        terminal_settlement_task = self._start_http_bridge_terminal_resource_settlement(session)
         if upstream_reader is current_task:
             session.upstream_reader = None
         if upstream_reader is not None and upstream_reader is not current_task:
@@ -1682,27 +1838,6 @@ class _HTTPBridgeMixin(
         else:
             await self._unregister_http_bridge_turn_states(session)
             await self._unregister_http_bridge_previous_response_ids(session)
-        account_lease = getattr(session, "account_lease", None)
-        try:
-            await self._load_balancer.release_account_lease(account_lease)
-        except Exception:
-            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
-        finally:
-            session.account_lease = None
-        if session.durable_session_id is not None and session.durable_owner_epoch is not None:
-            try:
-                await self._durable_bridge.release_live_session(
-                    session_id=session.durable_session_id,
-                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=session.durable_owner_epoch,
-                    draining=shutdown_state.is_bridge_drain_active(),
-                )
-            except Exception:
-                logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
-        try:
-            await session.upstream.close()
-        except Exception:
-            logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
         pending_requests = getattr(session, "pending_requests", None)
         pending_lock = getattr(session, "pending_lock", None)
         response_create_gate = getattr(session, "response_create_gate", None)
@@ -1718,6 +1853,11 @@ class _HTTPBridgeMixin(
                 error_message="HTTP bridge session closed before response.completed",
                 api_key=None,
                 response_create_gate=response_create_gate,
+            )
+        if terminal_settlement_task is not None:
+            await self._await_http_bridge_terminal_resource_settlement(
+                session,
+                terminal_settlement_task,
             )
         _log_http_bridge_event(
             "close",
