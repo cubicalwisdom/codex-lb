@@ -2372,6 +2372,75 @@ async def test_reconnect_http_bridge_session_passes_dashboard_reset_window_to_se
 
 
 @pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_rejects_retired_generation_before_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-retired-generation")
+    session.closed = True
+    if hasattr(session, "retired"):
+        session.retired = True
+    else:
+        monkeypatch.setattr(type(session), "retired", True, raising=False)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-retired-generation-reconnect",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy=None,
+    )
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(
+            account=session.account,
+            error_message=None,
+        )
+    )
+    ensure_fresh = AsyncMock(return_value=session.account)
+    replacement_upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(
+            close=AsyncMock(),
+            response_header=lambda _name: None,
+        ),
+    )
+    open_upstream = AsyncMock(return_value=replacement_upstream)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
+
+    rejected = False
+    try:
+        with anyio.fail_after(1.0):
+            await service._reconnect_http_bridge_session(session, request_state=request_state)
+    except ProxyResponseError:
+        rejected = True
+
+    resurrection_gaps: list[str] = []
+    if not rejected:
+        resurrection_gaps.append("retired generation reconnect completed")
+    if select_account.await_count:
+        resurrection_gaps.append("retired generation reacquired account selection")
+    if open_upstream.await_count:
+        resurrection_gaps.append("retired generation opened a replacement upstream")
+    if not session.closed:
+        resurrection_gaps.append("retired generation was reopened")
+
+    assert resurrection_gaps == [], "; ".join(resurrection_gaps)
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_uses_bridge_budget_for_capacity_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9269,6 +9338,7 @@ async def test_process_http_bridge_upstream_text_retries_precreated_usage_limit(
     handle_stream_error.assert_awaited_once()
     retry_precreated.assert_awaited_once_with(session)
     finalize.assert_not_awaited()
+    assert request_state.upstream_event_seen is True
     assert request_state.event_queue is not None
     assert request_state.event_queue.empty()
     assert session.pending_requests == deque([request_state])
@@ -11476,6 +11546,328 @@ async def test_http_bridge_response_create_gate_timeout_logs_pending_bridge_cont
     assert "queued_count=1" in caplog.text
     assert "pending_request_ids=req-held-gate" in caplog.text
     assert "pending_request_ages_seconds=" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_response_create_gate_timeout_remains_stable_when_retirement_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-stuck-cleanup-failure")
+    await session.response_create_gate.acquire()
+    waiter = proxy_service._WebSocketRequestState(
+        request_id="req-stuck-cleanup-failure",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(proxy_admission_wait_timeout_seconds=0.001),
+    )
+    monkeypatch.setattr(
+        service,
+        "_retire_stuck_http_bridge_session_if_eligible",
+        AsyncMock(side_effect=RuntimeError("cleanup failed")),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._acquire_request_state_response_create_admission(
+            waiter,
+            response_create_gate=session.response_create_gate,
+            bridge_session=session,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "response_create_gate_timeout"
+
+
+def test_http_bridge_stuck_gate_retirement_threshold_defaults_to_upstream_value() -> None:
+    assert Settings().http_responses_session_bridge_stuck_gate_retire_after_seconds == 300.0
+
+
+@pytest.mark.asyncio
+async def test_response_create_gate_timeout_retires_session_with_old_event_free_http_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_app_settings(
+        proxy_admission_wait_timeout_seconds=0.001,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-stuck-gate")
+    await session.response_create_gate.acquire()
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    api_key = _make_api_key(key_id="key-stuck-gate", assigned_account_ids=[])
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation-stuck-gate",
+        key_id=api_key.id,
+        model="gpt-5.6-sol",
+    )
+    admission_release = Mock()
+    account_response_create_release = AsyncMock()
+    account_response_create_lease = proxy_service.AccountLease(
+        lease_id="response-create-stuck-gate",
+        account_id=session.account.id,
+        kind="response_create",
+        acquired_at=1.0,
+    )
+    old_pending = proxy_service._WebSocketRequestState(
+        request_id="req-old-event-free",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=reservation,
+        started_at=time.monotonic() - 301.0,
+        transport="http",
+        api_key=api_key,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"old"}',
+        event_queue=event_queue,
+        response_create_gate_acquired=True,
+        response_create_gate=session.response_create_gate,
+        response_create_admission=cast(Any, SimpleNamespace(release=admission_release)),
+        account_response_create_lease=account_response_create_lease,
+        account_response_create_release=account_response_create_release,
+        awaiting_response_created=True,
+        downstream_visible=False,
+    )
+    waiter = proxy_service._WebSocketRequestState(
+        request_id="req-visible-waiter",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task = asyncio.create_task(heartbeat_stop.wait())
+    old_pending.api_key_reservation_heartbeat_stop = heartbeat_stop
+    old_pending.api_key_reservation_heartbeat_task = heartbeat_task
+    async with session.pending_lock:
+        session.pending_requests.append(old_pending)
+        session.queued_request_count = 1
+    receive_started = asyncio.Event()
+    close_woke_receive = asyncio.Event()
+    replay_receive_started = asyncio.Event()
+    hold_replayed_reader = asyncio.Event()
+    receive_count = 0
+
+    async def receive() -> UpstreamWebSocketMessage:
+        nonlocal receive_count
+        receive_count += 1
+        if receive_count == 1:
+            receive_started.set()
+            await close_woke_receive.wait()
+            return UpstreamWebSocketMessage(kind="close", close_code=1011)
+        replay_receive_started.set()
+        await hold_replayed_reader.wait()
+        return UpstreamWebSocketMessage(kind="close", close_code=1011)
+
+    async def close_upstream() -> None:
+        close_woke_receive.set()
+
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(
+            receive=receive,
+            send_text=send_text,
+            close=AsyncMock(side_effect=close_upstream),
+        ),
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    release_live_session = AsyncMock()
+    service._durable_bridge = cast(Any, SimpleNamespace(release_live_session=release_live_session))
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    session_lease = proxy_service.AccountLease(
+        lease_id="session-stuck-gate",
+        account_id=session.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    session.account_lease = session_lease
+    session.durable_session_id = "durable-stuck-gate"
+    session.durable_owner_epoch = 9
+    session.downstream_turn_state_aliases.add("http_turn_stuck_gate")
+    session.previous_response_ids.add("resp_stuck_gate")
+    service._http_bridge_sessions[session.key] = session
+    service._http_bridge_turn_state_index[
+        proxy_service._http_bridge_turn_state_alias_key("http_turn_stuck_gate", session.key.api_key_id)
+    ] = session.key
+    service._http_bridge_previous_response_index[
+        proxy_service._http_bridge_previous_response_alias_key("resp_stuck_gate", session.key.api_key_id)
+    ] = session.key
+    session.upstream_reader = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+    reader = session.upstream_reader
+
+    try:
+        await asyncio.wait_for(receive_started.wait(), timeout=1.0)
+        with pytest.raises(ProxyResponseError) as exc_info:
+            with anyio.fail_after(1.0):
+                await service._acquire_request_state_response_create_admission(
+                    waiter,
+                    response_create_gate=session.response_create_gate,
+                    bridge_session=session,
+                )
+
+        with anyio.fail_after(1.0):
+            while not reader.done() and not replay_receive_started.is_set():
+                await asyncio.sleep(0)
+
+        queued_events: list[str | None] = []
+        while not event_queue.empty():
+            queued_events.append(event_queue.get_nowait())
+        cleanup_gaps: list[str] = []
+        if reconnect.await_count:
+            cleanup_gaps.append("retired reader attempted reconnect")
+        if send_text.await_count:
+            cleanup_gaps.append("retired reader resent response.create")
+        if not reader.done() or not reader.cancelled():
+            cleanup_gaps.append("upstream reader was not cancelled and awaited")
+        if session.upstream_reader is not None:
+            cleanup_gaps.append("session retained its upstream reader task")
+        if session.pending_requests:
+            cleanup_gaps.append("pending request was not removed")
+        if session.queued_request_count:
+            cleanup_gaps.append("queued request count was not cleared")
+        if session.response_create_gate.locked():
+            cleanup_gaps.append("response-create gate was not released")
+        if old_pending.response_create_admission is not None or not admission_release.called:
+            cleanup_gaps.append("response-create admission lease was not released")
+        if old_pending.account_response_create_lease is not None or not account_response_create_release.await_count:
+            cleanup_gaps.append("account response-create lease was not released")
+        if not heartbeat_task.done():
+            cleanup_gaps.append("reservation heartbeat task was not settled")
+        if release_reservation.await_count != 1:
+            cleanup_gaps.append("API-key reservation was not released")
+        if len(queued_events) != 2 or queued_events[-1:] != [None]:
+            cleanup_gaps.append("old event queue was not terminalized")
+        elif queued_events[0] is None or '"code":"stream_incomplete"' not in queued_events[0]:
+            cleanup_gaps.append("old event queue did not receive stream_incomplete")
+
+        assert exc_info.value.payload["error"]["code"] == "response_create_gate_timeout"
+        assert waiter.response_create_gate is None
+        assert waiter.response_create_gate_acquired is False
+        assert session.closed is True
+        assert session.key not in service._http_bridge_sessions
+        assert service._http_bridge_turn_state_index == {}
+        assert service._http_bridge_previous_response_index == {}
+        release_live_session.assert_awaited_once_with(
+            session_id="durable-stuck-gate",
+            instance_id=settings.http_responses_session_bridge_instance_id,
+            owner_epoch=9,
+            draining=False,
+        )
+        release_account_lease.assert_any_await(session_lease)
+        assert sum(call.args == (session_lease,) for call in release_account_lease.await_args_list) == 1
+        assert session.account_lease is None
+        assert cleanup_gaps == [], "; ".join(cleanup_gaps)
+    finally:
+        for task in (reader, heartbeat_task):
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+@pytest.mark.parametrize(
+    ("case", "state_updates"),
+    [
+        (
+            "healthy-active",
+            {
+                "awaiting_response_created": False,
+                "response_id": "resp_active",
+                "response_event_count": 1,
+                "downstream_visible": True,
+            },
+        ),
+        (
+            "replayed-after-upstream-event",
+            {
+                "upstream_event_seen": True,
+                "response_id": None,
+                "response_event_count": 0,
+                "awaiting_response_created": True,
+            },
+        ),
+        ("recent-precreated", {"age_seconds": 299.0}),
+        ("synthetic-prewarm", {"skip_request_log": True}),
+        ("non-http", {"transport": "websocket"}),
+    ],
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+@pytest.mark.asyncio
+async def test_response_create_gate_timeout_preserves_ineligible_pending_work(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    state_updates: dict[str, object],
+) -> None:
+    del case
+    settings = _make_app_settings(
+        proxy_admission_wait_timeout_seconds=0.001,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-preserve-gate")
+    await session.response_create_gate.acquire()
+    age_seconds = float(state_updates.get("age_seconds", 301.0))
+    pending = proxy_service._WebSocketRequestState(
+        request_id="req-preserved",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic() - age_seconds,
+        transport="http",
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        downstream_visible=False,
+    )
+    for name, value in state_updates.items():
+        if name == "age_seconds":
+            continue
+        if name == "upstream_event_seen" and not hasattr(pending, name):
+            monkeypatch.setattr(type(pending), name, value, raising=False)
+        else:
+            setattr(pending, name, value)
+    waiter = proxy_service._WebSocketRequestState(
+        request_id="req-preserve-waiter",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    async with session.pending_lock:
+        session.pending_requests.append(pending)
+        session.queued_request_count = 1
+
+    retire = AsyncMock()
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+
+    with pytest.raises(ProxyResponseError):
+        await service._acquire_request_state_response_create_admission(
+            waiter,
+            response_create_gate=session.response_create_gate,
+            bridge_session=session,
+        )
+
+    retire.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -2125,6 +2125,11 @@ class _HTTPBridgeMixin(
         restart_reader: bool = False,
         require_security_work_authorized: bool = False,
     ) -> None:
+        if session.retired:
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "HTTP responses session bridge generation is retired"),
+            )
         old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
@@ -2163,11 +2168,13 @@ class _HTTPBridgeMixin(
         else:
             preferred_candidate_id = None
         selected_account_lease: AccountLease | None = None
+        selected_account_lease_reused = False
 
         async def release_selected_account_lease() -> None:
-            nonlocal selected_account_lease
+            nonlocal selected_account_lease, selected_account_lease_reused
             lease = selected_account_lease
             selected_account_lease = None
+            selected_account_lease_reused = False
             if lease is None:
                 return
             if lease is session.account_lease:
@@ -2244,11 +2251,8 @@ class _HTTPBridgeMixin(
                         error_type="rate_limit_error" if status_code == 429 else "server_error",
                     ),
                 )
-            selected_account_lease = (
-                session.account_lease
-                if reuse_current_account_lease and account.id == session.account.id
-                else selection.lease
-            )
+            selected_account_lease_reused = reuse_current_account_lease and account.id == session.account.id
+            selected_account_lease = session.account_lease if selected_account_lease_reused else selection.lease
             selected_is_preferred = account.id == session.account.id
             force_refresh = forced_refresh_account_id == account.id
             if forced_refresh_account_id is not None and account.id != forced_refresh_account_id:
@@ -2352,7 +2356,20 @@ class _HTTPBridgeMixin(
         except Exception:
             logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
         if selected_account_lease is not session.account_lease:
-            await self._load_balancer.release_account_lease(session.account_lease)
+            old_account_lease = session.account_lease
+            session.account_lease = None
+            await self._load_balancer.release_account_lease(old_account_lease)
+        if session.retired:
+            try:
+                await upstream.close()
+            except Exception:
+                logger.debug("Failed to close provisional upstream for retired HTTP bridge session", exc_info=True)
+            if not selected_account_lease_reused:
+                await release_selected_account_lease()
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "HTTP responses session bridge generation is retired"),
+            )
         session.account_lease = selected_account_lease
         session.account = account
         session.headers = connect_headers

@@ -355,6 +355,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 release_create_gate = False
 
             if matched_request_state is not None:
+                matched_request_state.upstream_event_seen = True
                 actual_service_tier = _service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
                     matched_request_state.actual_service_tier = actual_service_tier
@@ -467,6 +468,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                             0,
                             session.queued_request_count - grouped_counted_requests,
                         )
+                if terminal_request_state is not None:
+                    terminal_request_state.upstream_event_seen = True
+                for grouped_request_state in grouped_previous_response_request_states:
+                    grouped_request_state.upstream_event_seen = True
                 has_other_pending_requests = bool(session.pending_requests)
 
         if len(grouped_previous_response_request_states) > 1:

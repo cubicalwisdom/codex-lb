@@ -109,6 +109,7 @@ from app.modules.proxy._service.support import (
     _clear_websocket_request_error_overrides,
     _copy_websocket_route_metadata_from_session,
     _event_type_from_payload,
+    _http_bridge_request_is_stuck_gate_retirement_candidate,
     _HTTPBridgeSession,
     _request_log_useragent_fields,
     _websocket_request_can_replay_before_visible_output,
@@ -412,6 +413,11 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
         queue_limit: int,
     ) -> None:
+        if session.retired:
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "HTTP responses session bridge generation is retired"),
+            )
         if request_state.response_id is not None or request_state.response_event_count > 0:
             _log_http_bridge_event(
                 "submit_after_response_event",
@@ -894,10 +900,10 @@ class _HTTPBridgeRequestSubmitMixin:
     ) -> None:
         session.closed = True
         async with self._http_bridge_lock:
-            if self._http_bridge_sessions.get(session.key) is session:
-                self._http_bridge_sessions.pop(session.key, None)
-                self._unregister_http_bridge_turn_states_locked(session)
-                self._unregister_http_bridge_previous_response_ids_locked(session)
+            self._detach_http_bridge_session_locked(
+                session.key,
+                expected_session=session,
+            )
         if session.durable_session_id is not None and session.durable_owner_epoch is not None:
             durable_session_id = session.durable_session_id
             durable_owner_epoch = session.durable_owner_epoch
@@ -933,6 +939,49 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
 
+    async def _retire_stuck_http_bridge_session_if_eligible(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        threshold_seconds: float,
+        detail: str,
+    ) -> bool:
+        async with session.lifecycle_lock:
+            if session.retired or session.closed:
+                return False
+            now = _service_time().monotonic()
+            async with session.pending_lock:
+                should_retire = any(
+                    _http_bridge_request_is_stuck_gate_retirement_candidate(
+                        request_state,
+                        now=now,
+                        threshold_seconds=threshold_seconds,
+                    )
+                    for request_state in session.pending_requests
+                )
+                if not should_retire:
+                    return False
+                session.retired = True
+                session.closed = True
+            async with self._http_bridge_lock:
+                self._detach_http_bridge_session_locked(
+                    session.key,
+                    expected_session=session,
+                )
+
+        await self._close_http_bridge_session(session)
+        _log_http_bridge_event(
+            "retire_stale_pending",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            pending_count=await self._http_bridge_pending_count(session),
+            detail=detail,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        return True
+
     async def _retry_http_bridge_request_on_fresh_upstream(
         self: Any,
         session: "_HTTPBridgeSession",
@@ -941,6 +990,8 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
         send_request: bool = True,
     ) -> bool:
+        if session.retired:
+            return False
         retry_text_data = text_data
         if request_state.previous_response_id is not None and send_request:
             # After an ambiguous websocket send failure we cannot prove whether
@@ -979,6 +1030,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 restart_reader=True,
             )
+            if session.retired:
+                return False
             if send_request:
                 if retry_text_data != text_data:
                     request_state.previous_response_id = None
@@ -993,6 +1046,8 @@ class _HTTPBridgeRequestSubmitMixin:
             return False
 
     async def _retry_http_bridge_precreated_request(self: Any, session: "_HTTPBridgeSession") -> bool:
+        if session.retired:
+            return False
         async with session.pending_lock:
             retryable_requests = [
                 request_state
@@ -1040,6 +1095,8 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
+            if session.retired:
+                return False
             await session.upstream.send_text(request_text)
             session.last_used_at = _service_time().monotonic()
             return True
@@ -1064,6 +1121,8 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         error_message: str | None,
     ) -> Literal["not_replayable", "retried", "failed"]:
+        if session.retired:
+            return "not_replayable"
         permanent_failure_code = _websocket_auth_failure_permanent_code(error_message)
         request_text = _prepare_websocket_request_state_for_auth_replay(request_state)
         if request_text is None:
@@ -1106,6 +1165,8 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
+            if session.retired:
+                return "not_replayable"
             await session.upstream.send_text(request_text)
             session.last_used_at = _service_time().monotonic()
             return "retried"
@@ -1128,6 +1189,8 @@ class _HTTPBridgeRequestSubmitMixin:
         session: "_HTTPBridgeSession",
         request_state: _WebSocketRequestState,
     ) -> bool:
+        if session.retired:
+            return False
         if session.account.security_work_authorized:
             return False
         if request_state.response_id is not None:
@@ -1173,6 +1236,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 require_security_work_authorized=True,
             )
+            if session.retired:
+                return False
             await session.upstream.send_text(retry_text)
             session.last_used_at = _service_time().monotonic()
             return True

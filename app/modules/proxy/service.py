@@ -1263,6 +1263,7 @@ class ProxyService(
             queued_count = None
             pending_request_ids: list[str] | None = None
             pending_request_ages_seconds: list[float] | None = None
+            threshold_seconds = get_settings().http_responses_session_bridge_stuck_gate_retire_after_seconds
             if bridge_session is not None:
                 now = time.monotonic()
                 async with bridge_session.pending_lock:
@@ -1283,6 +1284,15 @@ class ProxyService(
                 pending_request_ids=pending_request_ids,
                 pending_request_ages_seconds=pending_request_ages_seconds,
             )
+            if bridge_session is not None:
+                try:
+                    await self._retire_stuck_http_bridge_session_if_eligible(
+                        bridge_session,
+                        threshold_seconds=threshold_seconds,
+                        detail="response_create_gate_timeout_stuck_pending",
+                    )
+                except Exception:
+                    logger.warning("Failed to retire stuck HTTP bridge session after gate timeout", exc_info=True)
             raise _http_bridge_startup_wait_timeout_error(
                 "http_bridge_response_create_gate",
                 code="response_create_gate_timeout",

@@ -312,6 +312,7 @@ class _WebSocketRequestState:
     error_param_override: str | None = None
     error_http_status_override: int | None = None
     response_event_count: int = 0
+    upstream_event_seen: bool = False
     previous_response_not_found_rewritten: bool = False
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
@@ -402,6 +403,7 @@ class _HTTPBridgeSession:
     upstream_reader: asyncio.Task[None] | None = None
     last_upstream_close_code: int | None = None
     closed: bool = False
+    retired: bool = False
     account_lease: AccountLease | None = None
     upstream_close_attempted: bool = False
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
@@ -410,6 +412,23 @@ class _HTTPBridgeSession:
     upstream_proxy_endpoint_id: str | None = None
     upstream_proxy_fallback_used: bool | None = None
     upstream_proxy_fail_closed_reason: str | None = None
+
+
+def _http_bridge_request_is_stuck_gate_retirement_candidate(
+    request_state: _WebSocketRequestState,
+    *,
+    now: float,
+    threshold_seconds: float,
+) -> bool:
+    return (
+        request_state.transport == "http"
+        and not request_state.skip_request_log
+        and request_state.response_create_gate_acquired
+        and request_state.awaiting_response_created
+        and not request_state.upstream_event_seen
+        and not request_state.downstream_visible
+        and max(0.0, now - request_state.started_at) >= threshold_seconds
+    )
 
 
 @dataclass(slots=True)
