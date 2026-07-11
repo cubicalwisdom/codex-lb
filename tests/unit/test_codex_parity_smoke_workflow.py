@@ -4,16 +4,32 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
+TARGET = "test-codex-parity-smoke"
+EXPECTED_RECIPE = (
+    "uv sync --dev --frozen",
+    "PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) --strict-markers -m codex_parity_smoke",
+)
 
 
-def _make_target_body(makefile: str, target: str) -> str:
+def _assert_codex_parity_smoke_make_contract(makefile: str) -> None:
+    phony_targets = {
+        target for declaration in re.findall(r"(?m)^\.PHONY:\s*(.*)$", makefile) for target in declaration.split()
+    }
+    assert TARGET in phony_targets, f"{TARGET} must be declared .PHONY"
+
     match = re.search(
-        rf"(?ms)^{re.escape(target)}:[^\n]*\n(?P<body>(?:\t[^\n]*(?:\n|$))+)",
+        rf"(?m)^{re.escape(TARGET)}:(?P<prerequisites>[^\n]*)\n"
+        r"(?P<body>(?:\t[^\n]*(?:\n|$))+)",
         makefile,
     )
-    assert match is not None, f"missing Make target: {target}"
-    return match.group("body")
+    assert match is not None, f"missing Make target: {TARGET}"
+    assert not match.group("prerequisites").strip(), f"{TARGET} must not have prerequisites"
+
+    recipe = tuple(line.removeprefix("\t").strip() for line in match.group("body").splitlines())
+    assert recipe == EXPECTED_RECIPE
 
 
 def test_codex_parity_smoke_workflow_contract() -> None:
@@ -23,19 +39,16 @@ def test_codex_parity_smoke_workflow_contract() -> None:
 
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "make test-codex-parity-smoke" in makefile
-    body = _make_target_body(makefile, "test-codex-parity-smoke")
-    assert "uv sync --dev --frozen" in body
-    assert "$(PYTEST_ARGS)" in body
-    assert "--strict-markers" in body
-    assert "-m codex_parity_smoke" in body
-    assert not any(
-        broad_target in body
-        for broad_target in (
-            "frontend-build",
-            "test-unit",
-            "test-integration-core",
-            "test-integration-bridge",
-            "test-e2e",
-            "package",
-        )
-    )
+    _assert_codex_parity_smoke_make_contract(makefile)
+
+
+def test_codex_parity_smoke_workflow_rejects_prerequisites() -> None:
+    makefile = """\
+.PHONY: test-codex-parity-smoke
+test-codex-parity-smoke: ci-fast
+\tuv sync --dev --frozen
+\tPYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) --strict-markers -m codex_parity_smoke
+"""
+
+    with pytest.raises(AssertionError, match="must not have prerequisites"):
+        _assert_codex_parity_smoke_make_contract(makefile)

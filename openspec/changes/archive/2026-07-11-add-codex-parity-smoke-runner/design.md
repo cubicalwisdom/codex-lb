@@ -38,7 +38,7 @@ A script could inspect Git changes and map production paths directly to test com
 
 ## Initial semantic selection
 
-The marker covers 16 nodes and 18 collected cases across seven existing files:
+The marker covers 16 functions and 18 collected cases across seven existing files:
 
 - `tests/unit/test_proxy_utils.py`
   - `test_stream_responses_derives_http_lite_signal_from_body`
@@ -79,7 +79,7 @@ The focused runner is an early feedback command, not completion evidence by itse
 ## Verification strategy
 
 1. Before adding the marker, run collection for `codex_parity_smoke` and confirm it fails because the selection is empty.
-2. Register and apply the marker, then collect the selection and confirm exactly 16 nodes / 18 cases from the intended files.
+2. Register and apply the marker, then collect the selection and confirm exactly 16 functions / 18 cases from the intended files.
 3. Run `make test-codex-parity-smoke` and confirm all 18 cases pass.
 4. Run each selected node directly to prove the marker target and explicit inventory execute the same cases.
 5. Run the relevant full affected test files once, plus Ruff, strict OpenSpec validation, and `git diff --check`, before closeout.
