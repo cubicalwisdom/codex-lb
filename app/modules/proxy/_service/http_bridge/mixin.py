@@ -36,6 +36,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
 from app.core.config.settings import Settings
 from app.core.errors import (
     openai_error,
@@ -2181,7 +2182,30 @@ class _HTTPBridgeMixin(
                 session.account_lease = None
             await self._load_balancer.release_account_lease(lease)
 
+        async def cleanup_provisional_ownership(
+            provisional_upstream: UpstreamResponsesWebSocket | None,
+        ) -> None:
+            if provisional_upstream is not None:
+                try:
+                    await provisional_upstream.close()
+                except BaseException:
+                    logger.warning(
+                        "Failed to close provisional HTTP bridge upstream during reconnect cleanup",
+                        exc_info=True,
+                    )
+            if selected_account_lease_reused:
+                return
+            try:
+                await release_selected_account_lease()
+            except BaseException:
+                logger.warning(
+                    "Failed to release provisional HTTP bridge lease during reconnect cleanup",
+                    exc_info=True,
+                )
+
+        upstream: UpstreamResponsesWebSocket | None = None
         while True:
+            upstream = None
             reuse_current_account_lease = (
                 preferred_candidate_id == session.account.id and session.account_lease is not None
             )
@@ -2325,6 +2349,9 @@ class _HTTPBridgeMixin(
                     preferred_candidate_id = None
                     await release_selected_account_lease()
                     continue
+                except BaseException:
+                    await cleanup_provisional_ownership(upstream)
+                    raise
             except RefreshError as exc:
                 if exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, exc.code)
@@ -2351,25 +2378,29 @@ class _HTTPBridgeMixin(
                     continue
                 await release_selected_account_lease()
                 raise
+            except BaseException:
+                await cleanup_provisional_ownership(upstream)
+                raise
+        assert upstream is not None
         try:
-            await old_upstream.close()
-        except Exception:
-            logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
-        if selected_account_lease is not session.account_lease:
-            old_account_lease = session.account_lease
-            session.account_lease = None
-            await self._load_balancer.release_account_lease(old_account_lease)
-        if session.retired:
             try:
-                await upstream.close()
+                await old_upstream.close()
             except Exception:
-                logger.debug("Failed to close provisional upstream for retired HTTP bridge session", exc_info=True)
-            if not selected_account_lease_reused:
-                await release_selected_account_lease()
-            raise ProxyResponseError(
-                502,
-                openai_error("upstream_unavailable", "HTTP responses session bridge generation is retired"),
-            )
+                logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
+            if selected_account_lease is not session.account_lease:
+                old_account_lease = session.account_lease
+                await self._load_balancer.release_account_lease(old_account_lease)
+                if session.account_lease is old_account_lease:
+                    session.account_lease = None
+            if session.retired:
+                raise ProxyResponseError(
+                    502,
+                    openai_error("upstream_unavailable", "HTTP responses session bridge generation is retired"),
+                )
+            upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
+        except BaseException:
+            await cleanup_provisional_ownership(upstream)
+            raise
         session.account_lease = selected_account_lease
         session.account = account
         session.headers = connect_headers
@@ -2377,7 +2408,7 @@ class _HTTPBridgeMixin(
         session.upstream_control = _WebSocketUpstreamControl()
         session.closed = False
         session.last_upstream_close_code = None
-        session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
+        session.upstream_turn_state = upstream_turn_state
         if restart_reader:
             session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         _log_http_bridge_event(

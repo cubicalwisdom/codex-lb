@@ -20,3 +20,11 @@
 - [x] 3.2 Run the focused adjacent selection, full HTTP bridge unit file, and bridge timeout/reconnect integration selection.
 - [x] 3.3 Run Ruff, scoped ty, strict OpenSpec validation, and `git diff --check`.
 - [x] 3.4 Self-review the owned diff, write the Task 2 evidence report, and commit only Task 2 files.
+
+## 4. Cancellation cleanup correction
+
+- [x] 4.1 Add RED coverage for cancellation after provisional socket/lease acquisition during old-socket close, including new and reused lease ownership.
+- [x] 4.2 Add RED coverage for cancellation during old-lease release and require the incomplete old lease to remain session-discoverable.
+- [x] 4.3 Clean provisional ownership on every pre-install cancellation/exception while preserving the original failure and reader recovery behavior.
+- [x] 4.4 Run focused/full bridge verification, selected integration, Ruff, scoped ty, strict OpenSpec, and diff checks.
+- [x] 4.5 Append correction evidence to the Task 2 report and commit the correction separately.

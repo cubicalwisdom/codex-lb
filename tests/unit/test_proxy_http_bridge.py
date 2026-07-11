@@ -2440,6 +2440,124 @@ async def test_reconnect_http_bridge_session_rejects_retired_generation_before_r
     assert resurrection_gaps == [], "; ".join(resurrection_gaps)
 
 
+@pytest.mark.parametrize(
+    "ownership_mode",
+    ["new-lease-old-close", "reused-lease-old-close", "new-lease-old-release"],
+)
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_cancellation_cleans_provisional_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    ownership_mode: str,
+) -> None:
+    reuse_existing_lease = ownership_mode == "reused-lease-old-close"
+    cancel_during_old_lease_release = ownership_mode == "new-lease-old-release"
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-cancelled-reconnect")
+    original_account = session.account
+    original_upstream = session.upstream
+    existing_lease = proxy_service.AccountLease(
+        lease_id="existing-reconnect-lease",
+        account_id=original_account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    session.account_lease = existing_lease
+    selected_account = (
+        original_account
+        if reuse_existing_lease
+        else cast(Any, SimpleNamespace(id="acc-provisional", status=AccountStatus.ACTIVE))
+    )
+    provisional_lease = proxy_service.AccountLease(
+        lease_id="provisional-reconnect-lease",
+        account_id=selected_account.id,
+        kind="stream",
+        acquired_at=2.0,
+    )
+    selected_lease = None if reuse_existing_lease else provisional_lease
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy=None,
+    )
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(
+            account=selected_account,
+            error_message=None,
+            lease=selected_lease,
+        )
+    )
+    ensure_fresh = AsyncMock(return_value=selected_account)
+    provisional_upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(
+            close=AsyncMock(),
+            response_header=lambda _name: None,
+        ),
+    )
+    open_upstream = AsyncMock(return_value=provisional_upstream)
+    old_close_started = asyncio.Event()
+    old_release_started = asyncio.Event()
+    completed_releases: list[proxy_service.AccountLease] = []
+
+    async def block_old_close() -> None:
+        old_close_started.set()
+        await asyncio.Event().wait()
+
+    if not cancel_during_old_lease_release:
+        cast(Any, original_upstream).close.side_effect = block_old_close
+
+    async def release_account_lease_side_effect(lease: proxy_service.AccountLease | None) -> None:
+        assert lease is not None
+        if cancel_during_old_lease_release and lease is existing_lease:
+            old_release_started.set()
+            await asyncio.Event().wait()
+        completed_releases.append(lease)
+
+    release_account_lease = AsyncMock(side_effect=release_account_lease_side_effect)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-cancelled-reconnect",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+
+    reconnect_task = asyncio.create_task(
+        service._reconnect_http_bridge_session(session, request_state=request_state)
+    )
+    cancellation_point = old_release_started if cancel_during_old_lease_release else old_close_started
+    await asyncio.wait_for(cancellation_point.wait(), timeout=1.0)
+    reconnect_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        with anyio.fail_after(1.0):
+            await reconnect_task
+
+    provisional_upstream.close.assert_awaited_once()
+    release_attempts = [call.args[0] for call in release_account_lease.await_args_list]
+    expected_attempts = (
+        [existing_lease, provisional_lease]
+        if cancel_during_old_lease_release
+        else ([] if reuse_existing_lease else [provisional_lease])
+    )
+    assert release_attempts == expected_attempts
+    assert completed_releases == ([] if reuse_existing_lease else [provisional_lease])
+    assert existing_lease not in completed_releases
+    assert session.account is original_account
+    assert session.upstream is original_upstream
+    assert session.account_lease is existing_lease
+
+
 @pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_uses_bridge_budget_for_capacity_wait(
     monkeypatch: pytest.MonkeyPatch,

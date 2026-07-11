@@ -6,6 +6,8 @@ When a visible HTTP bridge request times out waiting for a per-session response-
 
 Retirement MUST be terminal for the affected session generation. The proxy MUST detach only that registered generation, prevent its reconnect/replay/resend or ownership reacquisition, cancel and await its reader, fail and remove pending requests using `stream_incomplete`, terminalize pending event queues, and release response-create, admission, account-response-create, reservation, account, durable, and alias resources. Cleanup MUST occur without awaiting while the pending or registry lock is held. The timed-out waiter MUST retain the stable `response_create_gate_timeout` error so the client can retry safely on a fresh generation.
 
+If reconnect acquires a provisional upstream socket or a new account lease but exits before installing them, including because reader cancellation interrupts old-socket or old-lease settlement, the proxy MUST close the provisional socket and release only the newly acquired provisional lease before preserving the original cancellation or exception. A reused session lease MUST NOT be released as provisional ownership. The old session lease MUST remain discoverable by session retirement until its release completes.
+
 #### Scenario: Old event-free request blocks a visible waiter
 
 - **WHEN** a visible HTTP bridge waiter receives `response_create_gate_timeout`
@@ -22,6 +24,16 @@ Retirement MUST be terminal for the affected session generation. The proxy MUST 
 - **THEN** only the expected registered generation is detached
 - **AND** the reader is cancelled and awaited without reconnecting or resending
 - **AND** all pending queues, gates, reservations, leases, durable ownership, and aliases are settled
+
+#### Scenario: Reader cancellation interrupts reconnect before replacement installation
+
+- **WHEN** reconnect has acquired a provisional socket and lease
+- **AND** cancellation interrupts old-socket close or old-lease release before the replacement is installed
+- **THEN** the provisional socket is closed
+- **AND** a newly acquired provisional lease is released exactly once
+- **AND** a reused session lease is not released as provisional ownership
+- **AND** the old generation retains discoverable ownership of any old lease whose release did not complete
+- **AND** the original cancellation is propagated
 
 #### Scenario: Healthy or ineligible pending work is preserved
 
