@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { claimPortableSingleInstance } = require("./single-instance.cjs");
 const { applyStartWithWindowsSetting } = require("./startup.cjs");
+const { createPortableRestartCoordinator } = require("./restart.cjs");
 
 const HOST = process.env.CODEX_IB_HOST || "127.0.0.1";
 const PORT = Number.parseInt(process.env.CODEX_IB_PORT || "2455", 10);
@@ -225,6 +226,18 @@ ipcMain.handle("codex-ib:set-start-with-windows-enabled", (_event, enabled) => {
   appendLog(sidecarRoot(), `Start-with-Windows preference set to ${startWithWindowsEnabled}.`);
   return startWithWindowsEnabled;
 });
+
+const restartPortableApp = createPortableRestartCoordinator({
+  app,
+  getBackendProcess: () => backendProcess,
+  markQuitting: () => {
+    isQuitting = true;
+  },
+  appendLog,
+  root: sidecarRoot(),
+});
+
+ipcMain.handle("codex-ib:restart", () => restartPortableApp());
 
 async function boot() {
   const root = sidecarRoot();
