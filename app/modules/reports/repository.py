@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Account, RequestLog
+from app.db.models import Account, RequestLog, RequestLogAggregate
 
 _INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 _INTERNAL_WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
@@ -95,7 +95,73 @@ class ReportsRepository:
                 )
                 for row in result.all()
             )
-        return rows
+        archived_stmt = (
+            select(
+                func.date(RequestLogAggregate.bucket_start).label("report_date"),
+                func.sum(RequestLogAggregate.request_count).label("requests"),
+                func.sum(RequestLogAggregate.input_tokens).label("input_tokens"),
+                func.sum(RequestLogAggregate.output_tokens).label("output_tokens"),
+                func.sum(RequestLogAggregate.cached_input_tokens).label("cached_input_tokens"),
+                func.sum(RequestLogAggregate.cost_usd).label("cost_usd"),
+                func.count(func.distinct(RequestLogAggregate.account_id)).label("active_accounts"),
+                func.sum(RequestLogAggregate.error_count).label("error_count"),
+            )
+            .where(
+                RequestLogAggregate.bucket_start >= day_ranges[0][1],
+                RequestLogAggregate.bucket_start < day_ranges[-1][2],
+                *(_aggregate_filters(account_ids, model)),
+            )
+            .group_by(func.date(RequestLogAggregate.bucket_start))
+        )
+        archived = await self._session.execute(archived_stmt)
+        merged = {row.date: row for row in rows}
+        day_range_by_date = {report_date: (day_start, day_end) for report_date, day_start, day_end in day_ranges}
+        for row in archived.all():
+            key = str(row.report_date)
+            previous = merged.get(key)
+            day_start, day_end = day_range_by_date[key]
+            active_account_ids = (
+                select(RequestLog.account_id.label("account_id"))
+                .where(
+                    *_report_conditions(day_start, day_end, account_ids, model),
+                    RequestLog.account_id.is_not(None),
+                )
+                .union(
+                    select(RequestLogAggregate.account_id.label("account_id")).where(
+                        RequestLogAggregate.bucket_start >= day_start,
+                        RequestLogAggregate.bucket_start < day_end,
+                        RequestLogAggregate.account_id.is_not(None),
+                        *(_aggregate_filters(account_ids, model)),
+                    )
+                )
+                .subquery()
+            )
+            active_accounts = await self._session.scalar(select(func.count()).select_from(active_account_ids))
+            addition = DailyReportAggregateRow(
+                key,
+                int(row.requests or 0),
+                int(row.input_tokens or 0),
+                int(row.output_tokens or 0),
+                int(row.cached_input_tokens or 0),
+                float(row.cost_usd or 0.0),
+                int(active_accounts or 0),
+                int(row.error_count or 0),
+            )
+            merged[key] = (
+                addition
+                if previous is None
+                else DailyReportAggregateRow(
+                    key,
+                    previous.requests + addition.requests,
+                    previous.input_tokens + addition.input_tokens,
+                    previous.output_tokens + addition.output_tokens,
+                    previous.cached_input_tokens + addition.cached_input_tokens,
+                    previous.cost_usd + addition.cost_usd,
+                    addition.active_accounts,
+                    previous.error_count + addition.error_count,
+                )
+            )
+        return [merged[key] for key in sorted(merged)]
 
     async def aggregate_summary(
         self,
@@ -121,14 +187,46 @@ class ReportsRepository:
             ).where(and_(*conditions))
         )
         row = result.one()
+        archived = await self._session.execute(
+            select(
+                func.coalesce(func.sum(RequestLogAggregate.cost_usd), 0.0).label("cost"),
+                func.coalesce(func.sum(RequestLogAggregate.input_tokens), 0).label("input"),
+                func.coalesce(func.sum(RequestLogAggregate.output_tokens), 0).label("output"),
+                func.coalesce(func.sum(RequestLogAggregate.cached_input_tokens), 0).label("cached"),
+                func.coalesce(func.sum(RequestLogAggregate.request_count), 0).label("requests"),
+                func.coalesce(func.sum(RequestLogAggregate.error_count), 0).label("errors"),
+            ).where(
+                RequestLogAggregate.bucket_start >= start_date,
+                RequestLogAggregate.bucket_start < end_date,
+                *(_aggregate_filters(account_ids, model)),
+            )
+        )
+        archived_row = archived.one()
+        active_account_ids = (
+            select(RequestLog.account_id.label("account_id"))
+            .where(
+                and_(*conditions),
+                RequestLog.account_id.is_not(None),
+            )
+            .union(
+                select(RequestLogAggregate.account_id.label("account_id")).where(
+                    RequestLogAggregate.bucket_start >= start_date,
+                    RequestLogAggregate.bucket_start < end_date,
+                    RequestLogAggregate.account_id.is_not(None),
+                    *(_aggregate_filters(account_ids, model)),
+                )
+            )
+            .subquery()
+        )
+        active_accounts = await self._session.scalar(select(func.count()).select_from(active_account_ids))
         return SummaryAggregateRow(
-            total_cost_usd=float(row.total_cost_usd),
-            total_input_tokens=int(row.total_input_tokens),
-            total_output_tokens=int(row.total_output_tokens),
-            total_cached_tokens=int(row.total_cached_tokens),
-            total_requests=int(row.total_requests),
-            total_errors=int(row.total_errors),
-            active_accounts=int(row.active_accounts),
+            total_cost_usd=float(row.total_cost_usd) + float(archived_row.cost or 0.0),
+            total_input_tokens=int(row.total_input_tokens) + int(archived_row.input or 0),
+            total_output_tokens=int(row.total_output_tokens) + int(archived_row.output or 0),
+            total_cached_tokens=int(row.total_cached_tokens) + int(archived_row.cached or 0),
+            total_requests=int(row.total_requests) + int(archived_row.requests or 0),
+            total_errors=int(row.total_errors) + int(archived_row.errors or 0),
+            active_accounts=int(active_accounts or 0),
         )
 
     async def aggregate_by_model(
@@ -153,12 +251,26 @@ class ReportsRepository:
             .order_by(func.coalesce(func.sum(RequestLog.cost_usd), 0.0).desc())
         )
         result = await self._session.execute(stmt)
+        merged = {row.model: float(row.cost_usd or 0.0) for row in result.all()}
+        archived = await self._session.execute(
+            select(
+                RequestLogAggregate.model, func.coalesce(func.sum(RequestLogAggregate.cost_usd), 0.0).label("cost_usd")
+            )
+            .where(
+                RequestLogAggregate.bucket_start >= start_date,
+                RequestLogAggregate.bucket_start < end_date,
+                *(_aggregate_filters(account_ids, model)),
+            )
+            .group_by(RequestLogAggregate.model)
+        )
+        for row in archived.all():
+            merged[row.model] = merged.get(row.model, 0.0) + float(row.cost_usd or 0.0)
         return [
             ModelAggregateRow(
-                model=row.model,
-                cost_usd=float(row.cost_usd),
+                model=key,
+                cost_usd=value,
             )
-            for row in result.all()
+            for key, value in sorted(merged.items(), key=lambda item: item[1], reverse=True)
         ]
 
     async def aggregate_by_account(
@@ -181,9 +293,27 @@ class ReportsRepository:
             .order_by(func.coalesce(func.sum(RequestLog.cost_usd), 0.0).desc())
         )
         result = await self._session.execute(stmt)
-        rows = result.all()
+        totals = {row.account_id: [float(row.cost_usd or 0.0), int(row.request_count or 0)] for row in result.all()}
+        archived = await self._session.execute(
+            select(
+                RequestLogAggregate.account_id,
+                func.coalesce(func.sum(RequestLogAggregate.cost_usd), 0.0).label("cost_usd"),
+                func.coalesce(func.sum(RequestLogAggregate.request_count), 0).label("request_count"),
+            )
+            .where(
+                RequestLogAggregate.bucket_start >= start_date,
+                RequestLogAggregate.bucket_start < end_date,
+                *(_aggregate_filters(account_ids, model)),
+            )
+            .group_by(RequestLogAggregate.account_id)
+        )
+        for row in archived.all():
+            total = totals.setdefault(row.account_id, [0.0, 0])
+            total[0] += float(row.cost_usd or 0.0)
+            total[1] += int(row.request_count or 0)
+        rows = [(account_id, totals[account_id][0], totals[account_id][1]) for account_id in totals]
 
-        account_ids_found = [row.account_id for row in rows if row.account_id]
+        account_ids_found = [row[0] for row in rows if row[0]]
         alias_map: dict[str | None, str | None] = {}
         if account_ids_found:
             alias_result = await self._session.execute(
@@ -193,10 +323,10 @@ class ReportsRepository:
 
         return [
             AccountAggregateRow(
-                account_id=row.account_id,
-                alias=alias_map.get(row.account_id),
-                cost_usd=float(row.cost_usd),
-                request_count=int(row.request_count),
+                account_id=row[0],
+                alias=alias_map.get(row[0]),
+                cost_usd=float(row[1]),
+                request_count=int(row[2]),
             )
             for row in rows
         ]
@@ -249,6 +379,15 @@ def _report_conditions(
         conditions.append(RequestLog.account_id.in_(account_ids))
     if model:
         conditions.append(RequestLog.model == model)
+    return conditions
+
+
+def _aggregate_filters(account_ids: list[str] | None, model: str | None) -> list:
+    conditions: list = []
+    if account_ids:
+        conditions.append(RequestLogAggregate.account_id.in_(account_ids))
+    if model:
+        conditions.append(RequestLogAggregate.model == model)
     return conditions
 
 

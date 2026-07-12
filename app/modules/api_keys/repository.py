@@ -21,6 +21,7 @@ from app.db.models import (
     LimitType,
     LimitWindow,
     RequestLog,
+    RequestLogAggregate,
 )
 from app.db.session import sqlite_writer_section
 from app.modules.api_keys.limit_windows import advance_limit_reset
@@ -205,6 +206,7 @@ class ApiKeysRepository:
         )
         result = await self._session.execute(stmt)
         summaries: dict[str, ApiKeyUsageSummary] = {}
+        input_totals_by_key: dict[str, int] = {}
         for (
             api_key_id,
             request_count,
@@ -219,11 +221,51 @@ class ApiKeysRepository:
             output_sum = int(output_tokens or 0)
             cached_sum = int(cached_input_tokens or 0)
             cached_sum = max(0, min(cached_sum, input_sum))
+            input_totals_by_key[api_key_id] = input_sum
             summaries[api_key_id] = ApiKeyUsageSummary(
                 request_count=int(request_count or 0),
                 total_tokens=input_sum + output_sum,
                 cached_input_tokens=cached_sum,
                 total_cost_usd=round(float(total_cost_usd or 0.0), 6),
+            )
+
+        archived = await self._session.execute(
+            select(
+                RequestLogAggregate.api_key_id,
+                func.coalesce(func.sum(RequestLogAggregate.request_count), 0).label("request_count"),
+                func.coalesce(func.sum(RequestLogAggregate.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.cost_usd), 0.0).label("total_cost_usd"),
+            )
+            .where(RequestLogAggregate.api_key_id.is_not(None))
+            .group_by(RequestLogAggregate.api_key_id)
+        )
+        for row in archived.all():
+            if not row.api_key_id:
+                continue
+            current = summaries.get(
+                row.api_key_id,
+                ApiKeyUsageSummary(
+                    request_count=0,
+                    total_tokens=0,
+                    cached_input_tokens=0,
+                    total_cost_usd=0.0,
+                ),
+            )
+            archived_input = int(row.input_tokens or 0)
+            archived_output = int(row.output_tokens or 0)
+            total_input = input_totals_by_key.get(row.api_key_id, 0) + archived_input
+            input_totals_by_key[row.api_key_id] = total_input
+            cached_input = min(
+                current.cached_input_tokens + int(row.cached_input_tokens or 0),
+                max(0, total_input),
+            )
+            summaries[row.api_key_id] = ApiKeyUsageSummary(
+                request_count=current.request_count + int(row.request_count or 0),
+                total_tokens=current.total_tokens + archived_input + archived_output,
+                cached_input_tokens=cached_input,
+                total_cost_usd=round(current.total_cost_usd + float(row.total_cost_usd or 0.0), 6),
             )
 
         return summaries
@@ -245,15 +287,28 @@ class ApiKeysRepository:
         )
         result = await self._session.execute(stmt)
         row = result.one()
-        input_sum = int(row.input_tokens or 0)
-        output_sum = int(row.output_tokens or 0)
-        cached_sum = int(row.cached_input_tokens or 0)
+        archived = await self._session.execute(
+            select(
+                func.coalesce(func.sum(RequestLogAggregate.request_count), 0).label("request_count"),
+                func.coalesce(func.sum(RequestLogAggregate.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.cost_usd), 0.0).label("total_cost_usd"),
+            ).where(RequestLogAggregate.api_key_id == key_id)
+        )
+        archived_row = archived.one()
+        input_sum = int(row.input_tokens or 0) + int(archived_row.input_tokens or 0)
+        output_sum = int(row.output_tokens or 0) + int(archived_row.output_tokens or 0)
+        cached_sum = int(row.cached_input_tokens or 0) + int(archived_row.cached_input_tokens or 0)
         cached_sum = max(0, min(cached_sum, input_sum))
         return ApiKeyUsageSummary(
-            request_count=int(row.request_count or 0),
+            request_count=int(row.request_count or 0) + int(archived_row.request_count or 0),
             total_tokens=input_sum + output_sum,
             cached_input_tokens=cached_sum,
-            total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
+            total_cost_usd=round(
+                float(row.total_cost_usd or 0.0) + float(archived_row.total_cost_usd or 0.0),
+                6,
+            ),
         )
 
     async def update(
@@ -804,7 +859,41 @@ class ApiKeysRepository:
             .group_by(RequestLog.account_id, Account.email, deleted_expr)
         )
         result = await self._session.execute(stmt)
-        return self._build_account_costs(result.all())
+        account_costs = {
+            (entry.account_id, entry.email, entry.is_deleted): entry.cost_usd
+            for entry in self._build_account_costs(result.all())
+        }
+        archived = await self._session.execute(
+            select(
+                RequestLogAggregate.account_id,
+                Account.email,
+                func.coalesce(func.sum(RequestLogAggregate.cost_usd), 0.0).label("cost_usd"),
+            )
+            .outerjoin(Account, Account.id == RequestLogAggregate.account_id)
+            .where(
+                RequestLogAggregate.api_key_id == key_id,
+                RequestLogAggregate.bucket_start >= since,
+                RequestLogAggregate.bucket_start < until,
+            )
+            .group_by(RequestLogAggregate.account_id, Account.email)
+        )
+        for row in archived.all():
+            key = (row.account_id, row.email, False)
+            account_costs[key] = account_costs.get(key, 0.0) + float(row.cost_usd or 0.0)
+        return sorted(
+            (
+                ApiKeyAccountCost(
+                    account_id=account_id,
+                    email=email,
+                    cost_usd=round(cost_usd, 6),
+                    is_deleted=is_deleted,
+                )
+                for (account_id, email, is_deleted), cost_usd in account_costs.items()
+                if cost_usd > 0
+            ),
+            key=lambda entry: entry.cost_usd,
+            reverse=True,
+        )
 
     async def trends_by_key(
         self,
@@ -842,13 +931,46 @@ class ApiKeysRepository:
             .order_by(bucket_col)
         )
         result = await self._session.execute(stmt)
+        merged = {
+            int(row.bucket_epoch): [
+                int(row.total_input_tokens or 0) + int(row.total_output_tokens or 0),
+                float(row.total_cost_usd or 0.0),
+            ]
+            for row in result.all()
+        }
+        if dialect == "postgresql":
+            aggregate_bucket_expr = (
+                func.floor(func.extract("epoch", RequestLogAggregate.bucket_start) / bucket_seconds) * bucket_seconds
+            )
+        else:
+            aggregate_epoch_col = cast(func.strftime("%s", RequestLogAggregate.bucket_start), Integer)
+            aggregate_bucket_expr = cast(aggregate_epoch_col / bucket_seconds, Integer) * bucket_seconds
+        aggregate_bucket_col = aggregate_bucket_expr.label("bucket_epoch")
+        archived = await self._session.execute(
+            select(
+                aggregate_bucket_col,
+                func.coalesce(func.sum(RequestLogAggregate.input_tokens), 0).label("total_input_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.output_tokens), 0).label("total_output_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.cost_usd), 0.0).label("total_cost_usd"),
+            )
+            .where(
+                RequestLogAggregate.api_key_id == key_id,
+                RequestLogAggregate.bucket_start >= since,
+                RequestLogAggregate.bucket_start < until,
+            )
+            .group_by(aggregate_bucket_col)
+        )
+        for row in archived.all():
+            values = merged.setdefault(int(row.bucket_epoch), [0, 0.0])
+            values[0] += int(row.total_input_tokens or 0) + int(row.total_output_tokens or 0)
+            values[1] += float(row.total_cost_usd or 0.0)
         return [
             ApiKeyTrendBucket(
-                bucket_epoch=int(row.bucket_epoch),
-                total_tokens=int((row.total_input_tokens or 0) + (row.total_output_tokens or 0)),
-                total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
+                bucket_epoch=bucket_epoch,
+                total_tokens=int(values[0]),
+                total_cost_usd=round(float(values[1]), 6),
             )
-            for row in result.all()
+            for bucket_epoch, values in sorted(merged.items())
         ]
 
     async def usage_7d(self, key_id: str, since: datetime, until: datetime) -> ApiKeyUsageTotals:
@@ -907,16 +1029,64 @@ class ApiKeysRepository:
         result = await self._session.execute(stmt)
         rows = result.all()
         row = rows[0]
-        input_sum = int(row.total_input_tokens or 0)
-        output_sum = int(row.total_output_tokens or 0)
-        cached_sum = int(row.cached_input_tokens or 0)
+        archived = await self._session.execute(
+            select(
+                func.coalesce(func.sum(RequestLogAggregate.request_count), 0).label("total_requests"),
+                func.coalesce(func.sum(RequestLogAggregate.input_tokens), 0).label("total_input_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.output_tokens), 0).label("total_output_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.cost_usd), 0.0).label("total_cost_usd"),
+            ).where(
+                RequestLogAggregate.api_key_id == key_id,
+                RequestLogAggregate.bucket_start >= since,
+                RequestLogAggregate.bucket_start < until,
+            )
+        )
+        archived_row = archived.one()
+        input_sum = int(row.total_input_tokens or 0) + int(archived_row.total_input_tokens or 0)
+        output_sum = int(row.total_output_tokens or 0) + int(archived_row.total_output_tokens or 0)
+        cached_sum = int(row.cached_input_tokens or 0) + int(archived_row.cached_input_tokens or 0)
         cached_sum = max(0, min(cached_sum, input_sum))
+
+        account_costs = {
+            (entry.account_id, entry.email, entry.is_deleted): entry.cost_usd
+            for entry in self._build_account_costs(rows)
+        }
+        archived_accounts = await self._session.execute(
+            select(
+                RequestLogAggregate.account_id,
+                Account.email,
+                func.coalesce(func.sum(RequestLogAggregate.cost_usd), 0.0).label("cost_usd"),
+            )
+            .outerjoin(Account, Account.id == RequestLogAggregate.account_id)
+            .where(
+                RequestLogAggregate.api_key_id == key_id,
+                RequestLogAggregate.bucket_start >= since,
+                RequestLogAggregate.bucket_start < until,
+            )
+            .group_by(RequestLogAggregate.account_id, Account.email)
+        )
+        for account_row in archived_accounts.all():
+            account_key = (account_row.account_id, account_row.email, False)
+            account_costs[account_key] = account_costs.get(account_key, 0.0) + float(account_row.cost_usd or 0.0)
         return ApiKeyUsageTotals(
-            total_requests=int(row.total_requests),
+            total_requests=int(row.total_requests or 0) + int(archived_row.total_requests or 0),
             total_tokens=input_sum + output_sum,
             cached_input_tokens=cached_sum,
-            total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
-            account_costs=self._build_account_costs(rows),
+            total_cost_usd=round(
+                float(row.total_cost_usd or 0.0) + float(archived_row.total_cost_usd or 0.0),
+                6,
+            ),
+            account_costs=[
+                ApiKeyAccountCost(
+                    account_id=account_id,
+                    email=email,
+                    cost_usd=round(cost_usd, 6),
+                    is_deleted=is_deleted,
+                )
+                for (account_id, email, is_deleted), cost_usd in account_costs.items()
+                if cost_usd > 0
+            ],
         )
 
 

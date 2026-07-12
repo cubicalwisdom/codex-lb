@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     database_sqlite_pre_migrate_backup_enabled: bool = True
     database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)
     database_sqlite_startup_check_mode: Literal["quick", "full", "off"] = "quick"
+    history_retention_enabled: bool = True
+    history_retention_days: int = Field(default=1, ge=1)
+    history_retention_interval_seconds: int = Field(default=60, ge=60)
     database_alembic_auto_remap_enabled: bool = True
     upstream_base_url: str = "https://chatgpt.com/backend-api"
     upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"

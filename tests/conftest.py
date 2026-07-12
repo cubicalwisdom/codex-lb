@@ -22,6 +22,7 @@ os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
 os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
+os.environ["CODEX_LB_HISTORY_RETENTION_ENABLED"] = "false"
 
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
@@ -83,9 +84,7 @@ async def app_instance(_reset_db_state, monkeypatch, isolated_codexneo_sync_serv
 
     monkeypatch.setattr(main_module, "init_db", _noop_init_db)
     app = create_app()
-    app.dependency_overrides[accounts_api.get_codexneo_account_sync_service] = (
-        lambda: isolated_codexneo_sync_service
-    )
+    app.dependency_overrides[accounts_api.get_codexneo_account_sync_service] = lambda: isolated_codexneo_sync_service
     return app
 
 

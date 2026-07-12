@@ -14,7 +14,7 @@ from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, ApiKey, RequestKind, RequestLog
+from app.db.models import Account, ApiKey, RequestKind, RequestLog, RequestLogAggregate
 from app.db.session import sqlite_writer_section
 
 
@@ -116,46 +116,96 @@ class RequestLogsRepository:
             .order_by(bucket_col)
         )
         result = await self._session.execute(stmt)
+        merged = {
+            (int(row.bucket_epoch), row.model, row.service_tier): [
+                int(row.request_count or 0),
+                int(row.error_count or 0),
+                int(row.input_tokens or 0),
+                int(row.output_tokens or 0),
+                int(row.cached_input_tokens or 0),
+                0,
+                float(row.cost_usd or 0.0),
+            ]
+            for row in result.all()
+        }
+        if dialect == "postgresql":
+            aggregate_bucket_expr = (
+                func.floor(func.extract("epoch", RequestLogAggregate.bucket_start) / bucket_seconds)
+                * bucket_seconds
+            )
+        else:
+            aggregate_epoch = cast(func.strftime("%s", RequestLogAggregate.bucket_start), Integer)
+            aggregate_bucket_expr = cast(aggregate_epoch / bucket_seconds, Integer) * bucket_seconds
+        aggregate_bucket = aggregate_bucket_expr.label("bucket_epoch")
+        archived = await self._session.execute(
+            select(
+                aggregate_bucket,
+                RequestLogAggregate.model,
+                RequestLogAggregate.service_tier,
+                func.sum(RequestLogAggregate.request_count).label("request_count"),
+                func.sum(RequestLogAggregate.error_count).label("error_count"),
+                func.sum(RequestLogAggregate.input_tokens).label("input_tokens"),
+                func.sum(RequestLogAggregate.output_tokens).label("output_tokens"),
+                func.sum(RequestLogAggregate.cached_input_tokens).label("cached_input_tokens"),
+                func.sum(RequestLogAggregate.cost_usd).label("cost_usd"),
+            )
+            .where(RequestLogAggregate.bucket_start >= since)
+            .group_by(aggregate_bucket, RequestLogAggregate.model, RequestLogAggregate.service_tier)
+        )
+        for row in archived.all():
+            values = merged.setdefault((int(row.bucket_epoch), row.model, row.service_tier), [0, 0, 0, 0, 0, 0, 0.0])
+            for index, value in enumerate(
+                (
+                    row.request_count,
+                    row.error_count,
+                    row.input_tokens,
+                    row.output_tokens,
+                    row.cached_input_tokens,
+                    0,
+                    row.cost_usd,
+                )
+            ):
+                values[index] += float(value or 0) if index == 6 else int(value or 0)
         return [
             BucketModelAggregate(
-                bucket_epoch=int(row.bucket_epoch),
-                model=row.model,
-                service_tier=row.service_tier,
-                request_count=int(row.request_count),
-                error_count=int(row.error_count),
-                input_tokens=int(row.input_tokens),
-                output_tokens=int(row.output_tokens),
-                cached_input_tokens=int(row.cached_input_tokens),
-                reasoning_tokens=int(row.reasoning_tokens),
-                cost_usd=float(row.cost_usd or 0.0),
+                bucket_epoch=key[0],
+                model=key[1],
+                service_tier=key[2],
+                request_count=int(values[0]),
+                error_count=int(values[1]),
+                input_tokens=int(values[2]),
+                output_tokens=int(values[3]),
+                cached_input_tokens=int(values[4]),
+                reasoning_tokens=int(values[5]),
+                cost_usd=float(values[6]),
             )
-            for row in result.all()
+            for key, values in sorted(merged.items(), key=lambda item: (item[0][0], item[0][1] or "", item[0][2] or ""))
         ]
 
     async def aggregate_activity_since(self, since: datetime) -> RequestActivityAggregate:
-        stmt = self._aggregate_activity_stmt(since)
-        result = await self._session.execute(stmt)
-        row = result.one()
-        return RequestActivityAggregate(
-            request_count=int(row.request_count),
-            error_count=int(row.error_count),
-            input_tokens=int(row.input_tokens),
-            output_tokens=int(row.output_tokens),
-            cached_input_tokens=int(row.cached_input_tokens),
-            cost_usd=float(row.cost_usd or 0.0),
-        )
+        return await self.aggregate_activity_between(since, utcnow())
 
     async def aggregate_activity_between(self, since: datetime, until: datetime) -> RequestActivityAggregate:
-        stmt = self._aggregate_activity_stmt(since, until)
-        result = await self._session.execute(stmt)
+        result = await self._session.execute(self._aggregate_activity_stmt(since, until))
         row = result.one()
+        archived = await self._session.execute(
+            select(
+                func.coalesce(func.sum(RequestLogAggregate.request_count), 0).label("request_count"),
+                func.coalesce(func.sum(RequestLogAggregate.error_count), 0).label("error_count"),
+                func.coalesce(func.sum(RequestLogAggregate.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLogAggregate.cost_usd), 0.0).label("cost_usd"),
+            ).where(RequestLogAggregate.bucket_start >= since, RequestLogAggregate.bucket_start < until)
+        )
+        archived_row = archived.one()
         return RequestActivityAggregate(
-            request_count=int(row.request_count),
-            error_count=int(row.error_count),
-            input_tokens=int(row.input_tokens),
-            output_tokens=int(row.output_tokens),
-            cached_input_tokens=int(row.cached_input_tokens),
-            cost_usd=float(row.cost_usd or 0.0),
+            request_count=int(row.request_count or 0) + int(archived_row.request_count or 0),
+            error_count=int(row.error_count or 0) + int(archived_row.error_count or 0),
+            input_tokens=int(row.input_tokens or 0) + int(archived_row.input_tokens or 0),
+            output_tokens=int(row.output_tokens or 0) + int(archived_row.output_tokens or 0),
+            cached_input_tokens=int(row.cached_input_tokens or 0) + int(archived_row.cached_input_tokens or 0),
+            cost_usd=float(row.cost_usd or 0.0) + float(archived_row.cost_usd or 0.0),
         )
 
     def _aggregate_activity_stmt(self, since: datetime, until: datetime | None = None):
@@ -178,18 +228,12 @@ class RequestLogsRepository:
         return stmt
 
     async def top_error_since(self, since: datetime) -> str | None:
-        stmt = self._top_error_stmt(since)
-        result = await self._session.execute(stmt)
-        row = result.first()
-        return str(row[0]) if row and row[0] else None
+        return await self._top_error(since, None)
 
     async def top_error_between(self, since: datetime, until: datetime) -> str | None:
-        stmt = self._top_error_stmt(since, until)
-        result = await self._session.execute(stmt)
-        row = result.first()
-        return str(row[0]) if row and row[0] else None
+        return await self._top_error(since, until)
 
-    def _top_error_stmt(self, since: datetime, until: datetime | None = None):
+    async def _top_error(self, since: datetime, until: datetime | None) -> str | None:
         stmt = (
             select(RequestLog.error_code, func.count(RequestLog.id).label("error_count"))
             .where(
@@ -199,18 +243,42 @@ class RequestLogsRepository:
                 RequestLog.error_code.is_not(None),
             )
             .group_by(RequestLog.error_code)
-            .order_by(func.count(RequestLog.id).desc(), RequestLog.error_code.asc())
-            .limit(1)
         )
         if until is not None:
             stmt = stmt.where(RequestLog.requested_at < until)
-        return stmt
+        live = await self._session.execute(stmt)
+        counts = {str(row.error_code): int(row.error_count or 0) for row in live.all() if row.error_code}
+
+        archived_stmt = (
+            select(
+                RequestLogAggregate.error_code,
+                func.coalesce(func.sum(RequestLogAggregate.error_count), 0).label("error_count"),
+            )
+            .where(
+                RequestLogAggregate.bucket_start >= since,
+                RequestLogAggregate.error_code.is_not(None),
+                RequestLogAggregate.error_count > 0,
+            )
+            .group_by(RequestLogAggregate.error_code)
+        )
+        if until is not None:
+            archived_stmt = archived_stmt.where(RequestLogAggregate.bucket_start < until)
+        archived = await self._session.execute(archived_stmt)
+        for row in archived.all():
+            if row.error_code:
+                key = str(row.error_code)
+                counts[key] = counts.get(key, 0) + int(row.error_count or 0)
+        if not counts:
+            return None
+        return min(counts, key=lambda error_code: (-counts[error_code], error_code))
 
     async def earliest_activity_at(self) -> datetime | None:
-        stmt = select(func.min(RequestLog.requested_at)).where(self._exclude_warmup_clause())
-        result = await self._session.execute(stmt)
-        value = result.scalar_one_or_none()
-        return value if isinstance(value, datetime) else None
+        detail = await self._session.scalar(
+            select(func.min(RequestLog.requested_at)).where(self._exclude_warmup_clause())
+        )
+        archived = await self._session.scalar(select(func.min(RequestLogAggregate.bucket_start)))
+        values = [value for value in (detail, archived) if isinstance(value, datetime)]
+        return min(values) if values else None
 
     async def add_log(
         self,
@@ -261,9 +329,7 @@ class RequestLogsRepository:
             resolved_useragent_group = (
                 useragent_group if not isinstance(useragent_group, str) or useragent_group.strip() else None
             )
-            resolved_cache_write_tokens = (
-                max(0, int(cache_write_tokens)) if cache_write_tokens is not None else None
-            )
+            resolved_cache_write_tokens = max(0, int(cache_write_tokens)) if cache_write_tokens is not None else None
             log = RequestLog(
                 account_id=account_id,
                 api_key_id=api_key_id,
