@@ -74,6 +74,7 @@ export const CodexNeoPathRequestSchema = z.object({
 
 export const CodexNeoAccountKeysRequestSchema = z.object({
   accountKeys: z.array(z.string().trim().min(1)).min(1),
+  path: z.string().optional(),
 });
 
 export const CodexNeoLocationRequestSchema = z.object({

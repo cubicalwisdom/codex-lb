@@ -48,6 +48,7 @@ from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_sched
 from app.modules.audit import api as audit_api
 from app.modules.codexneo import api as codexneo_api
 from app.modules.codexneo.activity_middleware import add_codexneo_activity_log_middleware
+from app.modules.codexneo.reconciler import build_codexneo_root_reconciler
 from app.modules.codexneo.scheduler import build_codexgo_refresh_scheduler
 from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
@@ -166,6 +167,7 @@ async def lifespan(app: FastAPI):
     quota_planner_scheduler = build_quota_planner_scheduler()
     auth_guardian_scheduler = build_auth_guardian_scheduler()
     codexgo_refresh_scheduler = build_codexgo_refresh_scheduler()
+    codexneo_root_reconciler = build_codexneo_root_reconciler()
     await usage_scheduler.start()
     await api_key_limit_reset_scheduler.start()
     await model_scheduler.start()
@@ -173,6 +175,7 @@ async def lifespan(app: FastAPI):
     await quota_planner_scheduler.start()
     await auth_guardian_scheduler.start()
     await codexgo_refresh_scheduler.start()
+    await codexneo_root_reconciler.start()
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
         import uvicorn
 
@@ -331,6 +334,7 @@ async def lifespan(app: FastAPI):
             metrics_server.should_exit = True
 
         await cache_poller.stop()
+        await codexneo_root_reconciler.stop()
         await codexgo_refresh_scheduler.stop()
         await quota_planner_scheduler.stop()
         await auth_guardian_scheduler.stop()

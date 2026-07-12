@@ -122,9 +122,6 @@ class CodexHomeAccountService:
 
     async def load_accounts_with_codex_ib_usage(self) -> CodexNeoAccountsResponse:
         response = self.load_accounts()
-        if not response.accounts:
-            return response
-
         async with get_background_session() as session:
             codex_ib_accounts = await AccountsRepository(session).list_accounts(refresh_existing=True)
             matches = {
@@ -135,15 +132,23 @@ class CodexHomeAccountService:
                 )
                 for row in response.accounts
             }
-            account_ids = {
-                account.id
-                for account in matches.values()
-                if account is not None
-            }
+            account_ids = {account.id for account in codex_ib_accounts}
             usage_repo = UsageRepository(session)
             primary_by_account = await usage_repo.latest_by_account("primary", account_ids=account_ids)
             secondary_by_account = await usage_repo.latest_by_account("secondary", account_ids=account_ids)
             monthly_by_account = await usage_repo.latest_by_account("monthly", account_ids=account_ids)
+            matched_ids = {match.id for match in matches.values() if match is not None}
+            pool_only_rows = [
+                (
+                    _account_from_pool_account(account),
+                    _codex_ib_account_state(account),
+                    primary_by_account.get(account.id),
+                    secondary_by_account.get(account.id),
+                    monthly_by_account.get(account.id),
+                )
+                for account in codex_ib_accounts
+                if account.id not in matched_ids
+            ]
 
         accounts: list[CodexNeoAccountRow] = []
         for row in response.accounts:
@@ -157,7 +162,35 @@ class CodexHomeAccountService:
                     monthly=monthly_by_account.get(match.id) if match is not None else None,
                 )
             )
+        for row, account_state, primary, secondary, monthly in pool_only_rows:
+            accounts.append(
+                _merge_codex_ib_usage(
+                    row,
+                    account=account_state,
+                    primary=primary,
+                    secondary=secondary,
+                    monthly=monthly,
+                )
+            )
         return response.model_copy(update={"accounts": accounts})
+
+
+def _account_from_pool_account(account: Account) -> CodexNeoAccountRow:
+    status = _coerce_account_status(account.status)
+    label = _codex_ib_status_label(status)
+    return CodexNeoAccountRow(
+        account_key=account.id,
+        selector=account.email,
+        email=account.email,
+        alias=account.alias,
+        account_name=None,
+        plan=account.plan_type,
+        auth_mode="chatgpt",
+        codex=False,
+        backup=False,
+        availability="Ready" if status == AccountStatus.ACTIVE else label,
+        status=label,
+    )
 
 
 def _account_from_registry_item(item: dict[str, Any], *, active_key: str | None) -> CodexNeoAccountRow:
@@ -218,27 +251,29 @@ def _merge_codex_ib_usage(
     secondary: UsageHistory | None,
     monthly: UsageHistory | None,
 ) -> CodexNeoAccountRow:
+    registry_usage = _normalize_codexneo_usage_windows(row.usage)
+    display_primary, display_secondary = _effective_usage_histories(primary, secondary)
     registry_last = _parse_timestamp(row.last_usage_at)
     use_primary = _history_should_replace_registry_window(
-        row.usage.primary,
+        registry_usage.primary,
         registry_last=registry_last,
-        history=primary,
+        history=display_primary,
     )
     use_secondary = _history_should_replace_registry_window(
-        row.usage.secondary,
+        registry_usage.secondary,
         registry_last=registry_last,
-        history=secondary,
+        history=display_secondary,
     )
     if account is None and not use_primary and not use_secondary:
-        return row
+        return row.model_copy(update={"usage": registry_usage})
 
-    merged_primary = _usage_window_from_history(primary) if use_primary else row.usage.primary
-    merged_secondary = _usage_window_from_history(secondary) if use_secondary else row.usage.secondary
+    merged_primary = _usage_window_from_history(display_primary) if use_primary else registry_usage.primary
+    merged_secondary = _usage_window_from_history(display_secondary) if use_secondary else registry_usage.secondary
     selected_history = [
         history
         for history in (
-            primary if use_primary else None,
-            secondary if use_secondary else None,
+            display_primary if use_primary else None,
+            display_secondary if use_secondary else None,
             monthly if account is not None else None,
         )
         if history is not None
@@ -246,7 +281,7 @@ def _merge_codex_ib_usage(
     latest_history_at = max((_history_recorded_at(history) for history in selected_history), default=None)
     latest_usage_at = _latest_timestamp(registry_last, latest_history_at)
     last_usage_at = latest_usage_at.isoformat() if latest_usage_at is not None else row.last_usage_at
-    update: dict[str, Any] = {}
+    update: dict[str, Any] = {"usage": registry_usage} if registry_usage != row.usage else {}
     if use_primary or use_secondary:
         update.update(
             {
@@ -285,6 +320,13 @@ def _merge_codex_ib_usage(
         update["status"] = f"Fresh / {_format_relative_time(last_usage_at)}"
 
     return row.model_copy(update=update)
+
+
+def _normalize_codexneo_usage_windows(usage: CodexNeoAccountUsage) -> CodexNeoAccountUsage:
+    primary = usage.primary
+    if primary is None or not usage_core.is_weekly_window_minutes(primary.window_minutes):
+        return usage
+    return CodexNeoAccountUsage(primary=None, secondary=primary)
 
 
 def _is_codex_ib_routable(status: AccountStatus) -> bool:
@@ -472,22 +514,6 @@ def _identity_for_registry_item(
     backup_dir: Path,
 ) -> tuple[str, str, str, str, str] | tuple[str, str]:
     account_key = _optional_str(item.get("account_key"))
-    auth_path = _optional_str(item.get("auth_path"))
-    if auth_path:
-        try:
-            auth = parse_auth_json(Path(auth_path).read_bytes())
-            claims = claims_from_auth(auth)
-        except Exception:
-            pass
-        else:
-            if claims.account_id or claims.email or claims.workspace_id or claims.workspace_label:
-                return (
-                    "auth",
-                    claims.account_id or "",
-                    (claims.email or "").strip().lower(),
-                    claims.workspace_id or "",
-                    claims.workspace_label or "",
-                )
     if account_key:
         for directory in (live_dir, backup_dir):
             snapshot = existing_snapshot_path(directory, account_key)
@@ -498,6 +524,22 @@ def _identity_for_registry_item(
                 claims = claims_from_auth(auth)
             except Exception:
                 continue
+            if claims.account_id or claims.email or claims.workspace_id or claims.workspace_label:
+                return (
+                    "auth",
+                    claims.account_id or "",
+                    (claims.email or "").strip().lower(),
+                    claims.workspace_id or "",
+                    claims.workspace_label or "",
+                )
+    auth_path = _optional_str(item.get("auth_path"))
+    if auth_path:
+        try:
+            auth = parse_auth_json(Path(auth_path).read_bytes())
+            claims = claims_from_auth(auth)
+        except Exception:
+            pass
+        else:
             if claims.account_id or claims.email or claims.workspace_id or claims.workspace_label:
                 return (
                     "auth",

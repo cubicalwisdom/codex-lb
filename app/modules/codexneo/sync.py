@@ -88,7 +88,6 @@ class CodexNeoAccountsSyncService:
             return await self._sync_codex_home_to_accounts_unlocked()
 
     async def _sync_codex_home_to_accounts_unlocked(self) -> CodexNeoSyncResult:
-        retired = await self._retire_tracked_codexgo_root_accounts()
         candidates = _discover_auth_snapshots(self._codex_home, self._data_dir)
         imported = 0
         skipped = 0
@@ -110,7 +109,7 @@ class CodexNeoAccountsSyncService:
                     continue
                 seen_identities.add(identity)
                 try:
-                    await service.import_account(
+                    response = await service.import_account(
                         candidate.path.read_bytes(),
                         preserve_unknown_workspace_duplicates=False,
                     )
@@ -120,24 +119,24 @@ class CodexNeoAccountsSyncService:
                 imported += 1
                 if candidate.source == "codex" and candidate.account_key:
                     live_backup_keys.append(candidate.account_key)
+                elif candidate.source == "root":
+                    live_backup_keys.append(response.account_id)
             await repo.consolidate_generated_copy_duplicates()
 
         backup_message = ""
         if live_backup_keys:
             location_service = CodexNeoAccountLocationService(codex_home=self._codex_home, data_dir=self._data_dir)
-            if location_service.location_settings()["backup_all_enabled"]:
-                backup_result = location_service.ensure_backup_present(live_backup_keys)
-                location_service.refresh_bulk_states()
-                backup_message = f"; Backup: {backup_result.message}"
+            backup_result = location_service.ensure_backup_present(live_backup_keys)
+            location_service.refresh_bulk_states()
+            backup_message = f"; Backup: {backup_result.message}"
 
         if imported == 0 and skipped == 0:
             return CodexNeoSyncResult(success=True, message="No Codex Home auth snapshots found", count=0)
-        retirement_message = f"; retired {retired} stale CodexGO root account(s)" if retired else ""
         return CodexNeoSyncResult(
             success=True,
             message=(
                 f"Synced {imported} unique account snapshot(s) into Accounts; "
-                f"skipped {skipped}{backup_message}{retirement_message}"
+                f"skipped {skipped}{backup_message}"
             ),
             count=imported,
         )
@@ -344,15 +343,13 @@ class CodexNeoAccountsSyncService:
             )
             for account in accounts:
                 usage = secondary_usage.get(account.id)
-                if usage is None or usage.used_percent < 98:
+                if usage is None or float(usage.used_percent) != 100.0:
                     continue
                 if not _is_quota_exceeded_for_auto_delete(
                     account,
                     primary=primary_usage.get(account.id),
                     secondary=usage,
                 ):
-                    continue
-                if _matching_backup_keys_for_account(self._data_dir, account):
                     continue
                 matched_keys = _matching_codex_keys_for_account(self._codex_home, account)
                 if not matched_keys:

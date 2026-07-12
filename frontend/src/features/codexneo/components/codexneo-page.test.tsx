@@ -251,19 +251,21 @@ afterEach(() => {
 });
 
 describe("CodexNeoPage", () => {
-  it("renders API auth and CodexGO controls without exposing a saved buyer token", () => {
+  it("renders Accounts controls without stream toggles and styles Auth->API actions", () => {
     renderCodexNeoPage();
 
     expect(screen.getByRole("heading", { name: "CodexNeo" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Accounts" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Activity" })).toBeInTheDocument();
     expect(screen.getByLabelText("Codex API URL")).toHaveValue(
       "http://127.0.0.1:2455/backend-api/codex",
     );
     expect(screen.getByRole("button", { name: "Auth->API Test" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Auth->API Set" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Auth->API Revert" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Auth->API Set" })).toHaveClass("bg-emerald-600");
+    expect(screen.getByRole("button", { name: "Auth->API Revert" })).toHaveClass("bg-destructive");
     expect(screen.getByLabelText("CodexGO API refresh")).toBeChecked();
-    expect(screen.getByLabelText("OpenAI log")).toBeChecked();
-    expect(screen.getByLabelText("Management log")).not.toBeChecked();
+    expect(screen.queryByLabelText("OpenAI log")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Management log")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Every (min)")).toHaveValue(30);
     expect(screen.getByLabelText("Buyer token")).toHaveValue("");
     expect(screen.getByText("Saved")).toBeInTheDocument();
@@ -303,7 +305,8 @@ describe("CodexNeoPage", () => {
   it("renders the Codex home accounts table with usage and safe status fields", () => {
     renderCodexNeoPage();
 
-    expect(screen.getByRole("heading", { name: "Codex Home Accounts" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Shared account pool" })).toBeInTheDocument();
+    expect(screen.getByText("The same canonical accounts used by Codex LB routing.")).toBeInTheDocument();
     expect(screen.getByText("Loaded 3 account(s) from Codex registry")).toBeInTheDocument();
     expect(screen.getByText("t01.036252.89@gmail.com")).toBeInTheDocument();
     expect(screen.getByText("backup@example.com")).toBeInTheDocument();
@@ -320,15 +323,19 @@ describe("CodexNeoPage", () => {
     expect(screen.queryByText("secret-access")).not.toBeInTheDocument();
   });
 
-  it("renders activity log contents and clears through the clear button", async () => {
+  it("renders the scrollable Activity tab and clears through its clear button", async () => {
     const user = userEvent.setup();
     const { mutations } = renderCodexNeoPage();
+
+    expect(screen.queryByRole("heading", { name: "Activity log" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
 
     expect(screen.getByRole("heading", { name: "Activity log" })).toBeInTheDocument();
     expect(screen.getByText(/OpenAI API POST \/v1\/responses -> 200/)).toBeInTheDocument();
     expect(screen.getByText(/Management API POST \/v1alpha\/search -> 404/)).toBeInTheDocument();
-    expect(screen.getByTestId("codexneo-activity-log")).toHaveClass("max-h-80");
-    expect(screen.getByTestId("codexneo-activity-log")).toHaveClass("overflow-auto");
+    expect(screen.getByText(/Events are retained for 24 hours\./)).toBeInTheDocument();
+    expect(screen.getByTestId("codexneo-activity-page")).toHaveClass("h-[calc(100dvh-19rem)]");
+    expect(screen.getByTestId("codexneo-activity-log")).toHaveClass("flex-1", "overflow-auto");
 
     await user.click(screen.getByRole("button", { name: "Clear" }));
 
@@ -343,30 +350,29 @@ describe("CodexNeoPage", () => {
     expect(screen.getByRole("button", { name: "Select Codex home" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reset Codex home" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Data folder" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Import file" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Import folder" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Export all" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Import file" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Export all" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Import folder path")).toBeInTheDocument();
+    expect(screen.getByLabelText("Export destination")).toBeInTheDocument();
 
     await user.clear(screen.getByLabelText("Codex home"));
     await user.type(screen.getByLabelText("Codex home"), "D:\\CodexHome");
     await user.click(screen.getByRole("button", { name: "Save Codex home" }));
-    await user.click(screen.getByRole("button", { name: "Export all" }));
+    await user.click(screen.getByLabelText("Select t01.036252.89@gmail.com"));
+    await user.type(screen.getByLabelText("Export destination"), "D:\\CodexExports");
+    await user.click(screen.getByRole("button", { name: "Export selected" }));
 
     expect(mutations.saveCodexHomeMutation.mutateAsync).toHaveBeenCalledWith({ codexHome: "D:\\CodexHome" });
-    expect(mutations.exportAllMutation.mutateAsync).toHaveBeenCalledWith({ path: "" });
+    expect(mutations.exportSelectedMutation.mutateAsync).toHaveBeenCalledWith({
+      accountKeys: ["acct-active"],
+      path: "D:\\CodexExports",
+    });
   });
 
-  it("uses browser file inputs for empty-path import buttons", async () => {
+  it("uses the browser folder input when no import path is entered", async () => {
     const user = userEvent.setup();
     const { mutations } = renderCodexNeoPage();
-    const file = new File(['{"tokens":{}}'], "auth.json", { type: "application/json" });
-
-    await user.click(screen.getByRole("button", { name: "Import file" }));
-    await user.upload(screen.getByLabelText("Choose import file"), file);
-
-    expect(mutations.importFileUploadMutation.mutateAsync).toHaveBeenCalledWith({ file });
-    expect(mutations.importFileMutation.mutateAsync).not.toHaveBeenCalled();
-
     const folderFile = new File(['{"tokens":{}}'], "folder-auth.json", { type: "application/json" });
     Object.defineProperty(folderFile, "webkitRelativePath", { value: "accounts/folder-auth.json" });
 
@@ -377,7 +383,7 @@ describe("CodexNeoPage", () => {
     expect(mutations.importFolderMutation.mutateAsync).not.toHaveBeenCalled();
   });
 
-  it("runs remaining selected account actions without browser confirmations", async () => {
+  it("refreshes selected accounts and confirmation-gates deletion", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();
     const { mutations, accountsRefetch } = renderCodexNeoPage();
@@ -399,7 +405,7 @@ describe("CodexNeoPage", () => {
     expect(mutations.clearValidityDateMutation.mutateAsync).not.toHaveBeenCalled();
     expect(mutations.switchAccountMutation.mutateAsync).not.toHaveBeenCalled();
     expect(mutations.deleteAccountsMutation.mutateAsync).toHaveBeenCalledWith({ accountKeys: ["acct-active"] });
-    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(confirmSpy).toHaveBeenCalledWith("Delete 1 selected account(s)? This removes only their managed credentials and snapshots; usage statistics remain.");
   });
 
   it("organizes Codex Home account controls in the requested order", () => {
@@ -438,19 +444,19 @@ describe("CodexNeoPage", () => {
     expect(mutations.setBulkLocationMutation.mutateAsync).not.toHaveBeenCalled();
   });
 
-  it("uses Select all as an Unselect all toggle when all visible rows are selected", async () => {
+  it("keeps Select all and Clear selection as separate actions", async () => {
     const user = userEvent.setup();
     renderCodexNeoPage();
 
     await user.click(screen.getByRole("button", { name: "Select all" }));
-    expect(screen.getByRole("button", { name: "Unselect all" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Select all" })).toBeDisabled();
 
-    await user.click(screen.getByRole("button", { name: "Unselect all" }));
+    await user.click(screen.getByRole("button", { name: "Clear selection" }));
 
     expect(screen.getByLabelText("Select t01.036252.89@gmail.com")).not.toBeChecked();
     expect(screen.getByLabelText("Select backup@example.com")).not.toBeChecked();
     expect(screen.getByRole("button", { name: "Export selected" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Select all" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Select all" })).toBeEnabled();
   });
 
   it("selects a visible account range with shift click", async () => {
@@ -590,7 +596,7 @@ describe("CodexNeoPage", () => {
     const user = userEvent.setup();
     const { mutations } = renderCodexNeoPage();
 
-    await user.click(screen.getByLabelText("Auto delete quota exceeded"));
+    await user.click(screen.getByLabelText("Auto delete when weekly remaining = 0%"));
 
     expect(mutations.updateSettingsMutation.mutateAsync).toHaveBeenCalledWith(
       expect.objectContaining({ autoDeleteQuotaExceededAccountsEnabled: true }),

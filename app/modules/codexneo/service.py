@@ -138,7 +138,7 @@ class CodexNeoService:
         self._encryptor = encryptor or TokenEncryptor()
         self._codexgo_provider = codexgo_provider or _post_codexgo_provider
         self._codex_restart_provider = codex_restart_provider or restart_codex_desktop
-        self._activity_log_service = activity_log_service or CodexNeoActivityLogService()
+        self._activity_log_service = activity_log_service or CodexNeoActivityLogService(respect_settings=False)
         self._account_sync = account_sync
 
     @property

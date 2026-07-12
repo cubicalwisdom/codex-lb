@@ -306,7 +306,7 @@ async def export_selected(
     _write_access=Depends(require_dashboard_write_access),
     service: CodexNeoImportExportService = Depends(get_import_export_service),
 ) -> CodexNeoPathResponse:
-    return await service.export_selected(payload.account_keys)
+    return await service.export_selected(payload.account_keys, destination=payload.path)
 
 
 @router.post("/accounts/temp-unavailable", response_model=CodexNeoActionResponse)

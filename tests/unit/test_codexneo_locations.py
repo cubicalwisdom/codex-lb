@@ -107,6 +107,57 @@ def test_root_auth_json_does_not_duplicate_registered_snapshot(tmp_path) -> None
     assert rows[0]["codex"] is True
 
 
+def test_root_rotation_keeps_earlier_backup_identity_visible(tmp_path) -> None:
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    codex_home.mkdir()
+    first_email = "first-root@example.com"
+    first_account_id = "acc_first_root"
+    second_email = "second-root@example.com"
+    second_account_id = "acc_second_root"
+    (codex_home / "auth.json").write_text(
+        _auth_json(email=first_email, account_id=first_account_id),
+        encoding="utf-8",
+    )
+    service = CodexNeoAccountLocationService(codex_home=codex_home, data_dir=data_dir)
+    assert service.set_bulk_default(location="backup", present=True).success is True
+
+    (codex_home / "auth.json").write_text(
+        _auth_json(email=second_email, account_id=second_account_id),
+        encoding="utf-8",
+    )
+    state = CodexHomeAccountService(codex_home=codex_home, data_dir=data_dir).load_accounts()
+
+    assert {account.email for account in state.accounts} == {first_email, second_email}
+    assert len(state.accounts) == 2
+    assert all(account.backup for account in state.accounts)
+
+
+def test_backup_all_off_counts_logical_root_and_backup_identities(tmp_path) -> None:
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        _auth_json(email="first-root@example.com", account_id="acc_first_root"),
+        encoding="utf-8",
+    )
+    service = CodexNeoAccountLocationService(codex_home=codex_home, data_dir=data_dir)
+    assert service.set_bulk_default(location="backup", present=True).success is True
+    (codex_home / "auth.json").write_text(
+        _auth_json(email="second-root@example.com", account_id="acc_second_root"),
+        encoding="utf-8",
+    )
+    assert service.set_bulk_default(location="backup", present=True).success is True
+
+    result = service.set_bulk_default(location="backup", present=False)
+
+    assert result.success is False
+    assert result.message == (
+        "Removed backup for 0 account(s). "
+        "Skipped 2 account(s) because they must remain in Backup."
+    )
+
+
 def _write_backup_account(data_dir, account_key: str, *, email: str, auth_account_id: str) -> None:
     backup_dir = data_dir / "account-backups"
     backup_dir.mkdir(parents=True, exist_ok=True)

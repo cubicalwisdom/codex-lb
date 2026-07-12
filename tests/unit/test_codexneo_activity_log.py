@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 
 from app.modules.codexneo.activity_log import CodexNeoActivityLogService
 
@@ -35,7 +36,7 @@ def test_activity_log_appends_sanitized_lines_and_clear_deletes_file(tmp_path) -
     assert service.read() == ""
 
 
-def test_activity_log_retains_only_latest_1000_lines(tmp_path) -> None:
+def test_activity_log_keeps_all_events_inside_the_one_day_retention_window(tmp_path) -> None:
     log_path = tmp_path / "codexneo-activity.log"
     service = CodexNeoActivityLogService(log_path=log_path)
 
@@ -44,11 +45,51 @@ def test_activity_log_retains_only_latest_1000_lines(tmp_path) -> None:
 
     lines = service.read().splitlines()
 
-    assert len(lines) == 1000
-    assert "seq=0;" not in service.read()
-    assert "seq=4;" not in service.read()
-    assert "seq=5;" in lines[0]
+    assert len(lines) == 1005
+    assert "seq=0;" in lines[0]
     assert "seq=1004;" in lines[-1]
+
+
+def test_activity_log_prunes_entries_older_than_one_day(tmp_path) -> None:
+    log_path = tmp_path / "codexneo-activity.log"
+    now = datetime(2026, 7, 12, 12, 0, 0)
+    service = CodexNeoActivityLogService(log_path=log_path, now=lambda: now)
+
+    service.append("codex_lb", "old event")
+    now += timedelta(hours=24, seconds=1)
+    service.append("codexneo", "new event")
+
+    contents = service.read()
+
+    assert "old event" not in contents
+    assert "new event" in contents
+
+
+def test_activity_log_read_prunes_without_a_new_event(tmp_path) -> None:
+    log_path = tmp_path / "codexneo-activity.log"
+    now = datetime(2026, 7, 12, 12, 0, 0)
+    service = CodexNeoActivityLogService(log_path=log_path, now=lambda: now)
+    service.append("codex_lb", "old event")
+
+    now += timedelta(hours=24, seconds=1)
+
+    assert service.read() == ""
+
+
+def test_activity_append_does_not_rewrite_the_full_log(tmp_path, monkeypatch) -> None:
+    log_path = tmp_path / "codexneo-activity.log"
+    service = CodexNeoActivityLogService(log_path=log_path)
+    atomic_writes = 0
+
+    def record_atomic_write(path, text) -> None:
+        nonlocal atomic_writes
+        atomic_writes += 1
+
+    monkeypatch.setattr("app.modules.codexneo.activity_log.write_text_atomic", record_atomic_write)
+
+    service.append("codex_lb", "Request routed -> 200")
+
+    assert atomic_writes == 0
 
 
 def test_activity_log_respects_saved_stream_settings(tmp_path) -> None:
@@ -78,3 +119,16 @@ def test_activity_log_respects_saved_stream_settings(tmp_path) -> None:
 
     assert "Management API" not in contents
     assert "OpenAI API GET /v1/models -> 200" in contents
+
+
+def test_combined_activity_records_every_safe_component_event(tmp_path) -> None:
+    service = CodexNeoActivityLogService(log_path=tmp_path / "activity.log", respect_settings=False)
+
+    service.append("codex_lb", "Request routed -> 200")
+    service.append("codexneo", "Backup saved")
+    service.append("provider", "Provider auth ingested")
+
+    contents = service.read()
+    assert "[codex_lb] Request routed -> 200" in contents
+    assert "[codexneo] Backup saved" in contents
+    assert "[provider] Provider auth ingested" in contents

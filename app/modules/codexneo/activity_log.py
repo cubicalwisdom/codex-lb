@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime
+from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,7 +14,8 @@ _SENSITIVE_SEGMENT_PATTERN = re.compile(
     r"(^|;)\s*[^;]*(authorization|access_token|refresh_token|id_token|api[_ -]?key|buyer[_ -]?token)[^;]*",
     re.IGNORECASE,
 )
-MAX_ACTIVITY_LOG_LINES = 1000
+ACTIVITY_RETENTION = timedelta(days=1)
+ACTIVITY_PRUNE_INTERVAL = timedelta(minutes=5)
 
 
 def default_activity_log_path() -> Path:
@@ -31,12 +33,15 @@ class CodexNeoActivityLogService:
         log_path: Path | None = None,
         settings_path: Path | None = None,
         respect_settings: bool | None = None,
+        now: Callable[[], datetime] = datetime.now,
     ) -> None:
         self._log_path = log_path or default_activity_log_path()
         self._settings_path = settings_path or default_activity_settings_path()
         self._respect_settings = (
             (log_path is None or settings_path is not None) if respect_settings is None else respect_settings
         )
+        self._now = now
+        self._last_pruned_at: datetime | None = None
 
     @property
     def log_path(self) -> Path:
@@ -45,6 +50,7 @@ class CodexNeoActivityLogService:
     def read(self) -> str:
         if not self._log_path.exists():
             return ""
+        self.prune(force=True)
         return self._log_path.read_text(encoding="utf-8")
 
     def append(self, stream: str, message: str) -> None:
@@ -53,12 +59,20 @@ class CodexNeoActivityLogService:
         safe_message = _sanitize_message(message)
         if not safe_message:
             return
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        line = f"[{timestamp}] {safe_message}\n"
+        timestamp = self._now().isoformat(timespec="seconds")
+        line = f"[{timestamp}] [{stream}] {safe_message}\n"
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         with self._log_path.open("a", encoding="utf-8") as handle:
             handle.write(line)
-        _retain_latest_lines(self._log_path, MAX_ACTIVITY_LOG_LINES)
+
+    def prune(self, *, force: bool = False) -> None:
+        if not self._log_path.exists():
+            return
+        now = self._now()
+        if not force and self._last_pruned_at is not None and now - self._last_pruned_at < ACTIVITY_PRUNE_INTERVAL:
+            return
+        _retain_recent_lines(self._log_path, now=now)
+        self._last_pruned_at = now
 
     def clear(self) -> None:
         try:
@@ -101,8 +115,27 @@ def write_text_atomic(path: Path, text: str) -> None:
     tmp_path.replace(path)
 
 
-def _retain_latest_lines(path: Path, max_lines: int) -> None:
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    if len(lines) <= max_lines:
+def _retain_recent_lines(path: Path, *, now: datetime) -> None:
+    cutoff = now - ACTIVITY_RETENTION
+    with path.open("r", encoding="utf-8") as handle:
+        first_timestamp = _timestamp_from_line(handle.readline())
+    if first_timestamp is not None and first_timestamp >= cutoff:
         return
-    write_text_atomic(path, "".join(lines[-max_lines:]))
+    retained: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+        timestamp = _timestamp_from_line(line)
+        if timestamp is not None and timestamp >= cutoff:
+            retained.append(line)
+    write_text_atomic(path, "".join(retained))
+
+
+def _timestamp_from_line(line: str) -> datetime | None:
+    if not line.startswith("["):
+        return None
+    end = line.find("]")
+    if end <= 1:
+        return None
+    try:
+        return datetime.fromisoformat(line[1:end])
+    except ValueError:
+        return None

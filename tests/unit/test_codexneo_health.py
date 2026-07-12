@@ -104,7 +104,9 @@ async def test_codexneo_health_reports_safe_badges_and_counts(tmp_path) -> None:
     assert by_key["codex_home"].copy_value == str(codex_home.resolve())
     assert by_key["codex_registry"].detail == "2 registry account(s), 1 auth snapshot(s)"
     assert by_key["backup_store"].detail == "1 backup account(s), 1 auth snapshot(s)"
-    assert by_key["accounts_sync"].detail == "2 CodexNeo account(s), 2 Codex IB account(s)"
+    assert by_key["accounts_sync"].label == "Shared account pool"
+    assert by_key["accounts_sync"].message == "2 managed account(s)"
+    assert by_key["accounts_sync"].detail == "Canonical source for Codex LB routing and CodexNeo."
     assert by_key["activity_log"].message == "OpenAI log on, Management log off"
     assert by_key["codexgo_auth"].message == "Buyer credential saved, auto-refresh every 30 min"
     assert by_key["openai_bridge"].copy_value == "http://127.0.0.1:2455/backend-api/codex"
@@ -131,11 +133,12 @@ async def test_codexneo_health_degrades_without_registry_or_accounts_db(tmp_path
     assert by_key["codex_home"].status == "error"
     assert by_key["codex_registry"].status == "warning"
     assert by_key["accounts_sync"].status == "warning"
-    assert by_key["accounts_sync"].message == "Codex IB account count unavailable"
+    assert by_key["accounts_sync"].message == "Managed-pool count unavailable"
 
 
 @pytest.mark.asyncio
-async def test_codexneo_health_reports_mismatch_when_codex_ib_has_extra_accounts(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_codexneo_health_reports_the_canonical_pool_without_comparing_live_snapshots(tmp_path) -> None:
     codex_home = tmp_path / "codex-home"
     accounts_dir = codex_home / "accounts"
     accounts_dir.mkdir(parents=True)
@@ -147,20 +150,20 @@ async def test_codexneo_health_reports_mismatch_when_codex_ib_has_extra_accounts
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    async def count_extra_accounts() -> int:
-        return 2
+    async def count_canonical_pool() -> int:
+        return 10
 
     result = await CodexNeoHealthService(
         codex_home=codex_home,
         data_dir=data_dir,
-        accounts_count_provider=count_extra_accounts,
+        accounts_count_provider=count_canonical_pool,
     ).health()
 
-    accounts_sync = {item.key: item for item in result.items}["accounts_sync"]
-    assert result.overall_status == "error"
-    assert accounts_sync.status == "error"
-    assert accounts_sync.message == "Mismatch"
-    assert accounts_sync.detail == "1 CodexNeo account(s), 2 Codex IB account(s)"
+    pool = {item.key: item for item in result.items}["accounts_sync"]
+    assert pool.label == "Shared account pool"
+    assert pool.status == "ok"
+    assert pool.message == "10 managed account(s)"
+    assert pool.detail == "Canonical source for Codex LB routing and CodexNeo."
 
 
 @pytest.mark.asyncio
@@ -189,8 +192,8 @@ async def test_codexneo_health_counts_root_auth_and_backup_duplicate_once(tmp_pa
 
     accounts_sync = {item.key: item for item in result.items}["accounts_sync"]
     assert accounts_sync.status == "ok"
-    assert accounts_sync.message == "Counts aligned"
-    assert accounts_sync.detail == "1 CodexNeo account(s), 1 Codex IB account(s)"
+    assert accounts_sync.message == "1 managed account(s)"
+    assert accounts_sync.detail == "Canonical source for Codex LB routing and CodexNeo."
 
 
 @pytest.mark.asyncio

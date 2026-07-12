@@ -7,7 +7,6 @@ from fastapi import FastAPI, Request
 from starlette.responses import Response
 
 from app.modules.codexneo.activity_log import CodexNeoActivityLogService
-from app.modules.codexneo.service import CodexNeoService
 
 
 def add_codexneo_activity_log_middleware(app: FastAPI) -> None:
@@ -23,21 +22,13 @@ async def _append_activity_summary(request: Request, response: Response, *, elap
     path = request.url.path
     if path.startswith("/api/codexneo/activity-log"):
         return
-    try:
-        settings = await CodexNeoService().get_settings()
-    except Exception:
-        return
     if path.startswith("/v1/"):
-        if not settings.openai_activity_log_enabled:
-            return
-        label = "OpenAI API"
-        stream = "openai"
+        label = "Codex LB"
+        stream = "codex_lb"
     elif path.startswith("/api/"):
-        if not settings.management_activity_log_enabled:
-            return
-        label = "Management API"
-        stream = "management"
+        label = "CodexNeo" if path.startswith("/api/codexneo/") else "Codex LB"
+        stream = "codexneo" if path.startswith("/api/codexneo/") else "codex_lb"
     else:
         return
     message = f"{label} {request.method} {path} -> {response.status_code}; {int(elapsed_ms)}ms."
-    CodexNeoActivityLogService().append(stream, message)
+    CodexNeoActivityLogService(respect_settings=False).append(stream, message)
