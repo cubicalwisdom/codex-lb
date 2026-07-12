@@ -12,10 +12,12 @@ import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences"
 
 import { DashboardPage } from "./dashboard-page";
 
-const { accountCardsSpy, accountListSpy, accountSummaryLineSpy } = vi.hoisted(() => ({
+const { accountCardsSpy, accountListSpy, accountSummaryLineSpy, pauseMutationSpy, resumeMutationSpy } = vi.hoisted(() => ({
   accountCardsSpy: vi.fn(),
   accountListSpy: vi.fn(),
   accountSummaryLineSpy: vi.fn(),
+  pauseMutationSpy: vi.fn(),
+  resumeMutationSpy: vi.fn(),
 }));
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
@@ -36,15 +38,15 @@ vi.mock("@/features/dashboard/utils", () => ({
 }));
 
 vi.mock("@/features/dashboard/components/account-cards", () => ({
-  AccountCards: ({ accounts }: { accounts: Array<{ accountId: string }> }) => {
-    accountCardsSpy(accounts);
+  AccountCards: ({ accounts, onAction }: { accounts: Array<{ accountId: string }>; onAction: (account: { accountId: string }, action: string) => void }) => {
+    accountCardsSpy(accounts, onAction);
     return <div data-testid="account-cards">Cards for {accounts.length} accounts</div>;
   },
 }));
 
 vi.mock("@/features/dashboard/components/account-list", () => ({
-  AccountList: ({ accounts }: { accounts: Array<{ accountId: string }> }) => {
-    accountListSpy(accounts);
+  AccountList: ({ accounts, onAction }: { accounts: Array<{ accountId: string }>; onAction: (account: { accountId: string }, action: string) => void }) => {
+    accountListSpy(accounts, onAction);
     return <div data-testid="account-list">List for {accounts.length} accounts</div>;
   },
 }));
@@ -95,6 +97,8 @@ describe("DashboardPage", () => {
     accountCardsSpy.mockReset();
     accountListSpy.mockReset();
     accountSummaryLineSpy.mockReset();
+    pauseMutationSpy.mockReset();
+    resumeMutationSpy.mockReset();
     useAccountMutationsMock.mockReset();
     useDashboardMock.mockReset();
     useDashboardProjectionsMock.mockReset();
@@ -111,7 +115,8 @@ describe("DashboardPage", () => {
     const overview = createDashboardOverview();
 
     useAccountMutationsMock.mockReturnValue({
-      resumeMutation: { mutateAsync: vi.fn() },
+      pauseMutation: { mutateAsync: pauseMutationSpy },
+      resumeMutation: { mutateAsync: resumeMutationSpy },
       limitWarmupMutation: { mutateAsync: vi.fn() },
     } as unknown as ReturnType<typeof useAccountMutations>);
     useDashboardMock.mockReturnValue({
@@ -198,7 +203,7 @@ describe("DashboardPage", () => {
 
     expect(screen.getByTestId("account-cards")).toHaveTextContent("Cards for 2 accounts");
     expect(screen.queryByTestId("account-list")).not.toBeInTheDocument();
-    expect(accountCardsSpy).toHaveBeenCalledWith(overview.accounts);
+    expect(accountCardsSpy).toHaveBeenCalledWith(overview.accounts, expect.any(Function));
     expect(screen.getByRole("radio", { name: "View accounts as cards" })).toHaveAttribute("aria-checked", "true");
   });
 
@@ -212,7 +217,19 @@ describe("DashboardPage", () => {
 
     expect(screen.getByTestId("account-list")).toHaveTextContent("List for 2 accounts");
     expect(screen.queryByTestId("account-cards")).not.toBeInTheDocument();
-    expect(accountListSpy).toHaveBeenCalledWith(overview.accounts);
+    expect(accountListSpy).toHaveBeenCalledWith(overview.accounts, expect.any(Function));
     expect(useDashboardPreferencesStore.getState().accountViewMode).toBe("list");
+  });
+
+  it("routes dashboard pause and resume actions to their account mutations", () => {
+    const overview = mockReadyDashboard();
+    renderWithProviders(<DashboardPage />);
+    const onAction = accountCardsSpy.mock.calls[0][1] as (account: (typeof overview.accounts)[number], action: string) => void;
+
+    onAction(overview.accounts[0], "pause");
+    onAction(overview.accounts[1], "resume");
+
+    expect(pauseMutationSpy).toHaveBeenCalledWith(overview.accounts[0].accountId);
+    expect(resumeMutationSpy).toHaveBeenCalledWith(overview.accounts[1].accountId);
   });
 });

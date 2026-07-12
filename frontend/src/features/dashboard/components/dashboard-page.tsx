@@ -49,7 +49,7 @@ export function DashboardPage() {
   const dashboardQuery = useDashboard(overviewTimeframe);
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
-  const { resumeMutation, limitWarmupMutation } = useAccountMutations();
+  const { pauseMutation, resumeMutation, limitWarmupMutation } = useAccountMutations();
 
   const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || logsQuery.isFetching;
 
@@ -81,6 +81,11 @@ export function DashboardPage() {
             void resumeMutation.mutateAsync(account.accountId);
           }
           break;
+        case "pause":
+          if (canWrite) {
+            void pauseMutation.mutateAsync(account.accountId);
+          }
+          break;
         case "reauth":
           navigate(`/accounts?selected=${account.accountId}`);
           break;
@@ -94,7 +99,7 @@ export function DashboardPage() {
           break;
       }
     },
-    [canWrite, limitWarmupMutation, navigate, resumeMutation],
+    [canWrite, limitWarmupMutation, navigate, pauseMutation, resumeMutation],
   );
 
   const overview = dashboardQuery.data;

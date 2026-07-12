@@ -1,5 +1,6 @@
 import { act, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AccountCard } from "@/features/dashboard/components/account-card";
 import { usePrivacyStore } from "@/hooks/use-privacy";
@@ -107,5 +108,36 @@ describe("AccountCard", () => {
     render(<AccountCard account={account} readOnly />);
 
     expect(screen.getByRole("button", { name: "Enable limit warm-up for Read Only Account" })).toBeDisabled();
+  });
+
+  it.each(["active", "rate_limited", "quota_exceeded"])(
+    "pauses an eligible %s account from its card",
+    async (status) => {
+      const user = userEvent.setup();
+      const onAction = vi.fn();
+      const account = createAccountSummary({ displayName: "Eligible Account", status });
+      render(<AccountCard account={account} onAction={onAction} />);
+
+      await user.click(screen.getByRole("button", { name: "Pause Eligible Account" }));
+
+      expect(onAction).toHaveBeenCalledWith(account, "pause");
+    },
+  );
+
+  it("resumes a paused account from its card", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const account = createAccountSummary({ displayName: "Paused Account", status: "paused" });
+    render(<AccountCard account={account} onAction={onAction} />);
+
+    await user.click(screen.getByRole("button", { name: "Resume Paused Account" }));
+
+    expect(onAction).toHaveBeenCalledWith(account, "resume");
+  });
+
+  it.each(["reauth_required", "deactivated"])("does not pause or resume a %s account", (status) => {
+    render(<AccountCard account={createAccountSummary({ displayName: "Blocked Account", status })} />);
+
+    expect(screen.queryByRole("button", { name: /^(Pause|Resume) Blocked Account$/ })).not.toBeInTheDocument();
   });
 });

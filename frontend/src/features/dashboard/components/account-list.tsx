@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, ArrowUpDown, Clock, ExternalLink, List, Play, RotateCcw, Zap } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Clock, ExternalLink, List, Pause, Play, RotateCcw, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { EmptyState } from "@/components/empty-state";
@@ -365,6 +365,20 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                 >
                   <Zap className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
+                {status === "active" || status === "limited" || status === "exceeded" ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 w-7 rounded-md p-0 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+                    aria-label={`Pause ${title}`}
+                    title="Pause"
+                    disabled={readOnly}
+                    onClick={() => onAction?.(account, "pause")}
+                  >
+                    <Pause className="h-3.5 w-3.5" aria-hidden="true" />
+                  </Button>
+                ) : null}
                 {status === "paused" ? (
                   <Button
                     type="button"

@@ -68,6 +68,26 @@ describe("AccountList", () => {
     expect(onAction).toHaveBeenNthCalledWith(3, account, "resume");
   });
 
+  it.each(["active", "rate_limited", "quota_exceeded"])(
+    "pauses an eligible %s account from the list",
+    async (status) => {
+      const user = userEvent.setup();
+      const onAction = vi.fn();
+      const account = createAccountSummary({ displayName: "Eligible Account", status });
+      render(<AccountList accounts={[account]} onAction={onAction} />);
+
+      await user.click(screen.getByRole("button", { name: "Pause Eligible Account" }));
+
+      expect(onAction).toHaveBeenCalledWith(account, "pause");
+    },
+  );
+
+  it.each(["reauth_required", "deactivated"])("does not pause or resume a %s list account", (status) => {
+    render(<AccountList accounts={[createAccountSummary({ displayName: "Blocked Account", status })]} />);
+
+    expect(screen.queryByRole("button", { name: /^(Pause|Resume) Blocked Account$/ })).not.toBeInTheDocument();
+  });
+
   it("blurs list identity text when privacy mode is enabled", () => {
     act(() => {
       usePrivacyStore.setState({ blurred: true });

@@ -1,4 +1,4 @@
-import { Clock, ExternalLink, Play, RotateCcw, Zap } from "lucide-react";
+import { Clock, ExternalLink, Pause, Play, RotateCcw, Zap } from "lucide-react";
 
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { Button } from "@/components/ui/button";
@@ -13,7 +13,7 @@ import {
 } from "@/utils/account-status";
 import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
 
-export type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle";
+export type AccountAction = "details" | "pause" | "resume" | "reauth" | "warmup-toggle";
 
 export type AccountCardProps = {
   account: AccountSummary;
@@ -184,12 +184,27 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           <ExternalLink className="h-3 w-3" />
           Details
         </Button>
+        {(status === "active" || status === "limited" || status === "exceeded") && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-7 gap-1.5 rounded-lg text-xs text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+            aria-label={`Pause ${title}`}
+            disabled={readOnly}
+            onClick={() => onAction?.(account, "pause")}
+          >
+            <Pause className="h-3 w-3" />
+            Pause
+          </Button>
+        )}
         {status === "paused" && (
           <Button
             type="button"
             size="sm"
             variant="ghost"
             className="h-7 gap-1.5 rounded-lg text-xs text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-300"
+            aria-label={`Resume ${title}`}
             disabled={readOnly}
             onClick={() => onAction?.(account, "resume")}
           >
