@@ -7,7 +7,6 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
-  ScrollText,
   ShieldCheck,
   TestTubeDiagonal,
   Minus,
@@ -42,6 +41,7 @@ import type {
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 import { applyAccountSelectionRange } from "./account-selection";
+import { CodexNeoActivityPage } from "./codexneo-activity-page";
 
 const DEFAULT_INTERVAL_MINUTES = 30;
 const DEFAULT_CODEX_HOME_REFRESH_SECONDS = 30;
@@ -51,6 +51,7 @@ type AccountSortKey = "number" | "plan" | "fiveHour" | "weekly" | "availability"
 type AccountSortDirection = "asc" | "desc";
 type AccountSortState = { key: AccountSortKey; direction: AccountSortDirection } | null;
 type AccountTableRow = { account: CodexNeoAccountRow; sourceNumber: number };
+type CodexNeoView = "accounts" | "activity";
 
 export function CodexNeoPage() {
   const canWrite = useAuthStore((state) => state.canWrite);
@@ -73,11 +74,8 @@ export function CodexNeoPage() {
     openCodexHomeMutation,
     openDataFolderMutation,
     restartCodexMutation,
-    importFileMutation,
-    importFileUploadMutation,
     importFolderMutation,
     importFolderUploadMutation,
-    exportAllMutation,
     exportSelectedMutation,
     refreshSelectedMutation,
     syncAccountsMutation,
@@ -96,11 +94,11 @@ export function CodexNeoPage() {
   const [codexApiBaseUrlOverride, setCodexApiBaseUrlOverride] = useState<string | null>(null);
   const [codexgoApiBaseUrlOverride, setCodexgoApiBaseUrlOverride] = useState<string | null>(null);
   const [codexHomePathOverride, setCodexHomePathOverride] = useState<string | null>(null);
-  const [fileOperationPath, setFileOperationPath] = useState("");
+  const [activeView, setActiveView] = useState<CodexNeoView>("accounts");
+  const [importFolderPath, setImportFolderPath] = useState("");
+  const [exportDestination, setExportDestination] = useState("");
   const [selectedAccountKeys, setSelectedAccountKeys] = useState<string[]>([]);
   const [autoRefreshEnabledOverride, setAutoRefreshEnabledOverride] = useState<boolean | null>(null);
-  const [openaiLogEnabledOverride, setOpenaiLogEnabledOverride] = useState<boolean | null>(null);
-  const [managementLogEnabledOverride, setManagementLogEnabledOverride] = useState<boolean | null>(null);
   const [intervalMinutesOverride, setIntervalMinutesOverride] = useState<number | null>(null);
   const [buyerToken, setBuyerToken] = useState("");
   const [accountsRefreshFeedback, setAccountsRefreshFeedback] = useState<string | null>(null);
@@ -115,7 +113,6 @@ export function CodexNeoPage() {
   const [minimizeToTrayEnabledOverride, setMinimizeToTrayEnabledOverride] = useState<boolean | null>(null);
   const [startWithWindowsEnabledOverride, setStartWithWindowsEnabledOverride] = useState<boolean | null>(null);
   const [autoSyncFeedback, setAutoSyncFeedback] = useState<string | null>(null);
-  const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const importFolderInputRef = useRef<HTMLInputElement | null>(null);
   const lastSelectedAccountKeyRef = useRef<string | null>(null);
   const shiftRangeSelectActiveRef = useRef(false);
@@ -126,8 +123,6 @@ export function CodexNeoPage() {
   const codexgoApiBaseUrl = codexgoApiBaseUrlOverride ?? settings?.codexgoApiBaseUrl ?? "";
   const codexHomePath = codexHomePathOverride ?? codexHome?.codexHome ?? "";
   const autoRefreshEnabled = autoRefreshEnabledOverride ?? settings?.codexgoAutoRefreshEnabled ?? false;
-  const openaiLogEnabled = openaiLogEnabledOverride ?? settings?.openaiActivityLogEnabled ?? false;
-  const managementLogEnabled = managementLogEnabledOverride ?? settings?.managementActivityLogEnabled ?? false;
   const intervalMinutes = intervalMinutesOverride ?? settings?.codexgoAutoRefreshIntervalMinutes ?? DEFAULT_INTERVAL_MINUTES;
   const electronApi = typeof window === "undefined" ? undefined : window.codexIbElectron;
   const electronControlsAvailable = Boolean(electronApi?.minimizeToTray);
@@ -163,11 +158,8 @@ export function CodexNeoPage() {
     openCodexHomeMutation.isPending ||
     openDataFolderMutation.isPending ||
     restartCodexMutation.isPending ||
-    importFileMutation.isPending ||
-    importFileUploadMutation.isPending ||
     importFolderMutation.isPending ||
     importFolderUploadMutation.isPending ||
-    exportAllMutation.isPending ||
     exportSelectedMutation.isPending ||
     refreshSelectedMutation.isPending ||
     syncAccountsMutation.isPending ||
@@ -189,8 +181,6 @@ export function CodexNeoPage() {
       codexgoApiBaseUrl,
       codexgoAutoRefreshEnabled: autoRefreshEnabled,
       codexgoAutoRefreshIntervalMinutes: intervalMinutes,
-      openaiActivityLogEnabled: openaiLogEnabled,
-      managementActivityLogEnabled: managementLogEnabled,
       codexHomeAutoRefreshEnabled,
       codexHomeAutoRefreshIntervalSeconds: clampCodexHomeRefreshSeconds(codexHomeRefreshSeconds),
       codexHomeAutoSyncEnabled,
@@ -214,9 +204,7 @@ export function CodexNeoPage() {
     codexHomeRefreshSeconds,
     codexgoApiBaseUrl,
     intervalMinutes,
-    managementLogEnabled,
     minimizeToTrayEnabled,
-    openaiLogEnabled,
     startWithWindowsEnabled,
   ]);
 
@@ -351,25 +339,12 @@ export function CodexNeoPage() {
     });
     lastSelectedAccountKeyRef.current = accountKey;
   };
-  const runImportFile = async () => {
-    if (fileOperationPath.trim()) {
-      await importFileMutation.mutateAsync({ path: fileOperationPath });
-      return;
-    }
-    importFileInputRef.current?.click();
-  };
   const runImportFolder = async () => {
-    if (fileOperationPath.trim()) {
-      await importFolderMutation.mutateAsync({ path: fileOperationPath });
+    if (importFolderPath.trim()) {
+      await importFolderMutation.mutateAsync({ path: importFolderPath });
       return;
     }
     importFolderInputRef.current?.click();
-  };
-  const handleImportFileSelected = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.currentTarget.files?.[0];
-    event.currentTarget.value = "";
-    if (!file) return;
-    await importFileUploadMutation.mutateAsync({ file });
   };
   const handleImportFolderSelected = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.currentTarget.files ?? []).filter((file) => {
@@ -470,10 +445,28 @@ export function CodexNeoPage() {
     });
   };
 
+  if (activeView === "activity") {
+    return (
+      <div className="animate-fade-in-up space-y-6">
+        <PageHeader />
+        <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
+        {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
+        <CodexNeoActivityPage
+          contents={activityLog?.contents ?? ""}
+          disabled={controlsDisabled}
+          onRefresh={() => activityLogQuery.refetch()}
+          onClear={() => clearActivityLogMutation.mutateAsync()}
+        />
+        <LoadingOverlay visible={busy} label="Refreshing CodexNeo activity..." />
+      </div>
+    );
+  }
+
   if (!settings) {
     return (
       <div className="animate-fade-in-up space-y-6">
         <PageHeader />
+        <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
         {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
         <LoadingOverlay visible label="Loading CodexNeo..." />
       </div>
@@ -483,6 +476,7 @@ export function CodexNeoPage() {
   return (
     <div className="animate-fade-in-up space-y-6">
       <PageHeader />
+      <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
 
       {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
       {!canWrite ? (
@@ -579,14 +573,14 @@ export function CodexNeoPage() {
             type="button"
             disabled={controlsDisabled}
             onClick={() => setApiMutation.mutateAsync({ codexApiBaseUrl })}
-            className="gap-2"
+            className="gap-2 bg-emerald-600 text-white hover:bg-emerald-700"
           >
             <Zap className="h-4 w-4" aria-hidden="true" />
             Auth-&gt;API Set
           </Button>
           <Button
             type="button"
-            variant="outline"
+            variant="destructive"
             disabled={controlsDisabled}
             onClick={() => revertApiMutation.mutateAsync()}
             className="gap-2"
@@ -615,28 +609,6 @@ export function CodexNeoPage() {
             />
             <Label htmlFor="codexgo-refresh-enabled" className="whitespace-nowrap">
               CodexGO API refresh
-            </Label>
-          </div>
-          <div className="flex h-10 items-center gap-2">
-            <Switch
-              id="codexneo-openai-log-enabled"
-              checked={openaiLogEnabled}
-              disabled={controlsDisabled}
-              onCheckedChange={setOpenaiLogEnabledOverride}
-            />
-            <Label htmlFor="codexneo-openai-log-enabled" className="whitespace-nowrap">
-              OpenAI log
-            </Label>
-          </div>
-          <div className="flex h-10 items-center gap-2">
-            <Switch
-              id="codexneo-management-log-enabled"
-              checked={managementLogEnabled}
-              disabled={controlsDisabled}
-              onCheckedChange={setManagementLogEnabledOverride}
-            />
-            <Label htmlFor="codexneo-management-log-enabled" className="whitespace-nowrap">
-              Management log
             </Label>
           </div>
           <div className="space-y-1.5">
@@ -689,7 +661,10 @@ export function CodexNeoPage() {
       <section className="space-y-4 rounded-lg border border-border/70 bg-background/60 p-4">
         <div className="flex items-center gap-2">
           <ListChecks className="h-4 w-4 text-primary" aria-hidden="true" />
-          <h2 className="text-base font-semibold">Codex Home Accounts</h2>
+          <div>
+            <h2 className="text-base font-semibold">Shared account pool</h2>
+            <p className="text-xs text-muted-foreground">The same canonical accounts used by Codex LB routing.</p>
+          </div>
         </div>
         <div
           data-testid="codex-home-account-controls"
@@ -802,15 +777,7 @@ export function CodexNeoPage() {
             {autoSyncFeedback}
           </p>
         ) : null}
-        <div className="grid gap-3 xl:grid-cols-[1fr_auto_auto_auto_auto] xl:items-end">
-          <input
-            ref={importFileInputRef}
-            aria-label="Choose import file"
-            type="file"
-            accept="application/json,.json"
-            className="sr-only"
-            onChange={handleImportFileSelected}
-          />
+        <div className="grid gap-3 rounded-md border border-border/70 p-3 xl:grid-cols-2 xl:items-end">
           <input
             ref={importFolderInputRef}
             aria-label="Choose import folder"
@@ -821,27 +788,36 @@ export function CodexNeoPage() {
             {...directoryInputAttributes}
           />
           <div className="space-y-1.5">
-            <Label htmlFor="codexneo-file-path">Import/export path</Label>
-            <Input
-              id="codexneo-file-path"
-              value={fileOperationPath}
-              disabled={controlsDisabled}
-              onChange={(event) => setFileOperationPath(event.target.value)}
-              placeholder="Optional local path"
-            />
+            <Label htmlFor="codexneo-import-folder-path">Import folder path</Label>
+            <div className="flex gap-2">
+              <Input
+                id="codexneo-import-folder-path"
+                value={importFolderPath}
+                disabled={controlsDisabled}
+                onChange={(event) => setImportFolderPath(event.target.value)}
+                placeholder="Folder containing auth JSON files"
+              />
+              <Button type="button" variant="outline" disabled={controlsDisabled} onClick={runImportFolder}>
+                Import folder
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Every valid JSON identity is ingested into the shared pool and receives a managed backup snapshot.
+            </p>
           </div>
-          <Button type="button" variant="outline" disabled={controlsDisabled} onClick={runImportFile}>
-            Import file
-          </Button>
-          <Button type="button" variant="outline" disabled={controlsDisabled} onClick={runImportFolder}>
-            Import folder
-          </Button>
-          <Button type="button" variant="outline" disabled={controlsDisabled} onClick={() => exportAllMutation.mutateAsync({ path: fileOperationPath })}>
-            Export all
-          </Button>
-          <Button type="button" variant="outline" disabled={controlsDisabled || selectedAccounts.length === 0} onClick={() => exportSelectedMutation.mutateAsync({ accountKeys: selectedAccounts })}>
-            Export selected
-          </Button>
+          <div className="space-y-1.5">
+            <Label htmlFor="codexneo-export-destination">Export destination</Label>
+            <Input
+              id="codexneo-export-destination"
+              value={exportDestination}
+              disabled={controlsDisabled}
+              onChange={(event) => setExportDestination(event.target.value)}
+              placeholder="Folder that will receive selected account files"
+            />
+            <p className="text-xs text-muted-foreground">
+              Export selected writes one auth file for each checked pool account into a new timestamped folder here.
+            </p>
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-4">
           <label className="flex items-center gap-2 text-sm">
@@ -872,10 +848,19 @@ export function CodexNeoPage() {
             type="button"
             variant="outline"
             size="sm"
-            disabled={controlsDisabled || visibleAccountKeys.length === 0}
-            onClick={() => setSelectedAccountKeys(allVisibleAccountsSelected ? [] : visibleAccountKeys)}
+            disabled={controlsDisabled || visibleAccountKeys.length === 0 || allVisibleAccountsSelected}
+            onClick={() => setSelectedAccountKeys(visibleAccountKeys)}
           >
-            {allVisibleAccountsSelected ? "Unselect all" : "Select all"}
+            Select all
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={controlsDisabled || selectedAccounts.length === 0}
+            onClick={() => setSelectedAccountKeys([])}
+          >
+            Clear selection
           </Button>
           <div className="flex h-9 items-center gap-2">
             <Switch
@@ -896,7 +881,7 @@ export function CodexNeoPage() {
               onCheckedChange={setPersistentAutoDeleteQuotaExceededEnabled}
             />
             <Label htmlFor="codexneo-auto-delete-quota-exceeded" className="whitespace-nowrap text-sm">
-              Auto delete quota exceeded
+              Auto delete when weekly remaining = 0%
             </Label>
           </div>
         </div>
@@ -908,7 +893,28 @@ export function CodexNeoPage() {
           >
             Refresh selected
           </Button>
-          <Button type="button" variant="destructive" disabled={controlsDisabled || selectedAccounts.length === 0} onClick={() => deleteAccountsMutation.mutateAsync({ accountKeys: selectedAccounts })}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={controlsDisabled || selectedAccounts.length === 0}
+            onClick={() => exportSelectedMutation.mutateAsync({
+              accountKeys: selectedAccounts,
+              path: exportDestination.trim() || undefined,
+            })}
+          >
+            Export selected
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={controlsDisabled || selectedAccounts.length === 0}
+            onClick={() => {
+              const confirmed = window.confirm(
+                `Delete ${selectedAccounts.length} selected account(s)? This removes only their managed credentials and snapshots; usage statistics remain.`,
+              );
+              if (confirmed) void deleteAccountsMutation.mutateAsync({ accountKeys: selectedAccounts });
+            }}
+          >
             Delete selected
           </Button>
         </div>
@@ -957,30 +963,6 @@ export function CodexNeoPage() {
         </div>
       </section>
 
-      <section className="space-y-3 rounded-lg border border-border/70 bg-background/60 p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <ScrollText className="h-4 w-4 text-primary" aria-hidden="true" />
-            <h2 className="text-base font-semibold">Activity log</h2>
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={controlsDisabled}
-            onClick={() => clearActivityLogMutation.mutateAsync()}
-          >
-            Clear
-          </Button>
-        </div>
-        <pre
-          data-testid="codexneo-activity-log"
-          className="max-h-80 min-h-52 overflow-auto rounded-md bg-slate-950 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-slate-100"
-        >
-          {activityLog?.contents || "No activity logged yet."}
-        </pre>
-      </section>
-
       <LoadingOverlay visible={busy} label="Applying CodexNeo changes..." />
     </div>
   );
@@ -994,6 +976,25 @@ function PageHeader() {
         CodexNeo
       </h1>
     </div>
+  );
+}
+
+function CodexNeoTabs({ activeView, onChange }: { activeView: CodexNeoView; onChange: (view: CodexNeoView) => void }) {
+  return (
+    <nav role="tablist" aria-label="CodexNeo pages" className="flex gap-2 border-b border-border/70 pb-3">
+      {(["accounts", "activity"] as const).map((view) => (
+        <Button
+          key={view}
+          type="button"
+          role="tab"
+          aria-selected={activeView === view}
+          variant={activeView === view ? "default" : "outline"}
+          onClick={() => onChange(view)}
+        >
+          {view === "accounts" ? "Accounts" : "Activity"}
+        </Button>
+      ))}
+    </nav>
   );
 }
 

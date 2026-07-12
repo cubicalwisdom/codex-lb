@@ -67,7 +67,7 @@ class CodexNeoAccountLocationService:
     def set_bulk_default(self, *, location: LocationName, present: bool) -> CodexNeoActionResponse:
         accounts = [
             row["account_key"]
-            for row in self.all_account_rows()
+            for row in self._logical_account_rows()
             if bool(row.get(location)) != present
         ]
         result = (
@@ -84,7 +84,7 @@ class CodexNeoAccountLocationService:
             return CodexNeoActionResponse(success=True, message="No bulk defaults were enabled")
         keys = [
             row["account_key"]
-            for row in self.all_account_rows()
+            for row in self._logical_account_rows()
             if row.get("codex") and not row.get("backup")
         ]
         result = (
@@ -97,7 +97,7 @@ class CodexNeoAccountLocationService:
 
     def refresh_bulk_states(self) -> dict[str, Any]:
         settings = self.location_settings()
-        rows = self.all_account_rows()
+        rows = self._logical_account_rows()
         settings["codex_all_enabled"] = _bulk_enabled(rows, "codex")
         settings["backup_all_enabled"] = _bulk_enabled(rows, "backup")
         settings["manual_codex_disabled"] = []
@@ -224,6 +224,34 @@ class CodexNeoAccountLocationService:
             rows.append(merged)
         return rows
 
+    def _logical_account_rows(self) -> list[dict[str, Any]]:
+        rows: dict[tuple[str, ...], dict[str, Any]] = {}
+        order: list[tuple[str, ...]] = []
+        live_dir = self._live_accounts_dir()
+        backup_dir = self._backup_dir
+        for row in self.all_account_rows():
+            key = str(row.get("account_key") or "").strip()
+            if not key:
+                continue
+            identity = _identity_for_key(
+                key,
+                live_row=row if row.get("codex") else None,
+                backup_row=row if row.get("backup") else None,
+                live_dir=live_dir,
+                backup_dir=backup_dir,
+            )
+            current = rows.get(identity)
+            if current is None:
+                rows[identity] = dict(row)
+                order.append(identity)
+                continue
+            prefer_incoming = bool(row.get("codex")) and not bool(current.get("codex"))
+            preferred = dict(row if prefer_incoming else current)
+            preferred["codex"] = bool(current.get("codex")) or bool(row.get("codex"))
+            preferred["backup"] = bool(current.get("backup")) or bool(row.get("backup"))
+            rows[identity] = preferred
+        return [rows[identity] for identity in order]
+
     def _set_location(self, keys: list[str], *, location: LocationName, present: bool) -> CodexNeoActionResponse:
         if location == "backup":
             return self._set_backup_presence(keys, present=present)
@@ -297,6 +325,12 @@ class CodexNeoAccountLocationService:
             source = existing_snapshot_path(self._live_accounts_dir(), key)
             row = live_map.get(key)
             if row is None or source is None:
+                root_row = _root_auth_row(self._codex_home)
+                root_auth_path = self._codex_home / "auth.json"
+                if root_row is not None and root_row.get("account_key") == key and root_auth_path.is_file():
+                    row = root_row
+                    source = root_auth_path
+            if row is None or source is None:
                 skipped += 1
                 continue
             identity = _identity_for_key(
@@ -312,7 +346,7 @@ class CodexNeoAccountLocationService:
                 source_identity=identity,
                 backup_dir=self._backup_dir,
             )
-            _upsert_account(backup_root, row)
+            _upsert_account(backup_root, _stable_backup_row(row))
             _snapshot_path(self._backup_dir, key).write_bytes(source.read_bytes())
             changed += 1
         self._save_or_delete_backup_registry(backup_root)
@@ -409,6 +443,11 @@ class CodexNeoAccountLocationService:
 
     def _save_or_delete_backup_registry(self, root: dict[str, Any]) -> None:
         root = _ensure_registry(root)
+        root["accounts"] = [
+            _stable_backup_row(account)
+            for account in root["accounts"]
+            if isinstance(account, dict)
+        ]
         self._backup_dir.mkdir(parents=True, exist_ok=True)
         if not root["accounts"]:
             try:
@@ -547,6 +586,15 @@ def _upsert_account(root: dict[str, Any], account: dict[str, Any]) -> None:
             accounts[index] = dict(account)
             return
     accounts.append(dict(account))
+
+
+def _stable_backup_row(account: dict[str, Any]) -> dict[str, Any]:
+    transient_fields = {"active", "auth_path", "backup", "codex", "codex_registered"}
+    return {
+        key: value
+        for key, value in account.items()
+        if key not in transient_fields
+    }
 
 
 def _remove_account(root: dict[str, Any], account_key: str, *, clear_active: bool) -> bool:

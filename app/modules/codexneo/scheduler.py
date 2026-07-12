@@ -28,7 +28,7 @@ class CodexGoRefreshScheduler:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._service = service or CodexNeoService()
-        self._activity_log_service = activity_log_service or CodexNeoActivityLogService()
+        self._activity_log_service = activity_log_service or CodexNeoActivityLogService(respect_settings=False)
         self._sleep = sleep
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()

@@ -239,7 +239,7 @@ async def test_sync_codex_home_snapshots_to_accounts_and_backup(tmp_path, db_set
 
 
 @pytest.mark.asyncio
-async def test_sync_codex_home_does_not_backup_live_accounts_when_backup_all_is_off(tmp_path, db_setup) -> None:
+async def test_sync_codex_home_always_creates_managed_backup_for_live_account(tmp_path, db_setup) -> None:
     del db_setup
     codex_home = tmp_path / ".codex"
     data_dir = tmp_path / "data"
@@ -253,8 +253,8 @@ async def test_sync_codex_home_does_not_backup_live_accounts_when_backup_all_is_
     assert result.success is True
     assert result.count == 1
     assert generate_unique_account_id(raw_account_id, email) in await _account_ids()
-    assert not (data_dir / "account-backups" / "live-no-backup-key.auth.json").exists()
-    assert "Backup:" not in result.message
+    assert (data_dir / "account-backups" / "live-no-backup-key.auth.json").is_file()
+    assert "Backup:" in result.message
 
 
 @pytest.mark.asyncio
@@ -272,12 +272,14 @@ async def test_sync_root_auth_json_without_managed_snapshot_to_accounts(tmp_path
 
     assert result.success is True
     assert result.count == 1
-    assert generate_unique_account_id(raw_account_id, email) in await _account_ids()
+    account_key = generate_unique_account_id(raw_account_id, email)
+    assert account_key in await _account_ids()
+    assert (data_dir / "account-backups" / f"{account_key}.auth.json").is_file()
     assert "secret-access" not in result.message
 
 
 @pytest.mark.asyncio
-async def test_codexgo_refresh_retires_previous_managed_root_account(tmp_path, db_setup) -> None:
+async def test_codexgo_refresh_preserves_previous_provider_account_in_pool(tmp_path, db_setup) -> None:
     del db_setup
     codex_home = tmp_path / ".codex"
     data_dir = tmp_path / "data"
@@ -307,15 +309,17 @@ async def test_codexgo_refresh_retires_previous_managed_root_account(tmp_path, d
     result = await service.apply_codexgo_auth(CodexGoAction.REFRESH)
 
     assert result.success is True
-    assert await _account_ids() == [generate_unique_account_id("acc_new_root", "new-root@example.com")]
     old_account_key = generate_unique_account_id("acc_old_root", "old-root@example.com")
-    assert not (codex_home / "accounts" / f"{old_account_key}.auth.json").exists()
+    new_account_key = generate_unique_account_id("acc_new_root", "new-root@example.com")
+    assert await _account_ids() == sorted([old_account_key, new_account_key])
+    assert (data_dir / "account-backups" / f"{old_account_key}.auth.json").is_file()
+    assert (data_dir / "account-backups" / f"{new_account_key}.auth.json").is_file()
     current_root = json.loads((codex_home / "auth.json").read_text(encoding="utf-8"))
     assert current_root["tokens"]["account_id"] == "acc_new_root"
     async with get_background_session() as session:
         usage_account_ids = list((await session.execute(select(UsageHistory.account_id))).scalars())
     assert usage_account_ids
-    assert set(usage_account_ids) == {None}
+    assert set(usage_account_ids) == {old_account_key}
 
 
 @pytest.mark.asyncio
@@ -391,7 +395,8 @@ async def test_codexgo_refresh_preserves_user_owned_snapshot_with_same_identity(
     await service.apply_codexgo_auth(CodexGoAction.REFRESH)
 
     assert (codex_home / "accounts" / "user-owned-key.auth.json").is_file()
-    assert (data_dir / "account-backups" / "user-owned-backup-key.auth.json").is_file()
+    snapshots = list((data_dir / "account-backups").glob("*.auth.json"))
+    assert snapshots
     assert await _account_ids() == sorted(
         [
             generate_unique_account_id("acc_shared_root", "shared-root@example.com"),
@@ -401,7 +406,7 @@ async def test_codexgo_refresh_preserves_user_owned_snapshot_with_same_identity(
 
 
 @pytest.mark.asyncio
-async def test_codexgo_refresh_retires_tracked_identity_after_manual_root_switch(tmp_path, db_setup) -> None:
+async def test_codexgo_refresh_preserves_tracked_identity_after_manual_root_switch(tmp_path, db_setup) -> None:
     del db_setup
     codex_home = tmp_path / ".codex"
     data_dir = tmp_path / "data"
@@ -431,6 +436,7 @@ async def test_codexgo_refresh_retires_tracked_identity_after_manual_root_switch
 
     assert await _account_ids() == sorted(
         [
+            generate_unique_account_id("acc_tracked_root", "tracked-root@example.com"),
             generate_unique_account_id("acc_manual_root", "manual-root@example.com"),
             generate_unique_account_id("acc_next_root", "next-root@example.com"),
         ]
@@ -438,7 +444,7 @@ async def test_codexgo_refresh_retires_tracked_identity_after_manual_root_switch
 
 
 @pytest.mark.asyncio
-async def test_codexgo_refresh_retires_no_email_identity_using_database_normalization(tmp_path, db_setup) -> None:
+async def test_codexgo_refresh_preserves_no_email_identities_using_database_normalization(tmp_path, db_setup) -> None:
     del db_setup
     codex_home = tmp_path / ".codex"
     data_dir = tmp_path / "data"
@@ -463,7 +469,7 @@ async def test_codexgo_refresh_retires_no_email_identity_using_database_normaliz
     await service.apply_codexgo_auth(CodexGoAction.USE)
     await service.apply_codexgo_auth(CodexGoAction.REFRESH)
 
-    assert await _account_ids() == ["acc_no_email_new"]
+    assert await _account_ids() == ["acc_no_email_new", "acc_no_email_old"]
 
 
 @pytest.mark.asyncio
@@ -503,7 +509,7 @@ async def test_codexgo_token_renewal_keeps_same_tracked_identity(tmp_path, db_se
 
 
 @pytest.mark.asyncio
-async def test_codexgo_retirement_failure_keeps_pending_state_for_retry(tmp_path, db_setup, monkeypatch) -> None:
+async def test_codexgo_refresh_does_not_delete_existing_accounts(tmp_path, db_setup, monkeypatch) -> None:
     del db_setup
     codex_home = tmp_path / ".codex"
     data_dir = tmp_path / "data"
@@ -526,30 +532,24 @@ async def test_codexgo_retirement_failure_keeps_pending_state_for_retry(tmp_path
     await service.update_settings(buyer_token="buyer-token")
     await service.apply_codexgo_auth(CodexGoAction.USE)
 
-    original_delete = AccountsRepository.delete
-
-    async def fail_delete_once(self, account_id: str, *, delete_history: bool = False) -> bool:
+    async def fail_if_called(self, account_id: str, *, delete_history: bool = False) -> bool:
         del self, account_id, delete_history
-        raise RuntimeError("injected retirement failure")
+        raise AssertionError("provider refresh must not delete pooled accounts")
 
-    monkeypatch.setattr(AccountsRepository, "delete", fail_delete_once)
-    with pytest.raises(RuntimeError, match="injected retirement failure"):
-        await service.apply_codexgo_auth(CodexGoAction.REFRESH)
+    monkeypatch.setattr(AccountsRepository, "delete", fail_if_called)
+    result = await service.apply_codexgo_auth(CodexGoAction.REFRESH)
 
-    pending_state = json.loads((data_dir / "codexgo-root-state.json").read_text(encoding="utf-8"))
-    assert len(pending_state["retired_identity_sha256"]) == 1
-
-    monkeypatch.setattr(AccountsRepository, "delete", original_delete)
-    retry = await account_sync.sync_codex_home_to_accounts()
-
-    assert retry.success is True
-    assert await _account_ids() == [generate_unique_account_id("acc_retry_new", "retry-new@example.com")]
-    final_state = json.loads((data_dir / "codexgo-root-state.json").read_text(encoding="utf-8"))
-    assert final_state["retired_identity_sha256"] == []
+    assert result.success is True
+    assert await _account_ids() == sorted(
+        [
+            generate_unique_account_id("acc_retry_old", "retry-old@example.com"),
+            generate_unique_account_id("acc_retry_new", "retry-new@example.com"),
+        ]
+    )
 
 
 @pytest.mark.asyncio
-async def test_sync_all_registers_root_only_account_into_codex_home(tmp_path, db_setup) -> None:
+async def test_sync_all_preserves_root_only_account_in_managed_backup(tmp_path, db_setup) -> None:
     del db_setup
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()
@@ -567,12 +567,10 @@ async def test_sync_all_registers_root_only_account_into_codex_home(tmp_path, db
 
     assert result.success is True
     import_calls = [args for args, _ in runner.calls if args and args[0] == "import"]
-    assert len(import_calls) == 1
-    assert "registered 1" in result.message
+    assert len(import_calls) == 0
+    assert "registered 0" in result.message
     assert "secret-access" not in result.message
-    registry = json.loads((codex_home / "accounts" / "registry.json").read_text(encoding="utf-8"))
-    assert [account["account_key"] for account in registry["accounts"]] == [expected_account_key]
-    assert (codex_home / "accounts" / f"{expected_account_key}.auth.json").is_file()
+    assert (data_dir / "account-backups" / f"{expected_account_key}.auth.json").is_file()
 
 
 @pytest.mark.asyncio
@@ -650,7 +648,7 @@ async def test_auto_delete_free_reauth_plan_drift_accounts_only_deletes_eligible
 
 
 @pytest.mark.asyncio
-async def test_auto_delete_quota_exceeded_accounts_only_deletes_weekly_exhausted_unbacked_rows(
+async def test_auto_delete_quota_exceeded_accounts_only_deletes_exactly_zero_weekly_remaining_rows(
     tmp_path,
     db_setup,
 ) -> None:
@@ -731,20 +729,20 @@ async def test_auto_delete_quota_exceeded_accounts_only_deletes_weekly_exhausted
     assert result.count == 3
     assert "Auto-deleted 3 quota-exceeded" in result.message
     assert generate_unique_account_id("acc_eligible", "eligible@example.com") not in remaining_ids
-    assert generate_unique_account_id("acc_threshold", "threshold@example.com") not in remaining_ids
+    assert generate_unique_account_id("acc_threshold", "threshold@example.com") in remaining_ids
     assert generate_unique_account_id("acc_effective_quota", "effective-quota@example.com") not in remaining_ids
     assert (
         generate_unique_account_id("acc_weekly_available", "five-hour-zero-weekly-available@example.com")
         in remaining_ids
     )
-    assert generate_unique_account_id("acc_backed_up", "backed-up@example.com") in remaining_ids
+    assert generate_unique_account_id("acc_backed_up", "backed-up@example.com") not in remaining_ids
     assert generate_unique_account_id("acc_rate_limited_quota", "rate-limited-quota@example.com") in remaining_ids
     assert not (codex_home / "accounts" / "eligible-key.auth.json").exists()
-    assert not (codex_home / "accounts" / "threshold-key.auth.json").exists()
+    assert (codex_home / "accounts" / "threshold-key.auth.json").exists()
     assert not (codex_home / "accounts" / "effective-quota-key.auth.json").exists()
     assert (codex_home / "accounts" / "five-hour-zero-weekly-available-key.auth.json").exists()
-    assert (codex_home / "accounts" / "backed-up-key.auth.json").exists()
-    assert (data_dir / "account-backups" / "backed-up-key.auth.json").exists()
+    assert not (codex_home / "accounts" / "backed-up-key.auth.json").exists()
+    assert not (data_dir / "account-backups" / "backed-up-key.auth.json").exists()
     assert (codex_home / "accounts" / "rate-limited-key.auth.json").exists()
 
 

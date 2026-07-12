@@ -5,10 +5,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from app.modules.codexneo.accounts import _dedupe_registry_items
 from app.modules.codexneo.activity_log import default_activity_log_path
 from app.modules.codexneo.home import default_settings_path, resolve_configured_codex_home
-from app.modules.codexneo.locations import CodexNeoAccountLocationService
 from app.modules.codexneo.schemas import CodexNeoHealthItem, CodexNeoHealthResponse
 from app.modules.codexneo.service import (
     DEFAULT_CODEX_API_BASE_URL,
@@ -38,7 +36,6 @@ class CodexNeoHealthService:
         settings = _read_settings(self._settings_path)
         codex_account_count, codex_snapshot_count, registry_status = _codex_registry_counts(self._codex_home)
         backup_account_count, backup_snapshot_count, backup_status = _backup_counts(self._data_dir)
-        codexneo_count = _safe_visible_account_count(self._codex_home, self._data_dir)
         accounts_count: int | None = None
         accounts_error = False
         if self._accounts_count_provider is not None:
@@ -82,10 +79,10 @@ class CodexNeoHealthService:
             ),
             CodexNeoHealthItem(
                 key="accounts_sync",
-                label="Accounts sync",
-                status=_accounts_sync_status(codexneo_count, accounts_count, accounts_error),
-                message=_accounts_sync_message(codexneo_count, accounts_count, accounts_error),
-                detail=_accounts_sync_detail(codexneo_count, accounts_count),
+                label="Shared account pool",
+                status=_accounts_sync_status(accounts_count, accounts_error),
+                message=_accounts_sync_message(accounts_count, accounts_error),
+                detail=_accounts_sync_detail(accounts_count),
             ),
             CodexNeoHealthItem(
                 key="activity_log",
@@ -211,39 +208,6 @@ def _snapshot_count(directory: Path) -> int:
     return sum(1 for path in directory.glob("*.auth.json") if path.is_file())
 
 
-def _safe_visible_account_count(codex_home: Path, data_dir: Path) -> int:
-    try:
-        location_service = CodexNeoAccountLocationService(codex_home=codex_home, data_dir=data_dir)
-        rows = location_service.all_account_rows()
-        return len(
-            _dedupe_registry_items(
-                rows,
-                live_dir=codex_home / "accounts",
-                backup_dir=location_service.backup_dir,
-                active_key=_active_account_key(codex_home),
-            )
-        )
-    except Exception:
-        return 0
-
-
-def _active_account_key(codex_home: Path) -> str | None:
-    registry_path = codex_home / "accounts" / "registry.json"
-    if not registry_path.exists():
-        return None
-    try:
-        root = json.loads(registry_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(root, dict):
-        return None
-    value = root.get("active_account_key")
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
 def _registry_message(status: str) -> str:
     if status == "ok":
         return "Registry readable"
@@ -260,26 +224,22 @@ def _backup_message(status: str) -> str:
     return "Backup registry invalid"
 
 
-def _accounts_sync_status(codexneo_count: int, accounts_count: int | None, accounts_error: bool) -> str:
+def _accounts_sync_status(accounts_count: int | None, accounts_error: bool) -> str:
     if accounts_error or accounts_count is None:
         return "warning"
-    if accounts_count != codexneo_count:
-        return "error"
     return "ok"
 
 
-def _accounts_sync_message(codexneo_count: int, accounts_count: int | None, accounts_error: bool) -> str:
+def _accounts_sync_message(accounts_count: int | None, accounts_error: bool) -> str:
     if accounts_error or accounts_count is None:
-        return "Codex IB account count unavailable"
-    if accounts_count != codexneo_count:
-        return "Mismatch"
-    return "Counts aligned"
+        return "Managed-pool count unavailable"
+    return f"{accounts_count} managed account(s)"
 
 
-def _accounts_sync_detail(codexneo_count: int, accounts_count: int | None) -> str:
+def _accounts_sync_detail(accounts_count: int | None) -> str:
     if accounts_count is None:
-        return f"{codexneo_count} CodexNeo account(s), unknown Codex IB account count"
-    return f"{codexneo_count} CodexNeo account(s), {accounts_count} Codex IB account(s)"
+        return "Canonical pool count could not be read."
+    return "Canonical source for Codex LB routing and CodexNeo."
 
 
 def _activity_log_message(settings: dict[str, Any]) -> str:

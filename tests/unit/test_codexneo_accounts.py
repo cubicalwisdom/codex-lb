@@ -59,6 +59,138 @@ def _codex_ib_account(account_id: str, *, email: str) -> Account:
     )
 
 
+@__import__("pytest").mark.asyncio
+async def test_codexneo_lists_canonical_pool_account_without_registry_snapshot(tmp_path, db_setup) -> None:
+    del db_setup
+    account_id = "pool-only-account"
+    email = "pool-only@example.com"
+    async with SessionLocal() as session:
+        session.add(_codex_ib_account(account_id, email=email))
+        await session.commit()
+
+    state = await CodexHomeAccountService(
+        codex_home=tmp_path / ".codex",
+        data_dir=tmp_path / "data",
+    ).load_accounts_with_codex_ib_usage()
+
+    assert [row.account_key for row in state.accounts] == [account_id]
+    assert state.accounts[0].email == email
+    assert state.accounts[0].codex_ib_account_id == account_id
+    assert state.accounts[0].backup is False
+
+
+@__import__("pytest").mark.asyncio
+async def test_pool_only_account_includes_stored_primary_and_weekly_usage(tmp_path, db_setup) -> None:
+    del db_setup
+    account_id = "pool-only-with-usage"
+    email = "pool-usage@example.com"
+    recorded_at = utcnow()
+    async with SessionLocal() as session:
+        session.add(_codex_ib_account(account_id, email=email))
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id=account_id,
+                    window="primary",
+                    used_percent=100,
+                    reset_at=1_800_000_000,
+                    window_minutes=300,
+                    recorded_at=recorded_at,
+                ),
+                UsageHistory(
+                    account_id=account_id,
+                    window="secondary",
+                    used_percent=90,
+                    reset_at=1_800_500_000,
+                    window_minutes=10080,
+                    recorded_at=recorded_at,
+                ),
+            ]
+        )
+        await session.commit()
+
+    state = await CodexHomeAccountService(
+        codex_home=tmp_path / ".codex",
+        data_dir=tmp_path / "data",
+    ).load_accounts_with_codex_ib_usage()
+
+    account = state.accounts[0]
+    assert account.usage.primary is not None
+    assert account.usage.primary.remaining_percent == 0
+    assert account.usage.secondary is not None
+    assert account.usage.secondary.remaining_percent == 10
+    assert account.last_usage_at is not None
+
+
+@__import__("pytest").mark.asyncio
+async def test_pool_only_weekly_primary_is_displayed_as_weekly_not_five_hour(tmp_path, db_setup) -> None:
+    del db_setup
+    account_id = "pool-only-weekly-primary"
+    async with SessionLocal() as session:
+        session.add(_codex_ib_account(account_id, email="weekly-primary@example.com"))
+        session.add(
+            UsageHistory(
+                account_id=account_id,
+                window="primary",
+                used_percent=19,
+                reset_at=1_800_500_000,
+                window_minutes=10080,
+                recorded_at=utcnow(),
+            )
+        )
+        await session.commit()
+
+    state = await CodexHomeAccountService(
+        codex_home=tmp_path / ".codex",
+        data_dir=tmp_path / "data",
+    ).load_accounts_with_codex_ib_usage()
+
+    account = state.accounts[0]
+    assert account.usage.primary is None
+    assert account.usage.secondary is not None
+    assert account.usage.secondary.remaining_percent == 81
+
+
+@__import__("pytest").mark.asyncio
+async def test_newer_weekly_primary_replaces_stale_weekly_secondary(tmp_path, db_setup) -> None:
+    del db_setup
+    account_id = "pool-only-new-weekly-primary"
+    now = utcnow()
+    async with SessionLocal() as session:
+        session.add(_codex_ib_account(account_id, email="new-weekly-primary@example.com"))
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id=account_id,
+                    window="primary",
+                    used_percent=8,
+                    reset_at=1_800_500_000,
+                    window_minutes=10080,
+                    recorded_at=now,
+                ),
+                UsageHistory(
+                    account_id=account_id,
+                    window="secondary",
+                    used_percent=87,
+                    reset_at=1_800_000_000,
+                    window_minutes=10080,
+                    recorded_at=now - timedelta(hours=1),
+                ),
+            ]
+        )
+        await session.commit()
+
+    state = await CodexHomeAccountService(
+        codex_home=tmp_path / ".codex",
+        data_dir=tmp_path / "data",
+    ).load_accounts_with_codex_ib_usage()
+
+    account = state.accounts[0]
+    assert account.usage.primary is None
+    assert account.usage.secondary is not None
+    assert account.usage.secondary.remaining_percent == 92
+
+
 def test_root_auth_json_is_loaded_as_codex_account_without_registry(tmp_path) -> None:
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()
@@ -685,6 +817,59 @@ async def test_codex_ib_usage_preserves_newer_registry_window_and_fills_missing_
     assert account.usage.primary.remaining_percent == 90
     assert account.usage.secondary.used_percent == 6
     assert account.usage.secondary.remaining_percent == 94
+
+
+@__import__("pytest").mark.asyncio
+async def test_newer_registry_weekly_primary_is_normalized_without_history_replacement(tmp_path, db_setup) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    accounts_dir = codex_home / "accounts"
+    accounts_dir.mkdir(parents=True)
+    account_id = "acc_registry_weekly_primary"
+    email = "registry-weekly-primary@example.com"
+    accounts_dir.joinpath("registry.json").write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {
+                        "account_key": account_id,
+                        "email": email,
+                        "last_usage_at": int(time.time()) + 60,
+                        "last_usage": {
+                            "primary": {
+                                "used_percent": 19,
+                                "window_minutes": 10080,
+                            }
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async with SessionLocal() as session:
+        session.add(_codex_ib_account(account_id, email=email))
+        session.add(
+            UsageHistory(
+                account_id=account_id,
+                window="primary",
+                used_percent=50,
+                window_minutes=10080,
+                recorded_at=utcnow() - timedelta(hours=1),
+            )
+        )
+        await session.commit()
+
+    state = await CodexHomeAccountService(
+        codex_home=codex_home,
+        data_dir=tmp_path / "data",
+    ).load_accounts_with_codex_ib_usage()
+
+    account = state.accounts[0]
+    assert account.usage.primary is None
+    assert account.usage.secondary is not None
+    assert account.usage.secondary.remaining_percent == 81
 
 
 @__import__("pytest").mark.asyncio

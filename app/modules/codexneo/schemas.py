@@ -79,6 +79,7 @@ class CodexNeoPathRequest(DashboardModel):
 
 class CodexNeoAccountKeysRequest(DashboardModel):
     account_keys: list[str]
+    path: str | None = None
 
 
 class CodexNeoLocationRequest(DashboardModel):
