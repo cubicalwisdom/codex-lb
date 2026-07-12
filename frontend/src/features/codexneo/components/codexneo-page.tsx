@@ -22,6 +22,7 @@ import {
   type MouseEvent,
   type PointerEvent,
 } from "react";
+import { toast } from "sonner";
 
 import { AlertMessage } from "@/components/alert-message";
 import { CodexLogo } from "@/components/brand/codex-logo";
@@ -113,6 +114,7 @@ export function CodexNeoPage() {
   const [minimizeToTrayEnabledOverride, setMinimizeToTrayEnabledOverride] = useState<boolean | null>(null);
   const [startWithWindowsEnabledOverride, setStartWithWindowsEnabledOverride] = useState<boolean | null>(null);
   const [autoSyncFeedback, setAutoSyncFeedback] = useState<string | null>(null);
+  const [restartPending, setRestartPending] = useState(false);
   const importFolderInputRef = useRef<HTMLInputElement | null>(null);
   const lastSelectedAccountKeyRef = useRef<string | null>(null);
   const shiftRangeSelectActiveRef = useRef(false);
@@ -126,6 +128,7 @@ export function CodexNeoPage() {
   const intervalMinutes = intervalMinutesOverride ?? settings?.codexgoAutoRefreshIntervalMinutes ?? DEFAULT_INTERVAL_MINUTES;
   const electronApi = typeof window === "undefined" ? undefined : window.codexIbElectron;
   const electronControlsAvailable = Boolean(electronApi?.minimizeToTray);
+  const restartAvailable = Boolean(electronApi?.restartApp);
   const codexHomeAutoRefreshEnabled =
     codexHomeAutoRefreshEnabledOverride ?? settings?.codexHomeAutoRefreshEnabled ?? false;
   const codexHomeRefreshSeconds =
@@ -444,11 +447,23 @@ export function CodexNeoPage() {
       return { key, direction: current.direction === "asc" ? "desc" : "asc" };
     });
   };
+  const restartCodexLb = useCallback(async () => {
+    if (!electronApi?.restartApp || restartPending) return;
+    setRestartPending(true);
+    try {
+      const result = await electronApi.restartApp();
+      if (!result.success) toast.error(result.message);
+    } catch (restartError) {
+      toast.error(restartError instanceof Error ? restartError.message : "Failed to restart Codex LB");
+    } finally {
+      setRestartPending(false);
+    }
+  }, [electronApi, restartPending]);
 
   if (activeView === "activity") {
     return (
       <div className="animate-fade-in-up space-y-6">
-        <PageHeader />
+        <PageHeader restartAvailable={restartAvailable} restartPending={restartPending} onRestart={restartCodexLb} />
         <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
         {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
         <CodexNeoActivityPage
@@ -465,7 +480,7 @@ export function CodexNeoPage() {
   if (!settings) {
     return (
       <div className="animate-fade-in-up space-y-6">
-        <PageHeader />
+        <PageHeader restartAvailable={restartAvailable} restartPending={restartPending} onRestart={restartCodexLb} />
         <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
         {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
         <LoadingOverlay visible label="Loading CodexNeo..." />
@@ -475,7 +490,7 @@ export function CodexNeoPage() {
 
   return (
     <div className="animate-fade-in-up space-y-6">
-      <PageHeader />
+      <PageHeader restartAvailable={restartAvailable} restartPending={restartPending} onRestart={restartCodexLb} />
       <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
 
       {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
@@ -599,7 +614,7 @@ export function CodexNeoPage() {
           </div>
           {settings.buyerTokenSaved ? <Badge variant="secondary">Saved</Badge> : null}
         </div>
-        <div className="grid gap-3 xl:grid-cols-[auto_auto_auto_7rem_1fr_1.4fr_auto_auto_auto] xl:items-end">
+        <div className="grid gap-3 xl:grid-cols-[auto_7rem_minmax(14rem,1fr)_minmax(18rem,1.4fr)_auto_auto_auto] xl:items-end">
           <div className="flex h-10 items-center gap-2">
             <Switch
               id="codexgo-refresh-enabled"
@@ -649,10 +664,20 @@ export function CodexNeoPage() {
             <Save className="h-4 w-4" aria-hidden="true" />
             Save settings
           </Button>
-          <Button type="button" disabled={controlsDisabled} onClick={() => runCodexGoAction("use")}>
+          <Button
+            type="button"
+            disabled={controlsDisabled}
+            onClick={() => runCodexGoAction("use")}
+            className="h-10 min-w-28 px-4"
+          >
             Use auth
           </Button>
-          <Button type="button" disabled={controlsDisabled} onClick={() => runCodexGoAction("refresh")}>
+          <Button
+            type="button"
+            disabled={controlsDisabled}
+            onClick={() => runCodexGoAction("refresh")}
+            className="h-10 min-w-28 px-4"
+          >
             Refresh auth
           </Button>
         </div>
@@ -968,13 +993,32 @@ export function CodexNeoPage() {
   );
 }
 
-function PageHeader() {
+function PageHeader({
+  restartAvailable,
+  restartPending,
+  onRestart,
+}: {
+  restartAvailable: boolean;
+  restartPending: boolean;
+  onRestart: () => void;
+}) {
   return (
-    <div>
+    <div className="flex flex-wrap items-center justify-between gap-3">
       <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
         <CodexLogo size={24} />
         CodexNeo
       </h1>
+      <Button
+        type="button"
+        variant="outline"
+        className="gap-2"
+        disabled={!restartAvailable || restartPending}
+        title={restartAvailable ? "Restart the portable Codex LB app and its backend" : "Available only in the portable Codex LB app"}
+        onClick={onRestart}
+      >
+        <RotateCcw className={restartPending ? "h-4 w-4 animate-spin" : "h-4 w-4"} aria-hidden="true" />
+        {restartPending ? "Restarting..." : "Restart Codex LB"}
+      </Button>
     </div>
   );
 }

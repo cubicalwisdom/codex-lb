@@ -10,8 +10,10 @@ import { CodexNeoPage } from "./codexneo-page";
 const hookMocks = vi.hoisted(() => ({
   useCodexNeo: vi.fn(),
 }));
+const toastMocks = vi.hoisted(() => ({ error: vi.fn() }));
 
 vi.mock("@/features/codexneo/hooks/use-codexneo", () => hookMocks);
+vi.mock("sonner", () => ({ toast: toastMocks }));
 
 function createMutationMock() {
   return {
@@ -242,6 +244,7 @@ function renderCodexNeoPage({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  delete window.codexIbElectron;
   useAuthStore.setState({ canWrite: true });
 });
 
@@ -272,6 +275,53 @@ describe("CodexNeoPage", () => {
     expect(screen.getByLabelText("URL")).toHaveValue("https://codexgo.eu/api/codex-auth");
     expect(screen.getByRole("button", { name: "Use auth" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refresh auth" })).toBeInTheDocument();
+  });
+
+  it("restarts Codex LB immediately through the Electron bridge", async () => {
+    const user = userEvent.setup();
+    const restartApp = vi.fn().mockResolvedValue({ success: true, message: "Codex LB is restarting" });
+    const confirmSpy = vi.spyOn(window, "confirm");
+    Object.defineProperty(window, "codexIbElectron", {
+      configurable: true,
+      value: { restartApp },
+    });
+    renderCodexNeoPage();
+
+    await user.click(screen.getByRole("button", { name: "Restart Codex LB" }));
+
+    expect(restartApp).toHaveBeenCalledTimes(1);
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it("disables browser-only restart", () => {
+    renderCodexNeoPage();
+    expect(screen.getByRole("button", { name: "Restart Codex LB" })).toBeDisabled();
+  });
+
+  it("recovers after an Electron restart bridge failure", async () => {
+    const user = userEvent.setup();
+    const restartApp = vi.fn().mockResolvedValue({
+      success: false,
+      message: "Codex LB backend is not owned by this app",
+    });
+    Object.defineProperty(window, "codexIbElectron", {
+      configurable: true,
+      value: { restartApp },
+    });
+    renderCodexNeoPage();
+
+    const restartButton = screen.getByRole("button", { name: "Restart Codex LB" });
+    await user.click(restartButton);
+
+    expect(toastMocks.error).toHaveBeenCalledWith("Codex LB backend is not owned by this app");
+    expect(restartButton).toBeEnabled();
+  });
+
+  it("keeps CodexGO use and refresh actions equally compact", () => {
+    renderCodexNeoPage();
+
+    expect(screen.getByRole("button", { name: "Use auth" })).toHaveClass("h-10", "min-w-28", "px-4");
+    expect(screen.getByRole("button", { name: "Refresh auth" })).toHaveClass("h-10", "min-w-28", "px-4");
   });
 
   it("renders safe CodexNeo health diagnostics with copy actions", async () => {

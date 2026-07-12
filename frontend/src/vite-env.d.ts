@@ -7,5 +7,6 @@ interface Window {
     minimizeToTray: (options: { toTray: boolean }) => Promise<boolean>;
     setMinimizeToTrayEnabled?: (enabled: boolean) => Promise<boolean>;
     setStartWithWindowsEnabled?: (enabled: boolean) => Promise<boolean>;
+    restartApp?: () => Promise<{ success: boolean; message: string }>;
   };
 }
