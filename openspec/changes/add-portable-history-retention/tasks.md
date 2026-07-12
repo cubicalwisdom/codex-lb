@@ -2,4 +2,4 @@
 - [x] Roll expired detailed request logs into aggregate records atomically, then purge raw request and usage samples older than 24 hours.
 - [x] Include retained aggregates in Dashboard and Report statistical queries.
 - [x] Add focused regression coverage and validate OpenSpec.
-- [ ] Mirror the verified backend files into the portable runtime without restarting it.
+- [x] Mirror the verified backend files into the portable runtime without restarting it.
