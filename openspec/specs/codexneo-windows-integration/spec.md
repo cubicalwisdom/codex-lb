@@ -138,6 +138,7 @@ Accounts-to-Codex-Home reverse sync MUST NOT create a managed snapshot for the a
 - **THEN** the queued fingerprint remains in app-owned state
 - **AND** a later account sync retries retirement
 - **AND** the fingerprint is cleared after the retry completes successfully
+
 ### Requirement: CodexNeo SHALL display the canonical Codex LB pool
 
 CodexNeo SHALL render the same canonical account identities as the Codex LB Accounts table and SHALL decorate them with current-live, managed-backup, and provider-source state without maintaining an independent routing inventory. Its health diagnostics SHALL report the canonical managed-pool count without treating the live Codex Home registry or locally discovered snapshot count as a mismatch.
@@ -246,3 +247,20 @@ CodexNeo SHALL expose a separate responsive Activity view containing redacted Co
 - **THEN** the Activity stream SHALL expand to the available viewport height
 - **AND** the filters and retention notice SHALL remain visible
 - **AND** scrolling the event stream SHALL not require a fixed-height blank page region
+
+### Requirement: CodexNeo SHALL expose compact portable operator actions
+
+CodexNeo SHALL place Restart Codex LB in the page header and SHALL present Use auth and Refresh auth as equal compact actions. Restart Codex LB SHALL invoke the Electron restart bridge immediately without a browser confirmation dialog.
+
+#### Scenario: Portable operator opens CodexNeo Accounts
+
+- **GIVEN** CodexNeo is hosted by the portable Electron shell
+- **WHEN** the Accounts page renders
+- **THEN** Restart Codex LB SHALL be visible in the page header
+- **AND** Use auth and Refresh auth SHALL have equivalent action dimensions
+
+#### Scenario: Operator selects Restart Codex LB
+
+- **WHEN** the enabled Restart Codex LB action is selected
+- **THEN** the page SHALL invoke the Electron restart bridge immediately
+- **AND** SHALL NOT show a confirmation dialog
