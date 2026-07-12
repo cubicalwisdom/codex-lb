@@ -82,7 +82,19 @@ async def app_instance(_reset_db_state, monkeypatch, isolated_codexneo_sync_serv
     async def _noop_init_db() -> None:
         return None
 
+    class _DisabledCodexNeoRootReconciler:
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
     monkeypatch.setattr(main_module, "init_db", _noop_init_db)
+    monkeypatch.setattr(
+        main_module,
+        "build_codexneo_root_reconciler",
+        _DisabledCodexNeoRootReconciler,
+    )
     app = create_app()
     app.dependency_overrides[accounts_api.get_codexneo_account_sync_service] = lambda: isolated_codexneo_sync_service
     return app

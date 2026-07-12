@@ -73,7 +73,19 @@ async def e2e_client(db_setup, monkeypatch, isolated_codexneo_sync_service):
     async def _noop_init_db() -> None:
         return None
 
+    class _DisabledCodexNeoRootReconciler:
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
     monkeypatch.setattr(main_module, "init_db", _noop_init_db)
+    monkeypatch.setattr(
+        main_module,
+        "build_codexneo_root_reconciler",
+        _DisabledCodexNeoRootReconciler,
+    )
     app = create_app()
     app.dependency_overrides[accounts_api.get_codexneo_account_sync_service] = (
         lambda: isolated_codexneo_sync_service
