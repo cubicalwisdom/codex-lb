@@ -61,7 +61,10 @@ class TestUsage7dByAccount:
             SimpleNamespace(account_id="acc_2", email="bob@example.com", is_deleted=False, cost_usd=3.2),
         ]
 
-        session.execute.return_value = SimpleNamespace(all=lambda: rows)
+        session.execute.side_effect = [
+            SimpleNamespace(all=lambda: rows),
+            SimpleNamespace(all=lambda: []),
+        ]
 
         result = await repo.usage_7d_by_account("key_1", since, until)
 
@@ -92,7 +95,10 @@ class TestUsage7dByAccount:
             SimpleNamespace(account_id="acc_del", email=None, is_deleted=True, cost_usd=0.8),
         ]
 
-        session.execute.return_value = SimpleNamespace(all=lambda: rows)
+        session.execute.side_effect = [
+            SimpleNamespace(all=lambda: rows),
+            SimpleNamespace(all=lambda: []),
+        ]
 
         result = await repo.usage_7d_by_account("key_1", since, until)
 
@@ -125,7 +131,10 @@ class TestUsage7dByAccount:
             SimpleNamespace(account_id="acc_2", email="bob@example.com", is_deleted=False, cost_usd=2.0),
         ]
 
-        session.execute.return_value = SimpleNamespace(all=lambda: rows)
+        session.execute.side_effect = [
+            SimpleNamespace(all=lambda: rows),
+            SimpleNamespace(all=lambda: []),
+        ]
 
         result = await repo.usage_7d_by_account("key_1", since, until)
 
@@ -139,7 +148,10 @@ class TestUsage7dByAccount:
         since = datetime(2026, 5, 1, 0, 0, 0)
         until = datetime(2026, 5, 8, 0, 0, 0)
 
-        session.execute.return_value = SimpleNamespace(all=lambda: [])
+        session.execute.side_effect = [
+            SimpleNamespace(all=lambda: []),
+            SimpleNamespace(all=lambda: []),
+        ]
 
         result = await repo.usage_7d_by_account("key_1", since, until)
 
@@ -192,7 +204,7 @@ class TestAccountLookupQueries:
 
 class TestUsage7d:
     @pytest.mark.asyncio
-    async def test_returns_totals_and_account_costs_from_single_execute(self) -> None:
+    async def test_returns_totals_and_account_costs_with_empty_retained_aggregates(self) -> None:
         session = AsyncMock()
         repo = ApiKeysRepository(session)
         since = datetime(2026, 5, 1, 0, 0, 0)
@@ -223,7 +235,19 @@ class TestUsage7d:
             ),
         ]
 
-        session.execute.return_value = SimpleNamespace(all=lambda: rows)
+        session.execute.side_effect = [
+            SimpleNamespace(all=lambda: rows),
+            SimpleNamespace(
+                one=lambda: SimpleNamespace(
+                    total_requests=0,
+                    total_input_tokens=0,
+                    total_output_tokens=0,
+                    cached_input_tokens=0,
+                    total_cost_usd=0.0,
+                )
+            ),
+            SimpleNamespace(all=lambda: []),
+        ]
 
         result = await repo.usage_7d("key_1", since, until)
 
@@ -245,4 +269,4 @@ class TestUsage7d:
                 is_deleted=True,
             ),
         ]
-        session.execute.assert_awaited_once()
+        assert session.execute.await_count == 3

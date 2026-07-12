@@ -232,6 +232,27 @@ class RequestLog(Base):
     )
 
 
+class RequestLogAggregate(Base):
+    """Compact, durable statistics for request logs removed by retention."""
+
+    __tablename__ = "request_log_aggregates"
+    __table_args__ = (Index("idx_request_log_aggregates_bucket", "bucket_start"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bucket_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class ProxyEndpoint(Base):
     __tablename__ = "proxy_endpoints"
 

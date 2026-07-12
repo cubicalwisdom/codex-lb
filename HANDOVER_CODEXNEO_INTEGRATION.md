@@ -2,6 +2,9 @@
 
 ## Current State
 
+- History retention is complete and verified in source: raw request logs plus primary/additional usage samples expire after 24 hours, while compact request aggregates preserve Dashboard, Reports, API-key, account, model, token, cost, and error statistics. The portable runtime mirror remains pending until the consolidated portable branch is assembled; no app restart is authorized for this consolidation.
+- Two obsolete pre-migration database copies were removed from `portable-data`, freeing 748.8 MB. Do not treat the live store as already pruned until a post-restart check confirms the new migration and retention pass.
+
 - Workspace: `H:\Opencode IDE\codex-ib\codex-lb`
 - Active development branch: `codexneo-portable-windows`
 - Upstream/original branch: `main`

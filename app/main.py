@@ -54,6 +54,7 @@ from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
 from app.modules.firewall import api as firewall_api
 from app.modules.health import api as health_api
+from app.modules.history_retention.scheduler import build_history_retention_scheduler
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
@@ -163,6 +164,7 @@ async def lifespan(app: FastAPI):
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     model_scheduler = build_model_refresh_scheduler()
     sticky_session_cleanup_scheduler = build_sticky_session_cleanup_scheduler()
+    history_retention_scheduler = build_history_retention_scheduler()
     quota_planner_scheduler = build_quota_planner_scheduler()
     auth_guardian_scheduler = build_auth_guardian_scheduler()
     codexgo_refresh_scheduler = build_codexgo_refresh_scheduler()
@@ -170,6 +172,7 @@ async def lifespan(app: FastAPI):
     await api_key_limit_reset_scheduler.start()
     await model_scheduler.start()
     await sticky_session_cleanup_scheduler.start()
+    await history_retention_scheduler.start()
     await quota_planner_scheduler.start()
     await auth_guardian_scheduler.start()
     await codexgo_refresh_scheduler.start()
@@ -335,6 +338,7 @@ async def lifespan(app: FastAPI):
         await quota_planner_scheduler.stop()
         await auth_guardian_scheduler.stop()
         await sticky_session_cleanup_scheduler.stop()
+        await history_retention_scheduler.stop()
         await model_scheduler.stop()
         await api_key_limit_reset_scheduler.stop()
         await usage_scheduler.stop()

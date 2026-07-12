@@ -65,11 +65,7 @@ class CodexNeoAccountLocationService:
         return result
 
     def set_bulk_default(self, *, location: LocationName, present: bool) -> CodexNeoActionResponse:
-        accounts = [
-            row["account_key"]
-            for row in self.all_account_rows()
-            if bool(row.get(location)) != present
-        ]
+        accounts = [row["account_key"] for row in self.all_account_rows() if bool(row.get(location)) != present]
         result = (
             self._set_location(accounts, location=location, present=present)
             if accounts
@@ -82,11 +78,7 @@ class CodexNeoAccountLocationService:
         settings = self.location_settings()
         if not settings["backup_all_enabled"]:
             return CodexNeoActionResponse(success=True, message="No bulk defaults were enabled")
-        keys = [
-            row["account_key"]
-            for row in self.all_account_rows()
-            if row.get("codex") and not row.get("backup")
-        ]
+        keys = [row["account_key"] for row in self.all_account_rows() if row.get("codex") and not row.get("backup")]
         result = (
             self._set_backup_presence(keys, present=True)
             if keys
@@ -296,6 +288,12 @@ class CodexNeoAccountLocationService:
         for key in keys:
             source = existing_snapshot_path(self._live_accounts_dir(), key)
             row = live_map.get(key)
+            if row is None or source is None:
+                root_row = _root_auth_row(self._codex_home)
+                root_auth_path = self._codex_home / "auth.json"
+                if root_row is not None and root_row.get("account_key") == key and root_auth_path.is_file():
+                    row = root_row
+                    source = root_auth_path
             if row is None or source is None:
                 skipped += 1
                 continue
