@@ -95,28 +95,15 @@ class ReportsRepository:
                 )
                 for row in result.all()
             )
-        archived_stmt = (
-            select(
-                func.date(RequestLogAggregate.bucket_start).label("report_date"),
-                func.sum(RequestLogAggregate.request_count).label("requests"),
-                func.sum(RequestLogAggregate.input_tokens).label("input_tokens"),
-                func.sum(RequestLogAggregate.output_tokens).label("output_tokens"),
-                func.sum(RequestLogAggregate.cached_input_tokens).label("cached_input_tokens"),
-                func.sum(RequestLogAggregate.cost_usd).label("cost_usd"),
-                func.count(func.distinct(RequestLogAggregate.account_id)).label("active_accounts"),
-                func.sum(RequestLogAggregate.error_count).label("error_count"),
+        archived_rows = []
+        for day_ranges_batch in batched(day_ranges, _SQLITE_COMPOUND_SELECT_LIMIT):
+            archived = await self._session.execute(
+                _daily_aggregate_rows_stmt(list(day_ranges_batch), account_ids, model)
             )
-            .where(
-                RequestLogAggregate.bucket_start >= day_ranges[0][1],
-                RequestLogAggregate.bucket_start < day_ranges[-1][2],
-                *(_aggregate_filters(account_ids, model)),
-            )
-            .group_by(func.date(RequestLogAggregate.bucket_start))
-        )
-        archived = await self._session.execute(archived_stmt)
+            archived_rows.extend(archived.all())
         merged = {row.date: row for row in rows}
         day_range_by_date = {report_date: (day_start, day_end) for report_date, day_start, day_end in day_ranges}
-        for row in archived.all():
+        for row in archived_rows:
             key = str(row.report_date)
             previous = merged.get(key)
             day_start, day_end = day_range_by_date[key]
@@ -439,6 +426,47 @@ def _daily_rows_stmt(
                     _normal_traffic_clause(),
                     *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
                     *([RequestLog.model == model] if model else []),
+                ),
+            )
+        )
+        .group_by(day_ranges_cte.c.report_date)
+        .order_by(day_ranges_cte.c.report_date)
+    )
+
+
+def _daily_aggregate_rows_stmt(
+    day_ranges: list[tuple[str, datetime, datetime]],
+    account_ids: list[str] | None,
+    model: str | None,
+):
+    day_range_rows = [
+        select(
+            literal(report_date).label("report_date"),
+            literal(day_start).label("day_start"),
+            literal(day_end).label("day_end"),
+        )
+        for report_date, day_start, day_end in day_ranges
+    ]
+    day_ranges_query = day_range_rows[0] if len(day_range_rows) == 1 else union_all(*day_range_rows)
+    day_ranges_cte = day_ranges_query.cte("aggregate_report_days")
+    return (
+        select(
+            day_ranges_cte.c.report_date,
+            func.sum(RequestLogAggregate.request_count).label("requests"),
+            func.sum(RequestLogAggregate.input_tokens).label("input_tokens"),
+            func.sum(RequestLogAggregate.output_tokens).label("output_tokens"),
+            func.sum(RequestLogAggregate.cached_input_tokens).label("cached_input_tokens"),
+            func.sum(RequestLogAggregate.cost_usd).label("cost_usd"),
+            func.count(func.distinct(RequestLogAggregate.account_id)).label("active_accounts"),
+            func.sum(RequestLogAggregate.error_count).label("error_count"),
+        )
+        .select_from(
+            day_ranges_cte.join(
+                RequestLogAggregate,
+                and_(
+                    RequestLogAggregate.bucket_start >= day_ranges_cte.c.day_start,
+                    RequestLogAggregate.bucket_start < day_ranges_cte.c.day_end,
+                    *(_aggregate_filters(account_ids, model)),
                 ),
             )
         )

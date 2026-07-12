@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.crypto import TokenEncryptor
-from app.db.models import Account, AccountStatus, Base, RequestLog
+from app.db.models import Account, AccountStatus, Base, RequestLog, RequestLogAggregate
 from app.modules.reports.repository import DailyReportRangeTooLargeError, ReportsRepository
 
 pytestmark = pytest.mark.unit
@@ -101,6 +101,39 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
     assert rows[1].cost_usd == 0.1
     assert rows[1].active_accounts == 0
     assert rows[1].error_count == 1
+
+
+@pytest.mark.asyncio
+async def test_aggregate_daily_rows_groups_archived_utc_buckets_by_requested_local_date(
+    async_session: AsyncSession,
+) -> None:
+    repo = ReportsRepository(async_session)
+    timezone_info = timezone(timedelta(hours=5, minutes=30))
+    async_session.add(_make_account("acc_reports_archived", "reports-archived@example.com"))
+    async_session.add(
+        RequestLogAggregate(
+            bucket_start=datetime(2026, 7, 6, 19, 0),
+            account_id="acc_reports_archived",
+            model="gpt-5.6-sol",
+            request_count=2,
+            input_tokens=100,
+            output_tokens=10,
+            cached_input_tokens=80,
+            cost_usd=0.5,
+            error_count=0,
+        )
+    )
+    await async_session.commit()
+
+    rows = await repo.aggregate_daily_rows(
+        date(2026, 7, 7),
+        date(2026, 7, 7),
+        timezone_info,
+    )
+
+    assert [row.date for row in rows] == ["2026-07-07"]
+    assert rows[0].requests == 2
+    assert rows[0].active_accounts == 1
 
 
 @pytest.mark.asyncio
