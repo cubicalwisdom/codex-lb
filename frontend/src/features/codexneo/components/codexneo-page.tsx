@@ -459,11 +459,21 @@ export function CodexNeoPage() {
       setRestartPending(false);
     }
   }, [electronApi, restartPending]);
+  const restartCodex = useCallback(() => {
+    void restartCodexMutation.mutateAsync();
+  }, [restartCodexMutation]);
 
   if (activeView === "activity") {
     return (
       <div className="animate-fade-in-up space-y-6">
-        <PageHeader restartAvailable={restartAvailable} restartPending={restartPending} onRestart={restartCodexLb} />
+        <PageHeader
+          restartAvailable={restartAvailable}
+          restartPending={restartPending}
+          restartCodexDisabled={controlsDisabled}
+          restartCodexPending={restartCodexMutation.isPending}
+          onRestart={restartCodexLb}
+          onRestartCodex={restartCodex}
+        />
         <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
         {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
         <CodexNeoActivityPage
@@ -480,7 +490,14 @@ export function CodexNeoPage() {
   if (!settings) {
     return (
       <div className="animate-fade-in-up space-y-6">
-        <PageHeader restartAvailable={restartAvailable} restartPending={restartPending} onRestart={restartCodexLb} />
+        <PageHeader
+          restartAvailable={restartAvailable}
+          restartPending={restartPending}
+          restartCodexDisabled={controlsDisabled}
+          restartCodexPending={restartCodexMutation.isPending}
+          onRestart={restartCodexLb}
+          onRestartCodex={restartCodex}
+        />
         <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
         {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
         <LoadingOverlay visible label="Loading CodexNeo..." />
@@ -490,7 +507,14 @@ export function CodexNeoPage() {
 
   return (
     <div className="animate-fade-in-up space-y-6">
-      <PageHeader restartAvailable={restartAvailable} restartPending={restartPending} onRestart={restartCodexLb} />
+      <PageHeader
+        restartAvailable={restartAvailable}
+        restartPending={restartPending}
+        restartCodexDisabled={controlsDisabled}
+        restartCodexPending={restartCodexMutation.isPending}
+        onRestart={restartCodexLb}
+        onRestartCodex={restartCodex}
+      />
       <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
 
       {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
@@ -543,20 +567,11 @@ export function CodexNeoPage() {
             Data folder
           </Button>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            disabled={controlsDisabled}
-            onClick={() => restartCodexMutation.mutateAsync()}
-          >
-            Restart Codex
-          </Button>
-          {codexHome ? (
-            <span className="text-xs text-muted-foreground">
-              {codexHome.exists ? "Codex Home detected" : "Codex Home folder not found"}
-            </span>
-          ) : null}
-        </div>
+        {codexHome ? (
+          <span className="text-xs text-muted-foreground">
+            {codexHome.exists ? "Codex Home detected" : "Codex Home folder not found"}
+          </span>
+        ) : null}
       </section>
 
       <section className="space-y-4 rounded-lg border border-border/70 bg-background/60 p-4">
@@ -996,11 +1011,17 @@ export function CodexNeoPage() {
 function PageHeader({
   restartAvailable,
   restartPending,
+  restartCodexDisabled,
+  restartCodexPending,
   onRestart,
+  onRestartCodex,
 }: {
   restartAvailable: boolean;
   restartPending: boolean;
+  restartCodexDisabled: boolean;
+  restartCodexPending: boolean;
   onRestart: () => void;
+  onRestartCodex: () => void;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1008,17 +1029,34 @@ function PageHeader({
         <CodexLogo size={24} />
         CodexNeo
       </h1>
-      <Button
-        type="button"
-        variant="outline"
-        className="gap-2"
-        disabled={!restartAvailable || restartPending}
-        title={restartAvailable ? "Restart the portable Codex LB app and its backend" : "Available only in the portable Codex LB app"}
-        onClick={onRestart}
-      >
-        <RotateCcw className={restartPending ? "h-4 w-4 animate-spin" : "h-4 w-4"} aria-hidden="true" />
-        {restartPending ? "Restarting..." : "Restart Codex LB"}
-      </Button>
+      <div className="flex w-full flex-col items-stretch gap-2 sm:w-auto sm:items-end">
+        <Button
+          type="button"
+          variant="destructive"
+          className="min-w-44 justify-center gap-2"
+          disabled={!restartAvailable || restartPending}
+          title={
+            restartAvailable
+              ? "Restart the portable CodexNeo app and its backend"
+              : "Available only in the portable CodexNeo app"
+          }
+          onClick={onRestart}
+        >
+          <RotateCcw className={restartPending ? "h-4 w-4 animate-spin" : "h-4 w-4"} aria-hidden="true" />
+          {restartPending ? "Restarting..." : "Restart CodexNeo"}
+        </Button>
+        <Button
+          type="button"
+          variant="destructive"
+          className="min-w-44 justify-center gap-2"
+          disabled={restartCodexDisabled}
+          title="Restart Codex Desktop"
+          onClick={onRestartCodex}
+        >
+          <RotateCcw className={restartCodexPending ? "h-4 w-4 animate-spin" : "h-4 w-4"} aria-hidden="true" />
+          {restartCodexPending ? "Restarting Codex..." : "Restart Codex"}
+        </Button>
+      </div>
     </div>
   );
 }

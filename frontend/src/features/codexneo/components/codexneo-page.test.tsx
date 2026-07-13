@@ -277,7 +277,7 @@ describe("CodexNeoPage", () => {
     expect(screen.getByRole("button", { name: "Refresh auth" })).toBeInTheDocument();
   });
 
-  it("restarts Codex LB immediately through the Electron bridge", async () => {
+  it("stacks red CodexNeo and Codex restart controls in the page header", async () => {
     const user = userEvent.setup();
     const restartApp = vi.fn().mockResolvedValue({ success: true, message: "Codex LB is restarting" });
     const confirmSpy = vi.spyOn(window, "confirm");
@@ -287,7 +287,17 @@ describe("CodexNeoPage", () => {
     });
     renderCodexNeoPage();
 
-    await user.click(screen.getByRole("button", { name: "Restart Codex LB" }));
+    const restartCodexNeo = screen.getByRole("button", { name: "Restart CodexNeo" });
+    const headerControls = restartCodexNeo.parentElement;
+
+    expect(restartCodexNeo).toHaveAttribute("data-variant", "destructive");
+    expect(headerControls).not.toBeNull();
+    expect(within(headerControls as HTMLElement).getByRole("button", { name: "Restart Codex" })).toHaveAttribute(
+      "data-variant",
+      "destructive",
+    );
+
+    await user.click(restartCodexNeo);
 
     expect(restartApp).toHaveBeenCalledTimes(1);
     expect(confirmSpy).not.toHaveBeenCalled();
@@ -295,7 +305,7 @@ describe("CodexNeoPage", () => {
 
   it("disables browser-only restart", () => {
     renderCodexNeoPage();
-    expect(screen.getByRole("button", { name: "Restart Codex LB" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Restart CodexNeo" })).toBeDisabled();
   });
 
   it("recovers after an Electron restart bridge failure", async () => {
@@ -310,7 +320,7 @@ describe("CodexNeoPage", () => {
     });
     renderCodexNeoPage();
 
-    const restartButton = screen.getByRole("button", { name: "Restart Codex LB" });
+    const restartButton = screen.getByRole("button", { name: "Restart CodexNeo" });
     await user.click(restartButton);
 
     expect(toastMocks.error).toHaveBeenCalledWith("Codex LB backend is not owned by this app");
