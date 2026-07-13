@@ -8,6 +8,7 @@ from pathlib import Path
 
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.exceptions import DashboardBadRequestError
+from app.core.runtime_logging import safe_command_summary
 from app.modules.codexneo.command_runner import run_codex_auth_command
 from app.modules.codexneo.schemas import CodexNeoPathResponse
 from app.modules.codexneo.snapshots import account_key_from_snapshot, existing_snapshot_path
@@ -194,13 +195,7 @@ def _unique_name(value: str, used: set[str]) -> str:
 
 
 def _safe_summary(output: str) -> str:
-    first = output.splitlines()[0] if output else ""
-    first = re.sub(
-        r"(?i)(access_token|refresh_token|id_token|authorization|api[_ -]?key|buyer[_ -]?token)[^;\\s]*",
-        "[redacted]",
-        first,
-    )
-    return first[:500]
+    return safe_command_summary(output, max_length=500, fallback="")
 
 
 def _with_sync_result(response: CodexNeoPathResponse, message: str, *, success: bool) -> CodexNeoPathResponse:

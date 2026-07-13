@@ -7,8 +7,11 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import ResourceClosedError
 
-from app.db.models import RequestLog
+from app.core.crypto import TokenEncryptor
+from app.core.utils.time import utcnow
+from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 
 
@@ -111,6 +114,48 @@ async def test_add_log_clamps_negative_cache_write_tokens_before_persisting(db_s
         persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
         assert persisted is not None
         assert persisted.cache_write_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_add_log_retries_without_account_after_concurrent_account_delete(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        accounts = AccountsRepository(session)
+        encryptor = TokenEncryptor()
+        await accounts.upsert(
+            Account(
+                id="deleted-during-request",
+                email="deleted@example.com",
+                plan_type="pro",
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+        assert await accounts.delete("deleted-during-request") is True
+
+        saved = await RequestLogsRepository(session).add_log(
+            account_id="deleted-during-request",
+            request_id="req_after_delete",
+            model="gpt-5.6-sol",
+            input_tokens=100,
+            output_tokens=50,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            plan_type="pro",
+        )
+
+        assert saved.account_id is None
+        assert saved.plan_type == "pro"
+        persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
+        assert persisted is not None
+        assert persisted.account_id is None
+        assert persisted.request_id == "req_after_delete"
+        assert persisted.input_tokens == 100
 
 
 @pytest.mark.asyncio

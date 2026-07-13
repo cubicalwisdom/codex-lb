@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -51,7 +52,7 @@ def check_sqlite_integrity(
         return IntegrityCheck(ok=True, details=None)
 
     try:
-        with sqlite3.connect(str(path)) as conn:
+        with closing(sqlite3.connect(str(path))) as conn:
             cursor = conn.execute(_integrity_check_pragma(mode))
             rows = [row[0] for row in cursor.fetchall()]
     except sqlite3.DatabaseError as exc:

@@ -5,15 +5,16 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from app.core.config.settings import get_settings
+from app.core.file_ops import protect_sensitive_path, write_sensitive_bytes_atomic
 
 
 def _get_or_create_key(key_file: Path) -> bytes:
     key_file.parent.mkdir(parents=True, exist_ok=True)
     if key_file.exists():
+        protect_sensitive_path(key_file, is_directory=False)
         return key_file.read_bytes()
     key = Fernet.generate_key()
-    key_file.write_bytes(key)
-    key_file.chmod(0o600)
+    write_sensitive_bytes_atomic(key_file, key)
     return key
 
 

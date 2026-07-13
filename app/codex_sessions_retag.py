@@ -3,15 +3,17 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import cast
 from urllib.parse import quote
+
+from app.core.file_ops import copy2_with_retry, replace_with_retry, unlink_with_retry
 
 JsonObject = dict[str, object]
 ProgressLogger = Callable[[str], None]
@@ -251,14 +253,14 @@ def _retag_jsonl_file(path: Path, source_provider: str, target_provider: str) ->
                     output_handle.write(raw_line)
     except Exception:
         if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+            unlink_with_retry(temp_path, missing_ok=True)
         raise
     if not changed:
         if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+            unlink_with_retry(temp_path, missing_ok=True)
         return False
     assert temp_path is not None
-    temp_path.replace(path)
+    replace_with_retry(temp_path, path)
     return True
 
 
@@ -305,7 +307,7 @@ def _retag_jsonl_record_provider(record: JsonObject, source_provider: str, targe
 
 def _sqlite_count_provider_rows(db_path: Path, provider: str) -> int:
     try:
-        with _connect_sqlite(db_path, read_only=True) as conn:
+        with closing(_connect_sqlite(db_path, read_only=True)) as conn:
             if not _sqlite_has_threads_table(conn):
                 return 0
             if not _sqlite_has_model_provider_column(conn):
@@ -331,7 +333,7 @@ def _update_sqlite_provider(db_path: Path, source_provider: str, target_provider
 
 
 def _update_sqlite_provider_in_place(db_path: Path, source_provider: str, target_provider: str) -> int:
-    with _connect_sqlite(db_path) as conn:
+    with closing(_connect_sqlite(db_path)) as conn:
         if not _sqlite_has_threads_table(conn):
             return 0
         cursor = conn.execute(
@@ -350,7 +352,7 @@ def _update_sqlite_provider_via_copy(db_path: Path, source_provider: str, target
             _replace_sqlite_db(temp_path, db_path)
         return updated
     finally:
-        temp_path.unlink(missing_ok=True)
+        unlink_with_retry(temp_path, missing_ok=True)
 
 
 def _sqlite_count_provider_rows_via_copy(db_path: Path, provider: str) -> int:
@@ -358,7 +360,7 @@ def _sqlite_count_provider_rows_via_copy(db_path: Path, provider: str) -> int:
     try:
         return _sqlite_count_provider_rows(temp_path, provider)
     finally:
-        temp_path.unlink(missing_ok=True)
+        unlink_with_retry(temp_path, missing_ok=True)
 
 
 def _copy_sqlite_to_temp(db_path: Path) -> Path:
@@ -371,9 +373,9 @@ def _copy_sqlite_to_temp(db_path: Path) -> Path:
 
 def _replace_sqlite_db(source: Path, destination: Path) -> None:
     _consolidate_sqlite_db(source)
-    shutil.copy2(source, destination)
+    copy2_with_retry(source, destination)
     for sidecar in _sqlite_sidecar_paths(destination):
-        sidecar.unlink(missing_ok=True)
+        unlink_with_retry(sidecar, missing_ok=True)
 
 
 def _connect_sqlite(db_path: Path, *, read_only: bool = False, immutable: bool = False) -> sqlite3.Connection:
@@ -412,7 +414,7 @@ def _provider_counts(codex_home: Path) -> tuple[ProviderCount, ...]:
                 counts[provider] = counts.get(provider, 0) + 1
     for db_path in _find_state_dbs(codex_home):
         try:
-            with _connect_sqlite(db_path, read_only=True) as conn:
+            with closing(_connect_sqlite(db_path, read_only=True)) as conn:
                 if not _sqlite_has_threads_table(conn):
                     continue
                 if not _sqlite_has_model_provider_column(conn):
@@ -447,30 +449,34 @@ def _create_backup(codex_home: Path, jsonl_files: Sequence[Path], state_dbs: Seq
 
     session_index = codex_home / "session_index.jsonl"
     if session_index.is_file():
-        shutil.copy2(session_index, backup_dir / session_index.name)
+        copy2_with_retry(session_index, backup_dir / session_index.name)
 
     for path in jsonl_files:
         destination = backup_dir / path.relative_to(codex_home)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, destination)
+        copy2_with_retry(path, destination)
 
     return backup_dir
 
 
 def _backup_sqlite_db(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with _connect_sqlite(source, read_only=True) as source_conn, sqlite3.connect(str(destination)) as backup_conn:
+    with closing(_connect_sqlite(source, read_only=True)) as source_conn, closing(
+        sqlite3.connect(str(destination))
+    ) as backup_conn:
         source_conn.backup(backup_conn)
         backup_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         backup_conn.execute("PRAGMA journal_mode=DELETE")
+        backup_conn.commit()
     for sidecar in _sqlite_sidecar_paths(destination):
-        sidecar.unlink(missing_ok=True)
+        unlink_with_retry(sidecar, missing_ok=True)
 
 
 def _consolidate_sqlite_db(db_path: Path) -> None:
-    with _connect_sqlite(db_path) as conn:
+    with closing(_connect_sqlite(db_path)) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("PRAGMA journal_mode=DELETE")
+        conn.commit()
 
 
 def _sqlite_sidecar_paths(db_path: Path) -> tuple[Path, Path]:
@@ -491,4 +497,4 @@ def _write_text_atomically(path: Path, text: str) -> None:
     with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
         handle.write(text)
         temp_path = Path(handle.name)
-    temp_path.replace(path)
+    replace_with_retry(temp_path, path)

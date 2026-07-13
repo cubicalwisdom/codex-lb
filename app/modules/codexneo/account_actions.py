@@ -8,6 +8,7 @@ from pathlib import Path
 
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.exceptions import DashboardBadRequestError
+from app.core.runtime_logging import safe_command_summary
 from app.modules.codexneo.command_runner import run_codex_auth_command
 from app.modules.codexneo.locations import CodexNeoAccountLocationService
 from app.modules.codexneo.schemas import CodexNeoActionResponse
@@ -208,10 +209,4 @@ def _write_json_atomic(path: Path, data: dict) -> None:
 
 
 def _safe_summary(output: str) -> str:
-    first = output.splitlines()[0] if output else ""
-    first = re.sub(
-        r"(?i)(access_token|refresh_token|id_token|authorization|api[_ -]?key|buyer[_ -]?token)[^;\\s]*",
-        "[redacted]",
-        first,
-    )
-    return first[:500]
+    return safe_command_summary(output, max_length=500, fallback="")

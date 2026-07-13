@@ -10,6 +10,7 @@ from app.core.runtime_logging import (
     UtcDefaultFormatter,
     _redact_log_value,
     build_log_config,
+    safe_command_summary,
 )
 
 pytestmark = pytest.mark.unit
@@ -29,6 +30,30 @@ def test_redact_log_value_masks_basic_authorization_credentials():
     redacted = _redact_log_value(value)
 
     assert redacted == "Authorization: [REDACTED], status=failed"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("access_token: secret-token-value", "access_token: [REDACTED]"),
+        ('{"access_token": "secret-token-value"}', '{"access_token": "[REDACTED]"}'),
+        ("buyer token buyer-secret", "buyer token [REDACTED]"),
+        ('{"authorization": "Bearer abc.def"}', '{"authorization": "Bearer [REDACTED]"}'),
+        ("API key=abc123 status=failed", "API key=[REDACTED] status=failed"),
+    ],
+)
+def test_safe_command_summary_redacts_complete_credential_values(value: str, expected: str) -> None:
+    assert safe_command_summary(value) == expected
+
+
+def test_safe_command_summary_redacts_before_truncation() -> None:
+    secret = "s" * 400
+
+    summary = safe_command_summary(f"access_token={secret} trailing context", max_length=80)
+
+    assert secret not in summary
+    assert summary.startswith("access_token=[REDACTED]")
+    assert len(summary) <= 80
 
 
 @pytest.fixture

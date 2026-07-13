@@ -5,6 +5,7 @@
   "private": true,
   "main": "main.cjs",
   "scripts": {
+    "test": "node --test *.test.cjs",
     "package:win": "electron-packager . \"Codex IB\" --platform=win32 --arch=x64 --asar --overwrite --icon=assets/icon.ico"
   },
   "devDependencies": {

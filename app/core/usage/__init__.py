@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Protocol, TypeVar
 
 from app.core.plan_types import normalize_account_plan_type
 from app.core.usage.models import UsageWindow
@@ -16,6 +16,26 @@ from app.core.usage.types import (
     UsageWindowSummary,
 )
 from app.db.models import Account
+
+
+class _UsageWindowLike(Protocol):
+    @property
+    def account_id(self) -> str | None: ...
+
+    @property
+    def used_percent(self) -> float | None: ...
+
+    @property
+    def reset_at(self) -> int | None: ...
+
+    @property
+    def window_minutes(self) -> int | None: ...
+
+    @property
+    def recorded_at(self) -> datetime | None: ...
+
+
+_UsageWindowT = TypeVar("_UsageWindowT", bound=_UsageWindowLike)
 
 PLAN_CAPACITY_CREDITS_PRIMARY = {
     "free": 0.0,
@@ -230,8 +250,8 @@ def is_primary_window_minutes(window_minutes: int | None) -> bool:
 
 
 def should_use_weekly_primary(
-    primary_row: UsageWindowRow,
-    secondary_row: UsageWindowRow | None,
+    primary_row: _UsageWindowLike,
+    secondary_row: _UsageWindowLike | None,
 ) -> bool:
     if not is_weekly_window_minutes(primary_row.window_minutes):
         return False
@@ -241,16 +261,16 @@ def should_use_weekly_primary(
 
 
 def normalize_weekly_only_rows(
-    primary_rows: Iterable[UsageWindowRow],
-    secondary_rows: Iterable[UsageWindowRow],
-) -> tuple[list[UsageWindowRow], list[UsageWindowRow]]:
+    primary_rows: Iterable[_UsageWindowT],
+    secondary_rows: Iterable[_UsageWindowT],
+) -> tuple[list[_UsageWindowT], list[_UsageWindowT]]:
     # Some plans (notably free) can report only one weekly window in the
     # primary slot. Re-map those rows into secondary so downstream 5h/7d
     # consumers operate on consistent semantics.
-    primary_by_account = {row.account_id: row for row in primary_rows}
-    normalized_secondary_by_account = {row.account_id: row for row in secondary_rows}
+    primary_by_account = {row.account_id: row for row in primary_rows if row.account_id is not None}
+    normalized_secondary_by_account = {row.account_id: row for row in secondary_rows if row.account_id is not None}
 
-    normalized_primary: list[UsageWindowRow] = []
+    normalized_primary: list[_UsageWindowT] = []
 
     for account_id, primary_row in primary_by_account.items():
         if is_weekly_window_minutes(primary_row.window_minutes):
@@ -263,7 +283,7 @@ def normalize_weekly_only_rows(
     return normalized_primary, list(normalized_secondary_by_account.values())
 
 
-def _should_prefer_primary_row(primary_row: UsageWindowRow, secondary_row: UsageWindowRow) -> bool:
+def _should_prefer_primary_row(primary_row: _UsageWindowLike, secondary_row: _UsageWindowLike) -> bool:
     primary_recorded_at = _normalize_recorded_at(primary_row.recorded_at)
     secondary_recorded_at = _normalize_recorded_at(secondary_row.recorded_at)
     if primary_recorded_at is not None and secondary_recorded_at is not None:

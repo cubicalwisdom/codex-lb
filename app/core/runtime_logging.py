@@ -16,33 +16,60 @@ from uvicorn.logging import AccessFormatter, DefaultFormatter
 from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id
 
-_SENSITIVE_LOG_VALUE_PATTERNS = (
-    re.compile(r"(?i)(password|passwd|pwd|token|secret|api[_-]?key)(\s*[=:]\s*)([^\s,&]+)"),
-    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
-    re.compile(r"(?i)(authorization\s*[=:]\s*)(?!\s*bearer\b)([^,&]+)"),
+_QUOTED_OR_TOKEN_VALUE = r'"[^"\r\n]*"|\'[^\'\r\n]*\'|[^\s,;&}\]]+'
+_AUTHORIZATION_LOG_VALUE_PATTERN = re.compile(
+    r"(?i)(?P<prefix>[\"']?authorization[\"']?\s*[=:]\s*)"
+    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|(?:bearer|basic)\s+[^\s,;&}\]]+|[^\s,;&}\]]+)"
 )
+_KEYED_SECRET_LOG_VALUE_PATTERN = re.compile(
+    rf"(?i)(?P<prefix>[\"']?(?:password|passwd|pwd|access[_ -]?token|refresh[_ -]?token|id[_ -]?token|"
+    rf"buyer[_ -]?token|api[_ -]?key|token|secret)[\"']?\s*(?:[=:]\s*|\s+))"
+    rf"(?P<value>{_QUOTED_OR_TOKEN_VALUE})"
+)
+_BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
 _LOG_REDACTION = "[REDACTED]"
 
 
-def _redact_log_value(value: str | None) -> str | None:
+def redact_sensitive_text(value: str | None) -> str | None:
     collapsed = _collapse_log_value(value)
     if collapsed is None:
         return None
-    redacted = collapsed
-    redacted = _SENSITIVE_LOG_VALUE_PATTERNS[0].sub(_redact_keyed_secret, redacted)
-    redacted = _SENSITIVE_LOG_VALUE_PATTERNS[1].sub(_redact_bearer_token, redacted)
-    return _SENSITIVE_LOG_VALUE_PATTERNS[2].sub(_redact_authorization_value, redacted)
+    redacted = _AUTHORIZATION_LOG_VALUE_PATTERN.sub(_redact_authorization_secret, collapsed)
+    redacted = _KEYED_SECRET_LOG_VALUE_PATTERN.sub(_redact_named_secret, redacted)
+    return _BEARER_LOG_VALUE_PATTERN.sub(_redact_bearer_token, redacted)
 
 
-def _redact_keyed_secret(match: re.Match[str]) -> str:
-    return f"{match.group(1)}{match.group(2)}{_LOG_REDACTION}"
+def safe_command_summary(value: str | None, *, max_length: int = 300, fallback: str = "command failed") -> str:
+    redacted = redact_sensitive_text(value)
+    if not redacted:
+        return fallback
+    return redacted[: max(0, max_length)] or fallback
+
+
+def _redact_log_value(value: str | None) -> str | None:
+    """Backward-compatible private alias for existing callers."""
+
+    return redact_sensitive_text(value)
+
+
+def _redact_named_secret(match: re.Match[str]) -> str:
+    value = match.group("value")
+    quote = value[0] if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"} else ""
+    return f"{match.group('prefix')}{quote}{_LOG_REDACTION}{quote}"
+
+
+def _redact_authorization_secret(match: re.Match[str]) -> str:
+    value = match.group("value")
+    quote = value[0] if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"} else ""
+    unquoted = value[1:-1] if quote else value
+    scheme = unquoted.split(maxsplit=1)[0] if " " in unquoted else ""
+    if scheme.lower() != "bearer":
+        scheme = ""
+    marker = f"{scheme} {_LOG_REDACTION}" if scheme else _LOG_REDACTION
+    return f"{match.group('prefix')}{quote}{marker}{quote}"
 
 
 def _redact_bearer_token(match: re.Match[str]) -> str:
-    return f"{match.group(1)}{_LOG_REDACTION}"
-
-
-def _redact_authorization_value(match: re.Match[str]) -> str:
     return f"{match.group(1)}{_LOG_REDACTION}"
 
 

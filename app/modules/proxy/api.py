@@ -404,7 +404,8 @@ async def _codex_control_proxy(
     )
 
 
-@router.api_route("/thread/goal/get", methods=["GET", "POST"])
+@router.get("/thread/goal/get", operation_id="thread_goal_get")
+@router.post("/thread/goal/get", operation_id="thread_goal_get_compat")
 async def thread_goal_get(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),

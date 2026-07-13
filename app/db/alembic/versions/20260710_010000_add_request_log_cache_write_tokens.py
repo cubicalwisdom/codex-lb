@@ -17,11 +17,17 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "request_logs",
-        sa.Column("cache_write_tokens", sa.Integer(), nullable=True),
-    )
+    bind = op.get_bind()
+    columns = {str(column["name"]) for column in sa.inspect(bind).get_columns("request_logs")}
+    if "cache_write_tokens" not in columns:
+        op.add_column(
+            "request_logs",
+            sa.Column("cache_write_tokens", sa.Integer(), nullable=True),
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("request_logs", "cache_write_tokens")
+    bind = op.get_bind()
+    columns = {str(column["name"]) for column in sa.inspect(bind).get_columns("request_logs")}
+    if "cache_write_tokens" in columns:
+        op.drop_column("request_logs", "cache_write_tokens")

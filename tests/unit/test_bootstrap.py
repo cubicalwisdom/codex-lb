@@ -168,7 +168,9 @@ async def test_ensure_auto_bootstrap_token_reuses_existing_encrypted_token(monke
     repository.store_bootstrap_token_if_absent.assert_not_called()
 
 
-def test_log_bootstrap_token_emits_at_warning_level_so_docker_default_surfaces_it() -> None:
+def test_log_bootstrap_token_emits_at_warning_level_so_docker_default_surfaces_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Regression guard for #458.
 
     The token must be logged at a level that survives docker's default
@@ -178,6 +180,7 @@ def test_log_bootstrap_token_emits_at_warning_level_so_docker_default_surfaces_i
     import io
     import logging
 
+    monkeypatch.delenv("CODEX_LB_BOOTSTRAP_TOKEN_FILE", raising=False)
     handler_stream = io.StringIO()
     handler = logging.StreamHandler(handler_stream)
     handler.setLevel(logging.WARNING)
@@ -194,3 +197,56 @@ def test_log_bootstrap_token_emits_at_warning_level_so_docker_default_surfaces_i
     output = handler_stream.getvalue()
     assert "Dashboard bootstrap token" in output
     assert "tok-regression-458" in output
+
+
+def test_log_bootstrap_token_uses_protected_file_for_portable_runtime(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    import logging
+
+    token_file = tmp_path / "bootstrap-token.txt"
+    monkeypatch.setenv("CODEX_LB_BOOTSTRAP_TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(bootstrap_module, "write_sensitive_bytes_atomic", lambda path, data: path.write_bytes(data))
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    test_logger = logging.getLogger("app.core.bootstrap.test_portable_token")
+    test_logger.addHandler(handler)
+    test_logger.propagate = False
+    try:
+        bootstrap_module.log_bootstrap_token(test_logger, "portable-secret")
+    finally:
+        test_logger.removeHandler(handler)
+
+    assert token_file.read_text(encoding="utf-8") == "portable-secret\n"
+    assert "portable-secret" not in stream.getvalue()
+    assert str(token_file.resolve()) in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_clear_auto_generated_token_removes_portable_token_file(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_file = tmp_path / "bootstrap-token.txt"
+    token_file.write_text("stale-token", encoding="utf-8")
+    monkeypatch.setenv("CODEX_LB_BOOTSTRAP_TOKEN_FILE", str(token_file))
+    repository = SimpleNamespace(clear_bootstrap_token=AsyncMock(return_value=True))
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    monkeypatch.setattr(bootstrap_module, "SessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr(bootstrap_module, "DashboardAuthRepository", lambda _session: repository)
+    monkeypatch.setattr(bootstrap_module, "get_settings_cache", lambda: settings_cache)
+
+    await bootstrap_module.clear_auto_generated_token()
+
+    assert token_file.exists() is False
+    settings_cache.invalidate.assert_awaited_once()

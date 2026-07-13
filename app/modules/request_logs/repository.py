@@ -377,6 +377,21 @@ class RequestLogsRepository:
                 return log
             except sa_exc.ResourceClosedError:
                 return log
+            except sa_exc.IntegrityError:
+                await _safe_rollback(self._session)
+                if account_id is None or await self._session.scalar(select(Account.id).where(Account.id == account_id)):
+                    raise
+                log.account_id = None
+                self._session.add(log)
+                try:
+                    await self._session.commit()
+                    await self._session.refresh(log)
+                    return log
+                except sa_exc.ResourceClosedError:
+                    return log
+                except BaseException:
+                    await _safe_rollback(self._session)
+                    raise
             except BaseException:
                 await _safe_rollback(self._session)
                 raise

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config.settings import get_settings
+from app.core.file_ops import protect_sensitive_path
 from app.core.utils.request_id import get_request_id
 
 logger = logging.getLogger(__name__)
@@ -273,8 +274,10 @@ def _append_records(items: Sequence[tuple[Path, Mapping[str, Any], int]]) -> Non
             return
         for path, records in grouped.items():
             try:
+                archive_directory_existed = path.parent.exists()
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.parent.chmod(_ARCHIVE_DIR_MODE)
+                if not archive_directory_existed:
+                    protect_sensitive_path(path.parent, is_directory=True)
                 _recover_corrupt_gzip_archive(path)
                 if len(records) == 1:
                     _write_gzip_jsonl_record(path, records[0])
@@ -365,6 +368,7 @@ def _write_gzip_jsonl_record(path: Path, record: Mapping[str, Any]) -> None:
 def _write_gzip_jsonl_records(path: Path, records: list[Mapping[str, Any]]) -> None:
     if not records:
         return
+    archive_file_existed = path.exists()
     fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, _ARCHIVE_FILE_MODE)
     try:
         os.fchmod(fd, _ARCHIVE_FILE_MODE)
@@ -377,6 +381,8 @@ def _write_gzip_jsonl_records(path: Path, records: list[Mapping[str, Any]]) -> N
     finally:
         if fd >= 0:
             os.close(fd)
+    if not archive_file_existed:
+        protect_sensitive_path(path, is_directory=False)
 
 
 def _archive_disk_pressure_active() -> bool:

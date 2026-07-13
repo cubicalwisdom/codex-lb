@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import secrets
+from pathlib import Path
 from secrets import compare_digest
 
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
+from app.core.file_ops import unlink_with_retry, write_sensitive_bytes_atomic
 from app.db.session import SessionLocal
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
 
@@ -32,6 +35,17 @@ def _get_encryptor() -> TokenEncryptor:
 
 
 def log_bootstrap_token(logger: logging.Logger, token: str, *, reason: str = "first-run") -> None:
+    protected_token_file = os.environ.get("CODEX_LB_BOOTSTRAP_TOKEN_FILE", "").strip()
+    if protected_token_file:
+        token_path = Path(protected_token_file).expanduser().resolve()
+        write_sensitive_bytes_atomic(token_path, f"{token}\n".encode("utf-8"))
+        logger.warning(
+            "Dashboard bootstrap token (%s) was written to the protected portable file path=%s; "
+            "the token value is intentionally excluded from persistent logs",
+            reason,
+            token_path,
+        )
+        return
     # Emit at WARNING so the one-time token is surfaced regardless of the
     # container/root logger level (which defaults to WARNING in most docker
     # setups, silently dropping an INFO log and leaving operators unable to
@@ -147,3 +161,6 @@ async def clear_auto_generated_token() -> None:
         cleared = await repository.clear_bootstrap_token()
     if cleared:
         await get_settings_cache().invalidate()
+    protected_token_file = os.environ.get("CODEX_LB_BOOTSTRAP_TOKEN_FILE", "").strip()
+    if protected_token_file:
+        unlink_with_retry(Path(protected_token_file).expanduser(), missing_ok=True)

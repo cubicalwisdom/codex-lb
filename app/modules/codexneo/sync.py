@@ -14,6 +14,7 @@ from app.core import usage as usage_core
 from app.core.auth import DEFAULT_EMAIL, claims_from_auth, extract_id_token_claims, parse_auth_json
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.plan_types import normalize_account_plan_type
+from app.core.runtime_logging import safe_command_summary
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
@@ -350,7 +351,7 @@ class CodexNeoAccountsSyncService:
             effective_weekly = {usage.account_id: usage for usage in effective_weekly_rows}
             for account in accounts:
                 usage = effective_weekly.get(account.id)
-                if usage is None or float(usage.used_percent) != 100.0:
+                if usage is None or usage.used_percent is None or float(usage.used_percent) != 100.0:
                     continue
                 if not _is_quota_exceeded_for_auto_delete(
                     account,
@@ -624,11 +625,11 @@ def _is_quota_exceeded_for_auto_delete(
         return False
     effective_status, _, _ = apply_usage_quota(
         status=account.status,
-        primary_used=float(primary.used_percent) if primary is not None else None,
+        primary_used=float(primary.used_percent) if primary is not None and primary.used_percent is not None else None,
         primary_reset=primary.reset_at if primary is not None else None,
         primary_window_minutes=primary.window_minutes if primary is not None else None,
         runtime_reset=float(account.reset_at) if account.reset_at is not None else None,
-        secondary_used=float(secondary.used_percent),
+        secondary_used=float(secondary.used_percent) if secondary.used_percent is not None else None,
         secondary_reset=secondary.reset_at,
         credits_has=secondary.credits_has,
         credits_unlimited=secondary.credits_unlimited,
@@ -716,8 +717,7 @@ def _claims_match_account(claims: Any, account: Account) -> bool:
 
 
 def _safe_summary(output: str) -> str:
-    first = output.splitlines()[0] if output else ""
-    return first[:300] or "codex-auth command failed"
+    return safe_command_summary(output, fallback="codex-auth command failed")
 
 
 def is_codex_auth_schema_unsupported(output: str) -> bool:

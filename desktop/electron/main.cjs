@@ -5,12 +5,16 @@ const path = require("node:path");
 const { claimPortableSingleInstance } = require("./single-instance.cjs");
 const { applyStartWithWindowsSetting } = require("./startup.cjs");
 const { createPortableRestartCoordinator } = require("./restart.cjs");
+const { rotateLogFile } = require("./log-rotation.cjs");
+const { assertTrustedIpcSender, isAllowedAppUrl, isSafeExternalUrl } = require("./security.cjs");
 
 const HOST = process.env.CODEX_IB_HOST || "127.0.0.1";
 const PORT = Number.parseInt(process.env.CODEX_IB_PORT || "2455", 10);
 const BASE_URL = `http://${HOST}:${PORT}`;
 const CODEXNEO_URL = `${BASE_URL}/codexneo`;
 const HEALTH_URL = `${BASE_URL}/health`;
+const LOG_MAX_BYTES = Number.parseInt(process.env.CODEX_IB_LOG_MAX_BYTES || String(10 * 1024 * 1024), 10);
+const LOG_BACKUP_COUNT = Number.parseInt(process.env.CODEX_IB_LOG_BACKUP_COUNT || "5", 10);
 
 let mainWindow = null;
 let backendProcess = null;
@@ -34,7 +38,9 @@ function appendLog(root, message) {
   const logDir = path.join(root, "logs");
   ensureDir(logDir);
   const line = `[${new Date().toISOString()}] ${message}\n`;
-  fs.appendFileSync(path.join(logDir, "codex-ib-electron.log"), line, "utf8");
+  const logPath = path.join(logDir, "codex-ib-electron.log");
+  rotateLogFile(fs, logPath, { maxBytes: LOG_MAX_BYTES, backupCount: LOG_BACKUP_COUNT });
+  fs.appendFileSync(logPath, line, "utf8");
 }
 
 function iconPath() {
@@ -118,11 +124,16 @@ function startBackend(root) {
   ensureDir(logDir);
   ensureDir(dataDir);
 
-  const stdout = fs.openSync(path.join(logDir, "codex-ib-server.out.log"), "a");
-  const stderr = fs.openSync(path.join(logDir, "codex-ib-server.err.log"), "a");
+  const stdoutPath = path.join(logDir, "codex-ib-server.out.log");
+  const stderrPath = path.join(logDir, "codex-ib-server.err.log");
+  rotateLogFile(fs, stdoutPath, { maxBytes: LOG_MAX_BYTES, backupCount: LOG_BACKUP_COUNT });
+  rotateLogFile(fs, stderrPath, { maxBytes: LOG_MAX_BYTES, backupCount: LOG_BACKUP_COUNT });
+  const stdout = fs.openSync(stdoutPath, "a");
+  const stderr = fs.openSync(stderrPath, "a");
   const env = {
     ...process.env,
     CODEX_LB_DATA_DIR: dataDir,
+    CODEX_LB_BOOTSTRAP_TOKEN_FILE: path.join(dataDir, "dashboard-bootstrap-token.txt"),
     PYTHONPATH: path.join(root, ".venv", "Lib", "site-packages"),
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
@@ -130,16 +141,21 @@ function startBackend(root) {
     PORT: String(PORT),
   };
 
-  backendProcess = spawn(
-    pythonExe,
-    ["-m", "uvicorn", "app.main:app", "--host", HOST, "--port", String(PORT)],
-    {
-      cwd: root,
-      env,
-      windowsHide: true,
-      stdio: ["ignore", stdout, stderr],
-    },
-  );
+  try {
+    backendProcess = spawn(
+      pythonExe,
+      ["-m", "uvicorn", "app.main:app", "--host", HOST, "--port", String(PORT)],
+      {
+        cwd: root,
+        env,
+        windowsHide: true,
+        stdio: ["ignore", stdout, stderr],
+      },
+    );
+  } finally {
+    fs.closeSync(stdout);
+    fs.closeSync(stderr);
+  }
 
   backendProcess.once("exit", (code, signal) => {
     appendLog(root, `Backend exited with code=${code ?? ""} signal=${signal ?? ""}.`);
@@ -174,8 +190,19 @@ function createWindow(root) {
     mainWindow.show();
   });
 
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (!isAllowedAppUrl(url, BASE_URL)) {
+      event.preventDefault();
+      appendLog(root, `Blocked renderer navigation outside the app origin: ${url}`);
+    }
+  });
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (isSafeExternalUrl(url)) {
+      shell.openExternal(url).catch((error) => appendLog(root, `Failed to open external URL: ${error.message}`));
+    } else {
+      appendLog(root, `Blocked unsafe external URL: ${url}`);
+    }
     return { action: "deny" };
   });
 
@@ -194,7 +221,8 @@ function createWindow(root) {
   mainWindow.loadURL(CODEXNEO_URL);
 }
 
-ipcMain.handle("codex-ib:set-minimize-to-tray-enabled", (_event, enabled) => {
+ipcMain.handle("codex-ib:set-minimize-to-tray-enabled", (event, enabled) => {
+  assertTrustedIpcSender(event, BASE_URL);
   minimizeToTrayEnabled = Boolean(enabled);
   if (minimizeToTrayEnabled) {
     ensureTray(sidecarRoot());
@@ -205,7 +233,8 @@ ipcMain.handle("codex-ib:set-minimize-to-tray-enabled", (_event, enabled) => {
   return minimizeToTrayEnabled;
 });
 
-ipcMain.handle("codex-ib:minimize", (_event, options = {}) => {
+ipcMain.handle("codex-ib:minimize", (event, options = {}) => {
+  assertTrustedIpcSender(event, BASE_URL);
   if (!mainWindow) return false;
   const toTray = Boolean(options.toTray);
   minimizeToTrayEnabled = toTray;
@@ -221,7 +250,8 @@ ipcMain.handle("codex-ib:minimize", (_event, options = {}) => {
   return true;
 });
 
-ipcMain.handle("codex-ib:set-start-with-windows-enabled", (_event, enabled) => {
+ipcMain.handle("codex-ib:set-start-with-windows-enabled", (event, enabled) => {
+  assertTrustedIpcSender(event, BASE_URL);
   startWithWindowsEnabled = applyStartWithWindowsSetting(app, enabled);
   appendLog(sidecarRoot(), `Start-with-Windows preference set to ${startWithWindowsEnabled}.`);
   return startWithWindowsEnabled;
@@ -237,7 +267,10 @@ const restartPortableApp = createPortableRestartCoordinator({
   root: sidecarRoot(),
 });
 
-ipcMain.handle("codex-ib:restart", () => restartPortableApp());
+ipcMain.handle("codex-ib:restart", (event) => {
+  assertTrustedIpcSender(event, BASE_URL);
+  return restartPortableApp();
+});
 
 async function boot() {
   const root = sidecarRoot();

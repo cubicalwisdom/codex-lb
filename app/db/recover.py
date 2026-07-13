@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,7 +41,7 @@ def _default_output_path(source: Path) -> Path:
 
 def _load_dump(source: Path) -> str:
     try:
-        with sqlite3.connect(str(source)) as conn:
+        with closing(sqlite3.connect(str(source))) as conn:
             return "\n".join(conn.iterdump())
     except sqlite3.DatabaseError as exc:
         message = f"failed to read sqlite dump: {exc}"
@@ -49,10 +50,11 @@ def _load_dump(source: Path) -> str:
 
 def _write_dump(output: Path, dump: str) -> None:
     try:
-        with sqlite3.connect(str(output)) as conn:
+        with closing(sqlite3.connect(str(output))) as conn:
             conn.execute("PRAGMA foreign_keys=OFF")
             conn.executescript(dump)
             conn.execute("PRAGMA foreign_keys=ON")
+            conn.commit()
     except sqlite3.DatabaseError as exc:
         message = f"failed to write sqlite dump: {exc}"
         raise RuntimeError(message) from exc

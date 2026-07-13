@@ -13,7 +13,7 @@ def test_responses_lifecycle_migration_is_single_head_and_reversible(tmp_path: P
     database_url = f"sqlite:///{tmp_path / 'responses-lifecycle.db'}"
     config = _build_alembic_config(database_url)
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["20260710_010000_add_request_log_cache_write_tokens"]
+    assert script.get_heads() == ["20260712_000000_add_request_log_daily_aggregates"]
 
     command.upgrade(config, "head")
     engine = sa.create_engine(database_url, future=True)

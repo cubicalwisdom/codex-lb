@@ -9,7 +9,7 @@ from alembic.script import ScriptDirectory
 from app.db.migrate import _build_alembic_config
 
 PRIOR_HEAD = "20260710_000000_add_responses_lifecycle_resources"
-EXPECTED_HEAD = "20260710_010000_add_request_log_cache_write_tokens"
+EXPECTED_HEAD = "20260712_000000_add_request_log_daily_aggregates"
 
 
 def test_cache_write_tokens_migration_is_single_head_and_reversible(tmp_path: Path) -> None:
