@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from app.core import usage as usage_core
 from app.core.auth import DEFAULT_EMAIL, claims_from_auth, extract_id_token_claims, parse_auth_json
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.plan_types import normalize_account_plan_type
@@ -341,13 +342,19 @@ class CodexNeoAccountsSyncService:
                 "secondary",
                 account_ids=[account.id for account in accounts],
             )
+            effective_primary_rows, effective_weekly_rows = usage_core.normalize_weekly_only_rows(
+                primary_usage.values(),
+                secondary_usage.values(),
+            )
+            effective_primary = {usage.account_id: usage for usage in effective_primary_rows}
+            effective_weekly = {usage.account_id: usage for usage in effective_weekly_rows}
             for account in accounts:
-                usage = secondary_usage.get(account.id)
+                usage = effective_weekly.get(account.id)
                 if usage is None or float(usage.used_percent) != 100.0:
                     continue
                 if not _is_quota_exceeded_for_auto_delete(
                     account,
-                    primary=primary_usage.get(account.id),
+                    primary=effective_primary.get(account.id),
                     secondary=usage,
                 ):
                     continue

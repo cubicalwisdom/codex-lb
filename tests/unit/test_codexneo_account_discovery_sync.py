@@ -809,6 +809,45 @@ async def test_auto_delete_quota_exceeded_accounts_deletes_backup_only_exact_zer
 
 
 @pytest.mark.asyncio
+async def test_auto_delete_quota_exceeded_accounts_uses_weekly_primary_for_backup_only_account(
+    tmp_path,
+    db_setup,
+) -> None:
+    del db_setup
+    codex_home = tmp_path / ".codex"
+    data_dir = tmp_path / "data"
+    account_key = "backup-only-weekly-primary-key"
+    email = "backup-only-weekly-primary@example.com"
+    raw_account_id = "acc_backup_only_weekly_primary"
+    _write_backup_account(
+        data_dir,
+        account_key,
+        email=email,
+        raw_account_id=raw_account_id,
+    )
+    snapshot_path = data_dir / "account-backups" / f"{account_key}.auth.json"
+    await _import_account_to_db(snapshot_path.read_bytes())
+    account_id = generate_unique_account_id(raw_account_id, email)
+    await _set_account_state(account_id, plan_type="pro", status=AccountStatus.QUOTA_EXCEEDED)
+    async with get_background_session() as session:
+        await UsageRepository(session).add_entry(
+            account_id,
+            100.0,
+            window="primary",
+            window_minutes=10080,
+        )
+        await session.commit()
+    service = CodexNeoAccountsSyncService(codex_home=codex_home, data_dir=data_dir)
+
+    result = await service.auto_delete_quota_exceeded_weekly_exhausted_accounts()
+
+    assert result.success is True
+    assert result.count == 1
+    assert account_id not in await _account_ids()
+    assert not snapshot_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_refresh_selected_account_usage_resolves_codexneo_key(tmp_path, db_setup, monkeypatch) -> None:
     del db_setup
     codex_home = tmp_path / ".codex"
