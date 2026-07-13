@@ -351,7 +351,11 @@ class CodexNeoAccountsSyncService:
                     secondary=usage,
                 ):
                     continue
-                matched_keys = _matching_codex_keys_for_account(self._codex_home, account)
+                matched_keys = _matching_codexneo_keys_for_account(
+                    self._codex_home,
+                    self._data_dir,
+                    account,
+                )
                 if not matched_keys:
                     continue
                 account_ids_to_delete.add(account.id)
@@ -546,7 +550,7 @@ class CodexNeoAccountsSyncService:
         return CodexNeoSyncResult(
             success=location_result.success,
             message=(
-                f"Removed {len(keys)} Codex Home account(s) with local registry fallback"
+                f"Removed {len(keys)} managed account source(s) with local registry fallback"
                 if location_result.success
                 else f"Codex Home remove fallback failed: {location_result.message}"
             ),
