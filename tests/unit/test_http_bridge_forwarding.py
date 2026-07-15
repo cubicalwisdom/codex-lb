@@ -19,6 +19,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_MODEL_HEADER,
     HTTP_BRIDGE_SIGNATURE_HEADER,
+    HTTP_BRIDGE_SIGNATURE_V2_HEADER,
     HTTP_BRIDGE_TARGET_INSTANCE_HEADER,
     HTTPBridgeForwardContext,
     HTTPBridgeOwnerClient,
@@ -122,6 +123,7 @@ def test_parse_forwarded_request_rejects_tampered_signature() -> None:
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
     headers[HTTP_BRIDGE_SIGNATURE_HEADER] = "bad-signature"
+    headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
 
     forwarded, error = parse_forwarded_request(
         headers,
@@ -133,6 +135,39 @@ def test_parse_forwarded_request_rejects_tampered_signature() -> None:
     assert error is not None
     assert error.status_code == 400
     assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_owner_forward_preserves_omitted_tools_and_strips_unsafe_headers() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(
+        headers={
+            "Authorization": "Bearer proxy-key",
+            "Accept": "application/json",
+            "Connection": "X-Unsafe",
+            "X-Unsafe": "drop",
+            "x-codex-bridge-signature-v2": "spoofed",
+        },
+        payload=payload,
+        context=context,
+    )
+    body = payload.model_dump_for_forwarding()
+    forwarded_payload = ResponsesRequest.model_validate(body)
+
+    assert "tools" not in body
+    assert "tools" not in forwarded_payload.model_fields_set
+    assert headers["authorization"] == "Bearer proxy-key"
+    assert "Accept" not in headers
+    assert "X-Unsafe" not in headers
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] != "spoofed"
+    forwarded, error = parse_forwarded_request(headers, payload=forwarded_payload, current_instance="instance-b")
+    assert error is None
+    assert forwarded is not None
 
 
 def test_parse_forwarded_request_rejects_tampered_reservation_fields() -> None:

@@ -326,7 +326,9 @@ class _WebSocketRequestState:
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_output_types: dict[str, str] = field(default_factory=dict)
-    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
+    seen_tool_call_keys: dict[
+        tuple[str, str, str | None, str | None, str | None, str], None
+    ] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
     api_key_reservation_last_touch_at: float = field(default_factory=time.monotonic)
@@ -340,6 +342,7 @@ class _WebSocketRequestState:
     useragent: str | None = None
     useragent_group: str | None = None
     downstream_visible: bool = False
+    last_downstream_sequence_number: int | None = None
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
@@ -411,7 +414,9 @@ class _HTTPBridgeSession:
     upstream_close_attempted: bool = False
     terminal_resource_settlement_task: asyncio.Task[None] | None = None
     terminal_resources_settled: bool = False
-    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
+    seen_tool_call_keys: dict[
+        tuple[str, str, str | None, str | None, str | None, str], None
+    ] = field(default_factory=dict)
     upstream_proxy_route_mode: str | None = None
     upstream_proxy_pool_id: str | None = None
     upstream_proxy_endpoint_id: str | None = None
@@ -461,7 +466,9 @@ class _WebSocketUpstreamControl:
     suppress_downstream_event: bool = False
     replay_request_state: _WebSocketRequestState | None = None
     downstream_texts: list[str] | None = None
-    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
+    seen_tool_call_keys: dict[
+        tuple[str, str, str | None, str | None, str | None, str], None
+    ] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

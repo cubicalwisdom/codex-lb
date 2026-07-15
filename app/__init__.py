@@ -1,5 +1,6 @@
 __version__ = "1.20.1"  # x-release-please-version
-__all__ = ["app", "__version__"]
+__display_version__ = "v1.21parity"
+__all__ = ["app", "__display_version__", "__version__"]
 
 
 def __getattr__(name: str):

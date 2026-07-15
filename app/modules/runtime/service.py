@@ -10,7 +10,7 @@ from datetime import datetime
 
 import aiohttp
 
-from app import __version__
+from app import __display_version__, __version__
 from app.core.utils.time import utcnow
 from app.modules.runtime.schemas import RuntimeVersionResponse
 
@@ -38,11 +38,15 @@ class RuntimeVersionService:
         self,
         *,
         current_version: str = __version__,
+        display_version: str | None = None,
         ttl_seconds: float = 6 * 60 * 60,
         failure_ttl_seconds: float = 15 * 60,
         github_token_env_var: str = "GITHUB_TOKEN",
     ) -> None:
         self._current_version = current_version
+        self._display_version = display_version or (
+            __display_version__ if current_version == __version__ else current_version
+        )
         self._ttl_seconds = ttl_seconds
         self._failure_ttl_seconds = failure_ttl_seconds
         self._github_token_env_var = github_token_env_var
@@ -77,7 +81,7 @@ class RuntimeVersionService:
         except Exception:
             logger.warning("Failed to fetch latest codex-lb release from GitHub", exc_info=True)
             return _RuntimeVersionSnapshot(
-                current_version=self._current_version,
+                current_version=self._display_version,
                 latest_version=None,
                 update_available=False,
                 checked_at=checked_at,
@@ -86,7 +90,7 @@ class RuntimeVersionService:
 
         update_available = _is_newer_version(latest_version, self._current_version)
         return _RuntimeVersionSnapshot(
-            current_version=self._current_version,
+            current_version=self._display_version,
             latest_version=latest_version,
             update_available=update_available,
             checked_at=checked_at,

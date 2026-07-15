@@ -11,7 +11,7 @@ from typing import cast
 
 import aiohttp
 
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.config.settings import get_settings
 from app.core.crypto import get_or_create_key
 from app.core.errors import OpenAIErrorEnvelope, openai_error, response_failed_event
@@ -33,6 +33,23 @@ HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
 HTTP_BRIDGE_AFFINITY_KIND_HEADER = "x-codex-bridge-affinity-kind"
 HTTP_BRIDGE_AFFINITY_KEY_HEADER = "x-codex-bridge-affinity-key"
 HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
+HTTP_BRIDGE_SIGNATURE_V2_HEADER = "x-codex-bridge-signature-v2"
+
+_BRIDGE_UNSAFE_HEADER_NAMES = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "connection",
+        "content-type",
+        "cookie",
+        "keep-alive",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+_OWNER_FORWARD_SKIP_AUTO_HEADERS = frozenset({aiohttp.hdrs.ACCEPT, aiohttp.hdrs.ACCEPT_ENCODING})
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,8 +105,9 @@ class HTTPBridgeOwnerClient:
         async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
             async with session.post(
                 f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}",
-                json=payload.model_dump(mode="json", exclude_none=True),
+                json=payload.model_dump_for_forwarding(),
                 headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
+                skip_auto_headers=_OWNER_FORWARD_SKIP_AUTO_HEADERS,
             ) as response:
                 if response.status != 200:
                     payload_text = await response.text()
@@ -136,9 +154,18 @@ def build_owner_forward_headers(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
 ) -> dict[str, str]:
-    forwarded = dict(headers)
-    forwarded.pop("host", None)
-    forwarded.pop("content-length", None)
+    filtered = filter_inbound_headers(headers)
+    connection_value = next((value for key, value in headers.items() if key.lower() == "connection"), "")
+    connection_named = {token.strip().lower() for token in connection_value.split(",") if token.strip()}
+    drop = _BRIDGE_UNSAFE_HEADER_NAMES | connection_named
+    forwarded = {
+        key: value
+        for key, value in filtered.items()
+        if key.lower() not in drop and not key.lower().startswith("x-codex-bridge-")
+    }
+    authorization = next((value for key, value in headers.items() if key.lower() == "authorization"), None)
+    if authorization is not None:
+        forwarded["authorization"] = authorization
     forwarded[HTTP_BRIDGE_FORWARDED_HEADER] = "1"
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
@@ -153,6 +180,7 @@ def build_owner_forward_headers(
         forwarded[HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER] = context.reservation.key_id
         forwarded[HTTP_BRIDGE_RESERVATION_MODEL_HEADER] = context.reservation.model
     forwarded[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(payload=payload, context=context)
+    forwarded[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = _bridge_forward_tools_bound_signature(payload=payload, context=context)
     return forwarded
 
 
@@ -190,6 +218,11 @@ def parse_forwarded_request(
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
         reservation=_reservation_from_headers(headers),
     )
+    tools_bound_signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_V2_HEADER))
+    if tools_bound_signature is not None and hmac.compare_digest(
+        tools_bound_signature, _bridge_forward_tools_bound_signature(payload=payload, context=context)
+    ):
+        return HTTPBridgeForwardedRequest(context=context), None
     signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_HEADER))
     expected_signature = _bridge_forward_signature(payload=payload, context=context)
     if signature is None or not hmac.compare_digest(signature, expected_signature):
@@ -259,6 +292,43 @@ def _bridge_forward_signature(*, payload: ResponsesRequest, context: HTTPBridgeF
             context.reservation.model if context.reservation is not None else "",
             body_digest,
         )
+    )
+    secret = get_or_create_key(get_settings().encryption_key_file)
+    return hmac.new(secret, signing_payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _bridge_forward_tools_bound_signature(*, payload: ResponsesRequest, context: HTTPBridgeForwardContext) -> str:
+    """Bind the signature to the exact body posted to the owner instance."""
+    payload_json = json.dumps(
+        payload.model_dump_for_forwarding(),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    body_digest = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    signing_payload = json.dumps(
+        {
+            "body_digest": body_digest,
+            "codex_session_affinity": context.codex_session_affinity,
+            "downstream_turn_state": context.downstream_turn_state,
+            "origin_instance": context.origin_instance,
+            "original_affinity_key": context.original_affinity_key,
+            "original_affinity_kind": context.original_affinity_kind,
+            "protocol": "codex-lb-http-bridge-forward-tools-bound",
+            "reservation": (
+                {
+                    "id": context.reservation.reservation_id,
+                    "key_id": context.reservation.key_id,
+                    "model": context.reservation.model,
+                }
+                if context.reservation is not None
+                else None
+            ),
+            "target_instance": context.target_instance,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
     )
     secret = get_or_create_key(get_settings().encryption_key_file)
     return hmac.new(secret, signing_payload.encode("utf-8"), hashlib.sha256).hexdigest()

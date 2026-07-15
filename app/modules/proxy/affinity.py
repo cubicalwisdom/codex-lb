@@ -214,11 +214,15 @@ def _sticky_key_for_codex_control_request(
     return _AffinityPolicy()
 
 
-def _owner_lookup_session_id_from_headers(headers: Mapping[str, str]) -> str | None:
+def _owner_lookup_session_id_from_headers(
+    headers: Mapping[str, str],
+    *,
+    synthesized_turn_state: str | None = None,
+) -> str | None:
     # `x-codex-turn-state` is per conversation turn/thread and is more specific
     # than `session_id`, which may be shared across multiple terminals.
     turn_state = _sticky_key_from_turn_state_header(headers)
-    if turn_state is not None:
+    if turn_state is not None and turn_state != synthesized_turn_state:
         return turn_state
     return _sticky_key_from_session_header(headers)
 
@@ -293,6 +297,7 @@ def _sticky_key_for_responses_request(
     openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
+    synthesized_turn_state: str | None = None,
 ) -> _AffinityPolicy:
     # This helper only classifies locality keys. Stored-object continuity such
     # as `previous_response_id` is resolved later by ProxyService and must stay
@@ -303,7 +308,7 @@ def _sticky_key_for_responses_request(
         api_key=api_key,
     )
     turn_state_key = _sticky_key_from_turn_state_header(headers)
-    if turn_state_key:
+    if turn_state_key and turn_state_key != synthesized_turn_state:
         return _AffinityPolicy(
             key=turn_state_key,
             kind=StickySessionKind.CODEX_SESSION,
@@ -327,4 +332,6 @@ def _sticky_key_for_responses_request(
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
         )
+    if turn_state_key is not None and turn_state_key == synthesized_turn_state:
+        return _AffinityPolicy(key=turn_state_key, kind=StickySessionKind.CODEX_SESSION)
     return _AffinityPolicy()

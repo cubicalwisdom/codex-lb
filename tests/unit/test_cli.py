@@ -35,6 +35,7 @@ def test_main_passes_timestamped_log_config(monkeypatch):
     assert formatters["default"]["fmt"].startswith("%(asctime)s ")
     assert formatters["access"]["fmt"].startswith("%(asctime)s ")
     assert kwargs["timeout_keep_alive"] == 7200
+    assert kwargs["ws_max_size"] == 128 * 1024 * 1024
 
 
 def test_main_passes_custom_keep_alive_timeout(monkeypatch):
@@ -50,6 +51,28 @@ def test_main_passes_custom_keep_alive_timeout(monkeypatch):
     cli.main()
 
     assert captured["kwargs"]["timeout_keep_alive"] == 900
+
+
+def test_main_passes_custom_ws_max_size(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(sys, "argv", ["codex-lb", "--ws-max-size", "33554432"])
+    monkeypatch.setattr(
+        cli,
+        "_load_uvicorn",
+        lambda: SimpleNamespace(run=lambda *args, **kwargs: captured.update(kwargs)),
+    )
+
+    cli.main()
+
+    assert captured["ws_max_size"] == 33554432
+
+
+def test_main_rejects_non_positive_ws_max_size(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["codex-lb", "--ws-max-size", "0"])
+
+    with pytest.raises(SystemExit, match="UVICORN_WS_MAX_SIZE must be positive"):
+        cli.main()
 
 
 def test_main_reports_invalid_server_port_env(monkeypatch):

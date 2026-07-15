@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Mapping, cast
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -263,7 +263,7 @@ def test_settings_default_prompt_cache_affinity_ttl_is_1800():
     assert settings.openai_cache_affinity_max_age_seconds == 1800
 
 
-def test_responses_to_payload_canonicalizes_tool_order_and_object_keys():
+def test_responses_to_payload_preserves_tool_order_and_object_keys():
     request = ResponsesRequest.model_validate(
         {
             "model": "gpt-5.1",
@@ -288,11 +288,23 @@ def test_responses_to_payload_canonicalizes_tool_order_and_object_keys():
 
     dumped = request.to_payload()
     tools = cast(list[JsonValue], dumped["tools"])
-    first_tool = cast(Mapping[str, JsonValue], tools[0])
-    parameters = cast(Mapping[str, JsonValue], first_tool["parameters"])
-    assert first_tool["name"] == "alpha"
-    assert list(first_tool.keys()) == ["description", "name", "parameters", "type"]
-    assert list(parameters.keys()) == ["properties", "required", "type"]
+    assert tools[0]["name"] == "zeta"
+    assert list(tools[0].keys()) == ["type", "name", "parameters", "description"]
+
+
+def test_responses_to_payload_omits_unset_tools_and_preserves_reserved_namespace_tool():
+    omitted = ResponsesRequest.model_validate({"model": "gpt-5.6", "instructions": "", "input": []})
+    reserved_tool: JsonValue = {
+        "type": "namespace",
+        "name": "collaboration",
+        "tools": [{"type": "function", "name": "spawn_agent", "strict": False}],
+    }
+    explicit = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6", "instructions": "", "input": [], "tools": [reserved_tool]}
+    )
+
+    assert "tools" not in omitted.to_payload()
+    assert explicit.to_payload()["tools"] == [reserved_tool]
 
 
 def test_openai_compatible_reasoning_aliases_are_normalized():
@@ -749,7 +761,7 @@ def test_responses_preserves_responses_lite_input_shape_untouched():
     dumped = request.to_payload()
 
     assert dumped["instructions"] == "primary"
-    assert dumped["tools"] == []
+    assert "tools" not in dumped
     assert dumped["input"] == expected_input
 
 

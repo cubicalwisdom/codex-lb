@@ -43,6 +43,7 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
+from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import acquire_http_client, lease_http_session
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
@@ -157,6 +158,21 @@ _NATIVE_CODEX_USER_AGENT_PREFIXES: tuple[str, ...] = (
     "codex desktop",
     "codex ",
 )
+_SDK_FINGERPRINT_HEADER_KEYS = frozenset(
+    {
+        "x-openai-client-version",
+        "x-openai-client-os",
+        "x-openai-client-arch",
+        "x-openai-client-id",
+        "x-openai-client-user-agent",
+    }
+)
+_SDK_FINGERPRINT_HEADER_PREFIXES = ("x-stainless-",)
+_CODEX_CLI_ORIGINATOR = "codex_cli_rs"
+_CHATGPT_ACCOUNT_ID_HEADER = "ChatGPT-Account-Id"
+_DEFAULT_FINGERPRINT_OS = "Mac OS 26.5.0"
+_DEFAULT_FINGERPRINT_ARCH = "arm64"
+_DEFAULT_FINGERPRINT_TERMINAL = "iTerm.app/3.6.10"
 _NATIVE_CODEX_STREAM_HEADER_KEYS = frozenset(
     {
         "x-codex-turn-state",
@@ -546,16 +562,19 @@ def _build_upstream_headers(
     accept: str = "text/event-stream",
 ) -> dict[str, str]:
     headers = filter_inbound_headers(inbound)
+    native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
+    if not native:
+        _normalize_non_native_upstream_fingerprint(headers)
     headers["Authorization"] = f"Bearer {access_token}"
     headers["Accept"] = accept
     headers["Content-Type"] = "application/json"
     if account_id:
-        headers["chatgpt-account-id"] = account_id
+        headers["chatgpt-account-id" if native else _CHATGPT_ACCOUNT_ID_HEADER] = account_id
     return headers
 
 
@@ -598,14 +617,17 @@ def _build_upstream_websocket_headers(
     blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
     filtered = filter_inbound_headers(inbound)
     headers = {key: value for key, value in filtered.items() if key.lower() not in blocked_header_names}
+    native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
+    if not native:
+        _normalize_non_native_upstream_fingerprint(headers)
     headers["Authorization"] = f"Bearer {access_token}"
     if account_id:
-        headers["chatgpt-account-id"] = account_id
+        headers["chatgpt-account-id" if native else _CHATGPT_ACCOUNT_ID_HEADER] = account_id
     return headers
 
 
@@ -1237,6 +1259,38 @@ def _is_native_codex_request(headers: Mapping[str, str]) -> bool:
     return _is_native_codex_user_agent(user_agent) or _is_native_codex_originator(originator)
 
 
+def build_codex_user_agent(version: str) -> str:
+    settings = get_settings()
+    os_name = getattr(settings, "codex_fingerprint_os", _DEFAULT_FINGERPRINT_OS)
+    arch = getattr(settings, "codex_fingerprint_arch", _DEFAULT_FINGERPRINT_ARCH)
+    terminal = getattr(settings, "codex_fingerprint_terminal", _DEFAULT_FINGERPRINT_TERMINAL)
+    return f"{_CODEX_CLI_ORIGINATOR}/{version} ({os_name}; {arch}) {terminal}"
+
+
+def _normalize_non_native_upstream_fingerprint(headers: dict[str, str]) -> None:
+    version = _codex_fingerprint_version()
+    for key in list(headers):
+        lowered = key.lower()
+        if (
+            lowered == "user-agent"
+            or lowered in _SDK_FINGERPRINT_HEADER_KEYS
+            or lowered.startswith(_SDK_FINGERPRINT_HEADER_PREFIXES)
+            or lowered in {"originator", "version"}
+        ):
+            del headers[key]
+    headers["User-Agent"] = build_codex_user_agent(version)
+    headers["originator"] = _CODEX_CLI_ORIGINATOR
+    headers["version"] = version
+
+
+def _codex_fingerprint_version() -> str:
+    """Use the live cached version without performing network I/O per request."""
+    cached_version = getattr(get_codex_version_cache(), "_cached_version", None)
+    if isinstance(cached_version, str) and cached_version.strip():
+        return cached_version
+    return str(getattr(get_settings(), "model_registry_client_version", "0.144.0"))
+
+
 def _payload_uses_image_generation_tool(payload: Mapping[str, JsonValue]) -> bool:
     tools = payload.get("tools")
     if not isinstance(tools, list):
@@ -1811,7 +1865,7 @@ def _prepare_websocket_response_create_payload(payload_dict: JsonObject) -> Json
     if payload_size <= _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
         return request_payload
     raise ProxyResponseError(
-        413,
+        400,
         _response_create_too_large_error_envelope(payload_size, _UPSTREAM_RESPONSE_CREATE_MAX_BYTES),
         failure_phase="validation",
         failure_detail=f"response.create_bytes={payload_size}",

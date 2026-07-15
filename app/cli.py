@@ -68,6 +68,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "client writing to a stale socket before the request reaches the app."
         ),
     )
+    parser.add_argument(
+        "--ws-max-size",
+        default=os.getenv("UVICORN_WS_MAX_SIZE", str(128 * 1024 * 1024)),
+        help="Maximum decompressed size in bytes of a single incoming websocket message.",
+    )
 
     return parser.parse_args(argv)
 
@@ -86,6 +91,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     port = _parse_server_port(args.port)
     timeout_keep_alive = _parse_server_timeout_keep_alive(args.timeout_keep_alive)
+    ws_max_size = _parse_server_ws_max_size(args.ws_max_size)
     os.environ["PORT"] = str(port)
 
     _load_uvicorn().run(
@@ -95,6 +101,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         ssl_certfile=args.ssl_certfile,
         ssl_keyfile=args.ssl_keyfile,
         timeout_keep_alive=timeout_keep_alive,
+        ws_max_size=ws_max_size,
         log_config=_build_log_config(),
     )
 
@@ -124,6 +131,18 @@ def _parse_server_timeout_keep_alive(raw_timeout: str) -> int:
     except ValueError as exc:
         message = f"--timeout-keep-alive/UVICORN_TIMEOUT_KEEP_ALIVE must be an integer, got {raw_timeout!r}."
         raise SystemExit(message) from exc
+
+
+def _parse_server_ws_max_size(raw_ws_max_size: str) -> int:
+    try:
+        ws_max_size = int(raw_ws_max_size)
+    except ValueError as exc:
+        raise SystemExit(
+            f"--ws-max-size/UVICORN_WS_MAX_SIZE must be an integer, got {raw_ws_max_size!r}."
+        ) from exc
+    if ws_max_size <= 0:
+        raise SystemExit(f"--ws-max-size/UVICORN_WS_MAX_SIZE must be positive, got {raw_ws_max_size!r}.")
+    return ws_max_size
 
 
 def _run_codex_sessions_retag(args: argparse.Namespace) -> None:

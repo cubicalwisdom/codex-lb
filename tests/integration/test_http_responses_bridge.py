@@ -5968,7 +5968,7 @@ async def test_v1_responses_http_bridge_rejects_oversized_response_create_before
         },
     )
 
-    assert response.status_code == 413
+    assert response.status_code == 400
     payload = response.json()
     assert payload["error"]["code"] == "payload_too_large"
     assert payload["error"]["type"] == "invalid_request_error"

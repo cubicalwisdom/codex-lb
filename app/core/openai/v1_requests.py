@@ -125,6 +125,10 @@ class V1ResponsesRequest(BaseModel):
 
     def to_responses_request(self) -> ResponsesRequest:
         data = self.model_dump(mode="json", exclude_none=True)
+        # Carry an omitted tools field through the v1 adapter. Otherwise the
+        # default factory turns omission into an explicit ``tools: []``.
+        if "tools" not in self.model_fields_set:
+            data.pop("tools", None)
         reject_unsupported_response_controls(data, allow_local_lifecycle=True)
         messages = data.pop("messages", None)
         instructions = data.get("instructions")

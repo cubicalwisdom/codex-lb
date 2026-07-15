@@ -495,7 +495,7 @@ def test_build_upstream_headers_overrides_auth():
     inbound = {"X-Request-Id": "req_1"}
     headers = _build_upstream_headers(inbound, "token", "acc_2")
     assert headers["Authorization"] == "Bearer token"
-    assert headers["chatgpt-account-id"] == "acc_2"
+    assert headers["ChatGPT-Account-Id"] == "acc_2"
     assert headers["Accept"] == "text/event-stream"
     assert headers["Content-Type"] == "application/json"
 
@@ -1355,7 +1355,7 @@ def test_build_upstream_websocket_headers_strip_accept_and_content_type_case_ins
         {
             "accept": "text/event-stream",
             "content-type": "application/json",
-            "User-Agent": "codex-test",
+            "User-Agent": "codex_cli_rs/0.144.0",
         },
         "token",
         "acc_2",
@@ -1365,7 +1365,7 @@ def test_build_upstream_websocket_headers_strip_accept_and_content_type_case_ins
     assert all(key.lower() != "content-type" for key in headers)
     assert headers["Authorization"] == "Bearer token"
     assert headers["chatgpt-account-id"] == "acc_2"
-    assert headers["User-Agent"] == "codex-test"
+    assert headers["User-Agent"] == "codex_cli_rs/0.144.0"
 
 
 def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connection_tokens():
@@ -1377,7 +1377,7 @@ def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connectio
             "Transfer-Encoding": "chunked",
             "Proxy-Connection": "keep-alive",
             "X-Handshake-Debug": "1",
-            "User-Agent": "codex-test",
+            "User-Agent": "codex_cli_rs/0.144.0",
         },
         "token",
         "acc_2",
@@ -1391,7 +1391,7 @@ def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connectio
     assert "X-Handshake-Debug" not in headers
     assert headers["Authorization"] == "Bearer token"
     assert headers["chatgpt-account-id"] == "acc_2"
-    assert headers["User-Agent"] == "codex-test"
+    assert headers["User-Agent"] == "codex_cli_rs/0.144.0"
 
 
 @pytest.mark.asyncio
@@ -2243,8 +2243,75 @@ def test_response_create_client_metadata_reads_turn_metadata_case_insensitively(
     assert metadata == {"x-codex-turn-metadata": '{"turn_id":"header-turn"}'}
 
 
+def test_response_create_client_metadata_promotes_multi_agent_headers():
+    metadata = proxy_service._response_create_client_metadata(
+        {"client_metadata": {"x-openai-subagent": "payload"}},
+        headers={
+            "X-OpenAI-Subagent": "header",
+            "X-Codex-Parent-Thread-Id": "parent-thread",
+            "X-Codex-Window-Id": "child-thread:0",
+        },
+    )
+
+    assert metadata == {
+        "x-openai-subagent": "payload",
+        "x-codex-parent-thread-id": "parent-thread",
+        "x-codex-window-id": "child-thread:0",
+    }
+
+
+def test_websocket_precreated_retry_error_code_does_not_replay_after_sequence_exposed():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_sequenced_precreated",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":"hello"}',
+        last_downstream_sequence_number=3,
+    )
+    payload: dict[str, JsonValue] = {
+        "type": "error",
+        "error": {"type": "rate_limit_error", "code": "rate_limit_exceeded", "message": "Rate limit reached."},
+    }
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
 def test_has_native_codex_transport_headers_does_not_treat_session_id_as_websocket_signal():
     assert proxy_module._has_native_codex_transport_headers({"session_id": "sid_123"}) is False
+
+
+def test_synthesized_turn_state_does_not_override_durable_session_affinity():
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6", "instructions": "hi", "input": [], "prompt_cache_key": "cache-owner"}
+    )
+    headers = {"x-codex-turn-state": "turn_0123456789abcdef0123456789abcdef", "session_id": "session-owner"}
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+        synthesized_turn_state=headers["x-codex-turn-state"],
+    )
+
+    assert policy.key == "session-owner"
+    assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
+    assert proxy_service._owner_lookup_session_id_from_headers(
+        headers, synthesized_turn_state=headers["x-codex-turn-state"]
+    ) == "session-owner"
 
 
 def test_has_native_codex_transport_headers_still_accepts_explicit_native_stream_headers_without_originator():
@@ -4623,7 +4690,7 @@ async def test_stream_responses_websocket_rejects_oversized_response_create_befo
             )
         ]
 
-    assert exc_info.value.status_code == 413
+    assert exc_info.value.status_code == 400
     assert exc_info.value.payload["error"]["code"] == "payload_too_large"
     assert session.ws_calls == []
 
@@ -10669,7 +10736,7 @@ async def test_prepare_websocket_response_create_request_releases_reservation_on
             api_key=api_key,
         )
 
-    assert exc_info.value.status_code == 413
+    assert exc_info.value.status_code == 400
     release_usage.assert_awaited_once_with(reservation)
 
 
@@ -10792,11 +10859,10 @@ async def test_prepare_websocket_response_create_request_trims_codex_session_ful
     assert prepared.request_state.input_full_fingerprint == proxy_service._fingerprint_input_items(
         [*historical_input, new_input]
     )
-    assert prepared.request_state.fresh_upstream_request_is_retry_safe is True
-    assert prepared.request_state.fresh_upstream_request_text is not None
-    fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
-    assert "previous_response_id" not in fresh_payload
-    assert fresh_payload["input"] == [*historical_input, new_input]
+    # The full resend includes an orphaned tool output, so a fresh replay
+    # would fabricate a turn without the call that produced it.
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is False
+    assert prepared.request_state.fresh_upstream_request_text is None
 
 
 @pytest.mark.codex_parity_smoke
@@ -10900,6 +10966,15 @@ def test_websocket_client_previous_response_full_resend_retry_requires_matching_
         )
         is False
     )
+
+
+def test_websocket_fresh_replay_rejects_orphan_tool_output() -> None:
+    assert proxy_service._websocket_input_items_are_self_contained_fresh_replay(
+        [
+            {"type": "function_call_output", "call_id": "call_missing", "output": "result"},
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ]
+    ) is False
 
 
 @pytest.mark.asyncio

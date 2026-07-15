@@ -408,6 +408,8 @@ def _websocket_client_previous_response_full_resend_is_retry_safe(
     input_items = cast(list[JsonValue], input_value)
     if len(input_items) <= 1:
         return False
+    if not _websocket_input_items_are_self_contained_fresh_replay(input_items):
+        return False
     if (
         continuity_state is not None
         and continuity_state.last_completed_response_id == previous_response_id
@@ -421,6 +423,33 @@ def _websocket_client_previous_response_full_resend_is_retry_safe(
             stored_count=continuity_state.last_completed_input_count,
             stored_fingerprint=continuity_state.last_completed_input_prefix_fingerprint,
         )
+    return True
+
+
+_WEBSOCKET_TOOL_CALL_ITEM_TYPES_BY_OUTPUT_TYPE = {
+    "function_call_output": "function_call",
+    "custom_tool_call_output": "custom_tool_call",
+    "apply_patch_call_output": "apply_patch_call",
+}
+_WEBSOCKET_TOOL_CALL_ITEM_TYPES = frozenset(_WEBSOCKET_TOOL_CALL_ITEM_TYPES_BY_OUTPUT_TYPE.values())
+
+
+def _websocket_input_items_are_self_contained_fresh_replay(input_items: list[JsonValue]) -> bool:
+    """Fresh replay may not retain a tool output without its originating call."""
+    seen_call_ids_by_type: dict[str, set[str]] = {item_type: set() for item_type in _WEBSOCKET_TOOL_CALL_ITEM_TYPES}
+    for item in input_items:
+        if not isinstance(item, dict):
+            continue
+        item_type = _websocket_input_item_type(item)
+        call_id_value = item.get("call_id")
+        call_id = call_id_value if isinstance(call_id_value, str) and call_id_value else None
+        if item_type in _WEBSOCKET_TOOL_CALL_ITEM_TYPES:
+            if call_id is not None:
+                seen_call_ids_by_type[item_type].add(call_id)
+            continue
+        call_item_type = _WEBSOCKET_TOOL_CALL_ITEM_TYPES_BY_OUTPUT_TYPE.get(item_type or "")
+        if call_item_type is not None and (call_id is None or call_id not in seen_call_ids_by_type[call_item_type]):
+            return False
     return True
 
 
@@ -569,6 +598,8 @@ def _websocket_precreated_retry_error_code(
 ) -> str | None:
     if request_state is None:
         return None
+    if request_state.last_downstream_sequence_number is not None:
+        return None
     if has_other_pending_requests:
         return None
     if request_state.response_id is not None:
@@ -617,6 +648,8 @@ def _websocket_precreated_auth_error_code(
     has_other_pending_requests: bool,
 ) -> str | None:
     if request_state is None:
+        return None
+    if request_state.last_downstream_sequence_number is not None:
         return None
     if has_other_pending_requests:
         return None
@@ -669,6 +702,8 @@ def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestS
 def _prepare_websocket_request_state_for_auth_replay(
     request_state: _WebSocketRequestState,
 ) -> str | None:
+    if request_state.last_downstream_sequence_number is not None:
+        return None
     if not _websocket_auth_request_can_switch_account(request_state):
         return None
     if (
@@ -732,7 +767,10 @@ async def _pop_replayable_precreated_websocket_request_state(
         if len(pending_requests) != 1:
             return None
         request_state = pending_requests[0]
-        if not _websocket_request_can_replay_before_visible_output(request_state):
+        if (
+            request_state.last_downstream_sequence_number is not None
+            or not _websocket_request_can_replay_before_visible_output(request_state)
+        ):
             return None
         pending_requests.popleft()
     if _prepare_websocket_request_state_for_visible_output_replay(request_state) is None:

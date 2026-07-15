@@ -388,6 +388,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_event_error_param,
     _websocket_event_error_type,
     _websocket_full_resend_conflicts_with_visible_pending,
+    _websocket_input_items_are_self_contained_fresh_replay,
     _websocket_precreated_auth_error_code,
     _websocket_precreated_retry_error_code,
     _websocket_receive_timeout_for_pending_requests,
@@ -453,20 +454,34 @@ class _WebSocketMixin:
         *,
         api_key: ApiKeyData | None,
         codex_session_affinity: bool,
+        synthesized_turn_state: str | None = None,
     ) -> "_WebSocketContinuityState":
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         if not codex_session_affinity:
             return _WebSocketContinuityState()
-        session_id = _owner_lookup_session_id_from_headers(headers)
-        if session_id is None:
+        session_id = _owner_lookup_session_id_from_headers(headers, synthesized_turn_state=synthesized_turn_state)
+        api_key_id = api_key.id if api_key is not None else None
+        cache_keys: list[tuple[str, str | None]] = []
+        if session_id is not None:
+            cache_keys.append((session_id, api_key_id))
+        if synthesized_turn_state is not None:
+            generated_key = (synthesized_turn_state, api_key_id)
+            if generated_key not in cache_keys:
+                cache_keys.append(generated_key)
+        if not cache_keys:
             return _WebSocketContinuityState()
-        key = (session_id, api_key.id if api_key is not None else None)
-        continuity_state = proxy._websocket_continuity_index.get(key)
+        continuity_state = next(
+            (
+                proxy._websocket_continuity_index.get(key)
+                for key in cache_keys
+                if key in proxy._websocket_continuity_index
+            ),
+            None,
+        )
         if continuity_state is None:
             continuity_state = _WebSocketContinuityState()
-            proxy._websocket_continuity_index[key] = continuity_state
-        else:
+        for key in cache_keys:
             proxy._websocket_continuity_index.pop(key, None)
             proxy._websocket_continuity_index[key] = continuity_state
         while len(proxy._websocket_continuity_index) > _facade()._WEBSOCKET_CONTINUITY_CACHE_LIMIT:
@@ -481,6 +496,7 @@ class _WebSocketMixin:
         codex_session_affinity: bool,
         openai_cache_affinity: bool,
         api_key: ApiKeyData | None,
+        synthesized_turn_state: str | None = None,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -503,6 +519,7 @@ class _WebSocketMixin:
             headers,
             api_key=api_key,
             codex_session_affinity=codex_session_affinity,
+            synthesized_turn_state=synthesized_turn_state,
         )
         account: Account | None = None
         account_lease: AccountLease | None = None
@@ -650,6 +667,7 @@ class _WebSocketMixin:
                                     continuity_state=continuity_state,
                                     useragent=useragent,
                                     useragent_group=useragent_group,
+                                    synthesized_turn_state=synthesized_turn_state,
                                 )
                                 if await _websocket_full_replay_should_wait_for_continuity(
                                     prepared_request.request_state,
@@ -684,6 +702,7 @@ class _WebSocketMixin:
                                         continuity_state=continuity_state,
                                         useragent=useragent,
                                         useragent_group=useragent_group,
+                                        synthesized_turn_state=synthesized_turn_state,
                                     )
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
@@ -696,7 +715,9 @@ class _WebSocketMixin:
                                     _error_message,
                                 ) = _sanitize_websocket_previous_response_error(
                                     previous_response_id=_facade()._previous_response_id_from_payload(payload),
-                                    session_id=_owner_lookup_session_id_from_headers(headers),
+                                    session_id=_owner_lookup_session_id_from_headers(
+                                        headers, synthesized_turn_state=synthesized_turn_state
+                                    ),
                                     status_code=exc.status_code,
                                     payload=exc.payload,
                                     error_code="upstream_error",
@@ -1122,6 +1143,7 @@ class _WebSocketMixin:
         continuity_state: "_WebSocketContinuityState | None" = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        synthesized_turn_state: str | None = None,
     ) -> _PreparedWebSocketRequest:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -1246,7 +1268,9 @@ class _WebSocketMixin:
             request_usage_budget=estimate_api_key_request_usage(responses_payload),
         )
         try:
-            session_id = _owner_lookup_session_id_from_headers(headers)
+            session_id = _owner_lookup_session_id_from_headers(
+                headers, synthesized_turn_state=synthesized_turn_state
+            )
             request_state, text_data = proxy._prepare_response_bridge_request_state(
                 responses_payload,
                 api_key=refreshed_api_key,
@@ -1276,7 +1300,14 @@ class _WebSocketMixin:
                     request_state=request_state,
                     transport=_REQUEST_TRANSPORT_WEBSOCKET,
                 )
-            request_state.fresh_upstream_request_is_retry_safe = request_state.fresh_upstream_request_text is not None
+            original_input = original_full_resend_payload.input if original_full_resend_payload is not None else None
+            request_state.fresh_upstream_request_is_retry_safe = bool(
+                request_state.fresh_upstream_request_text is not None
+                and isinstance(original_input, list)
+                and _websocket_input_items_are_self_contained_fresh_replay(cast(list[JsonValue], original_input))
+            )
+            if not request_state.fresh_upstream_request_is_retry_safe:
+                request_state.fresh_upstream_request_text = None
             request_state.fresh_upstream_request_responses_lite_model = (
                 responses_payload.model if body_uses_responses_lite else None
             )
@@ -1333,6 +1364,7 @@ class _WebSocketMixin:
             openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=sticky_threads_enabled,
             api_key=api_key,
+            synthesized_turn_state=synthesized_turn_state,
         )
         sticky_key_source = "none"
         if affinity_policy.kind == StickySessionKind.CODEX_SESSION:
@@ -3063,6 +3095,10 @@ class _WebSocketMixin:
             upstream_control=upstream_control,
             response_create_gate=response_create_gate,
         )
+        if request_state is not None and isinstance(payload, dict):
+            sequence_number = payload.get("sequence_number")
+            if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
+                request_state.last_downstream_sequence_number = sequence_number
         return downstream_text
 
     async def _handle_precreated_websocket_auth_failure(

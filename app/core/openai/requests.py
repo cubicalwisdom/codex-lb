@@ -678,8 +678,18 @@ class ResponsesRequest(BaseModel):
             raise ValueError("Provide either 'conversation' or 'previous_response_id', not both.")
         return self
 
-    def to_payload(self) -> JsonObject:
+    def model_dump_for_forwarding(self) -> MutableJsonObject:
+        """Serialize a request without materializing client-omitted fields."""
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)
+        # ``tools`` has a default factory. Preserve omission because Responses
+        # Lite multi-agent v2 carries reserved tools inside ``additional_tools``
+        # and rejects a synthesized top-level empty tools array.
+        if "tools" not in self.model_fields_set:
+            payload.pop("tools", None)
+        return payload
+
+    def to_payload(self) -> JsonObject:
+        payload = self.model_dump_for_forwarding()
         return _strip_unsupported_fields(payload)
 
 
@@ -750,21 +760,16 @@ def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _normalize_openai_compatible_aliases(payload)
     _normalize_service_tier_aliases(payload)
     _sanitize_interleaved_reasoning_input(payload)
-    _canonicalize_tools(payload)
+    # Tool definitions are wire-preserved. In particular, multi-agent v2
+    # namespace tools can contain unknown reserved fields and ordered schemas.
     for key in _UNSUPPORTED_UPSTREAM_FIELDS:
         payload.pop(key, None)
     return payload
 
 
-def _canonicalize_tools(payload: MutableJsonObject) -> None:
-    tools = payload.get("tools")
-    if not is_json_list(tools):
-        return
-    tool_list = tools
-    if not tool_list:
-        return
-    sorted_tools = sorted(tool_list, key=_tool_sort_key)
-    payload["tools"] = [_sort_keys_recursive(t) for t in sorted_tools]
+def canonicalized_tools(tools: list[JsonValue]) -> list[JsonValue]:
+    """Return a stable tool form for hashing without changing wire order."""
+    return [_sort_keys_recursive(tool) for tool in sorted(tools, key=_tool_sort_key)]
 
 
 def _tool_sort_key(tool: JsonValue) -> str:

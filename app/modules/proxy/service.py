@@ -651,6 +651,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_event_error_type,  # noqa: F401
     _websocket_full_resend_conflicts_with_visible_pending,  # noqa: F401
     _websocket_input_item_type,  # noqa: F401
+    _websocket_input_items_are_self_contained_fresh_replay,  # noqa: F401
     _websocket_owner_pinned_quota_error_code,  # noqa: F401
     _websocket_precreated_auth_error_code,  # noqa: F401
     _websocket_precreated_retry_error_code,  # noqa: F401

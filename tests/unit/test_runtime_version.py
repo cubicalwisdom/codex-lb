@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app import __display_version__, __version__
 from app.modules.runtime.service import RuntimeVersionService
 
 
@@ -38,6 +39,36 @@ async def test_runtime_version_reports_update_available_for_newer_github_release
     assert status.update_available is True
     assert status.source == "github"
     assert status.release_url == "https://github.com/Soju06/codex-lb/releases/latest"
+
+
+@pytest.mark.asyncio
+async def test_runtime_version_reports_local_parity_display_label_but_compares_canonical_version() -> None:
+    service = RuntimeVersionService(
+        current_version="1.20.1",
+        display_version="v1.21parity",
+        ttl_seconds=60,
+    )
+    session = _mock_session(_mock_response(json_data={"tag_name": "v1.21.0"}))
+
+    with patch("app.modules.runtime.service.aiohttp.ClientSession", return_value=session):
+        status = await service.get_version_status()
+
+    assert status.current_version == "v1.21parity"
+    assert status.latest_version == "1.21.0"
+    assert status.update_available is True
+    assert session.get.call_args.kwargs["headers"]["User-Agent"] == "codex-lb/1.20.1"
+
+
+@pytest.mark.asyncio
+async def test_runtime_version_defaults_to_the_portable_parity_display_label() -> None:
+    service = RuntimeVersionService(ttl_seconds=60)
+    session = _mock_session(_mock_response(json_data={"tag_name": f"v{__version__}"}))
+
+    with patch("app.modules.runtime.service.aiohttp.ClientSession", return_value=session):
+        status = await service.get_version_status()
+
+    assert status.current_version == __display_version__ == "v1.21parity"
+    assert status.update_available is False
 
 
 @pytest.mark.asyncio
