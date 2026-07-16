@@ -152,6 +152,7 @@ async def update_codexneo_settings(
         start_with_windows_enabled=payload.start_with_windows_enabled,
         auto_delete_free_reauth_accounts_enabled=payload.auto_delete_free_reauth_accounts_enabled,
         auto_delete_quota_exceeded_accounts_enabled=payload.auto_delete_quota_exceeded_accounts_enabled,
+        claude_desktop_sonnet_reasoning_effort=payload.claude_desktop_sonnet_reasoning_effort,
         buyer_token=payload.buyer_token,
         clear_buyer_token=payload.clear_buyer_token,
     )
@@ -241,6 +242,14 @@ async def restart_codex_app(
     service: CodexNeoService = Depends(get_codexneo_service),
 ) -> CodexNeoActionResponse:
     return await service.restart_codex_app()
+
+
+@router.post("/claude/restart", response_model=CodexNeoActionResponse)
+async def restart_claude_app(
+    _write_access=Depends(require_dashboard_write_access),
+    service: CodexNeoService = Depends(get_codexneo_service),
+) -> CodexNeoActionResponse:
+    return await service.restart_claude_app()
 
 
 @router.post("/import/file", response_model=CodexNeoPathResponse)

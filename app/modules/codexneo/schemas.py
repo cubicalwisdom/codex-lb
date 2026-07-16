@@ -4,6 +4,8 @@ from typing import Literal
 
 from app.modules.shared.schemas import DashboardModel
 
+ClaudeDesktopSonnetReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
+
 
 class CodexNeoSettingsResponse(DashboardModel):
     codex_api_base_url: str
@@ -19,6 +21,7 @@ class CodexNeoSettingsResponse(DashboardModel):
     start_with_windows_enabled: bool
     auto_delete_free_reauth_accounts_enabled: bool
     auto_delete_quota_exceeded_accounts_enabled: bool
+    claude_desktop_sonnet_reasoning_effort: ClaudeDesktopSonnetReasoningEffort
     buyer_token_saved: bool
 
 
@@ -36,6 +39,7 @@ class CodexNeoSettingsUpdateRequest(DashboardModel):
     start_with_windows_enabled: bool | None = None
     auto_delete_free_reauth_accounts_enabled: bool | None = None
     auto_delete_quota_exceeded_accounts_enabled: bool | None = None
+    claude_desktop_sonnet_reasoning_effort: ClaudeDesktopSonnetReasoningEffort | None = None
     buyer_token: str | None = None
     clear_buyer_token: bool = False
 

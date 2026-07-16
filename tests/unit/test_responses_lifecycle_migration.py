@@ -13,7 +13,7 @@ def test_responses_lifecycle_migration_is_single_head_and_reversible(tmp_path: P
     database_url = f"sqlite:///{tmp_path / 'responses-lifecycle.db'}"
     config = _build_alembic_config(database_url)
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["20260712_000000_add_request_log_daily_aggregates"]
+    assert script.get_heads() == ["20260716_000000_add_anthropic_message_batches"]
 
     command.upgrade(config, "head")
     engine = sa.create_engine(database_url, future=True)
@@ -22,17 +22,23 @@ def test_responses_lifecycle_migration_is_single_head_and_reversible(tmp_path: P
         assert inspector.has_table("stored_responses")
         assert inspector.has_table("stored_conversations")
         assert inspector.has_table("stored_conversation_items")
+        assert inspector.has_table("anthropic_message_batches")
+        assert inspector.has_table("anthropic_message_batch_items")
 
         command.downgrade(config, "20260627_000000_preserve_usage_history_on_account_delete")
         inspector = sa.inspect(engine)
         assert not inspector.has_table("stored_responses")
         assert not inspector.has_table("stored_conversations")
         assert not inspector.has_table("stored_conversation_items")
+        assert not inspector.has_table("anthropic_message_batches")
+        assert not inspector.has_table("anthropic_message_batch_items")
 
         command.upgrade(config, "head")
         inspector = sa.inspect(engine)
         assert inspector.has_table("stored_responses")
         assert inspector.has_table("stored_conversations")
         assert inspector.has_table("stored_conversation_items")
+        assert inspector.has_table("anthropic_message_batches")
+        assert inspector.has_table("anthropic_message_batch_items")
     finally:
         engine.dispose()

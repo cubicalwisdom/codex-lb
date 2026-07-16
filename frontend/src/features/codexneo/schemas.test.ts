@@ -21,5 +21,6 @@ describe("CodexNeoSettingsSchema", () => {
 
     expect(parsed.autoDeleteFreeReauthAccountsEnabled).toBe(false);
     expect(parsed.autoDeleteQuotaExceededAccountsEnabled).toBe(false);
+    expect(parsed.claudeDesktopSonnetReasoningEffort).toBe("high");
   });
 });

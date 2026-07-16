@@ -27,6 +27,7 @@ import {
   refreshCodexGoAuth,
   resetCodexNeoCodexHome,
   revertCodexNeoApi,
+  restartCodexNeoClaude,
   restartCodexNeoCodex,
   saveCodexNeoCodexHome,
   setCodexNeoAccountLocation,
@@ -220,6 +221,11 @@ export function useCodexNeo() {
     onSuccess: (result) => toastActionResult(result, "Codex restarted"),
     onError: (error: Error) => toast.error(error.message || "Failed to restart Codex"),
   });
+  const restartClaudeMutation = useMutation({
+    mutationFn: restartCodexNeoClaude,
+    onSuccess: (result) => toastActionResult(result, "Claude restarted"),
+    onError: (error: Error) => toast.error(error.message || "Failed to restart Claude"),
+  });
   const importFileMutation = useMutation({
     mutationFn: importCodexNeoFile,
     onSuccess: (result) => {
@@ -372,6 +378,7 @@ export function useCodexNeo() {
     openCodexHomeMutation,
     openDataFolderMutation,
     restartCodexMutation,
+    restartClaudeMutation,
     importFileMutation,
     importFileUploadMutation,
     importFolderMutation,

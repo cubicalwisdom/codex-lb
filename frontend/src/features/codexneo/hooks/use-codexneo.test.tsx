@@ -31,6 +31,7 @@ const apiMocks = vi.hoisted(() => ({
   refreshCodexGoAuth: vi.fn(),
   resetCodexNeoCodexHome: vi.fn(),
   revertCodexNeoApi: vi.fn(),
+  restartCodexNeoClaude: vi.fn(),
   restartCodexNeoCodex: vi.fn(),
   saveCodexNeoCodexHome: vi.fn(),
   selectCodexNeoCodexHome: vi.fn(),

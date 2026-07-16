@@ -11,6 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.core.anthropic.messages import anthropic_error, anthropic_error_type_for_status
 from app.core.errors import dashboard_error, openai_error
 from app.core.exceptions import (
     AppError,
@@ -56,6 +57,8 @@ def _error_format(request: Request) -> str | None:
     path = request.url.path
     if path.startswith("/api/"):
         return "dashboard"
+    if path.startswith("/v1/messages"):
+        return "anthropic"
     if path.startswith("/v1/") or path.startswith("/backend-api/"):
         return "openai"
     return None
@@ -77,6 +80,13 @@ def add_exception_handlers(app: FastAPI) -> None:
                 exc.message,
                 category="openai_error_response",
             )
+            if _error_format(request) == "anthropic":
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content=anthropic_error(
+                        anthropic_error_type_for_status(exc.status_code, code=exc.code), exc.message
+                    ),
+                )
             return JSONResponse(
                 status_code=exc.status_code,
                 content=openai_error(exc.code, exc.message, error_type=error_type),
@@ -150,6 +160,17 @@ def add_exception_handlers(app: FastAPI) -> None:
                 category="openai_error_response",
             )
             return JSONResponse(status_code=400, content=error)
+        if fmt == "anthropic":
+            message = first_message or "Invalid request payload"
+            log_error_response(
+                logger,
+                request,
+                400,
+                "invalid_request_error",
+                message,
+                category="anthropic_error_response",
+            )
+            return JSONResponse(status_code=400, content=anthropic_error("invalid_request_error", message))
         return await request_validation_exception_handler(request, exc)
 
     @app.exception_handler(StarletteHTTPException)
@@ -199,6 +220,11 @@ def add_exception_handlers(app: FastAPI) -> None:
                 category="openai_error_response",
             )
             return JSONResponse(status_code=exc.status_code, content=openai_error(code, detail, error_type=error_type))
+        if fmt == "anthropic":
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=anthropic_error(anthropic_error_type_for_status(exc.status_code), detail),
+            )
         return await http_exception_handler(request, exc)
 
     # --- Catch-all for unhandled exceptions ---
@@ -220,4 +246,6 @@ def add_exception_handlers(app: FastAPI) -> None:
                 status_code=500,
                 content=openai_error("server_error", "Internal server error", error_type="server_error"),
             )
+        if fmt == "anthropic":
+            return JSONResponse(status_code=500, content=anthropic_error("api_error", "Internal server error"))
         return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})

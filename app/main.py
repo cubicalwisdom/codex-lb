@@ -129,6 +129,7 @@ async def lifespan(app: FastAPI):
     heartbeat_task: asyncio.Task[None] | None = None
     instance_id = None
     background_response_manager = None
+    background_anthropic_batch_manager = None
 
     startup_module._startup_complete = False
     startup_module.reset_bridge_registration()
@@ -144,15 +145,24 @@ async def lifespan(app: FastAPI):
         init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint, app=app)
     await init_db()
     init_background_db()
+    from app.modules.anthropic_batches.runtime import get_background_anthropic_batch_manager
+    from app.modules.anthropic_batches.service import requeue_stranded_batches
     from app.modules.responses_lifecycle.runtime import get_background_response_manager
     from app.modules.responses_lifecycle.service import mark_stranded_responses_failed
 
     background_response_manager = get_background_response_manager()
+    background_anthropic_batch_manager = get_background_anthropic_batch_manager()
     recovered_background_responses = await mark_stranded_responses_failed()
     if recovered_background_responses:
         logger.warning(
             "Marked stranded background responses failed during startup count=%d",
             recovered_background_responses,
+        )
+    requeued_anthropic_batches = await requeue_stranded_batches()
+    if requeued_anthropic_batches:
+        logger.warning(
+            "Requeued stranded Anthropic Message Batches for authenticated resume count=%d",
+            requeued_anthropic_batches,
         )
     _auto_bootstrap_token = await ensure_auto_bootstrap_token()
     if _auto_bootstrap_token:
@@ -295,6 +305,8 @@ async def lifespan(app: FastAPI):
         if background_response_manager is not None:
             await background_response_manager.stop()
             await mark_stranded_responses_failed()
+        if background_anthropic_batch_manager is not None:
+            await background_anthropic_batch_manager.stop()
 
         proxy_service = getattr(app.state, "proxy_service", None)
         if proxy_service is not None and hasattr(proxy_service, "mark_http_bridge_draining"):
@@ -410,7 +422,9 @@ def create_app() -> FastAPI:
     app.include_router(proxy_api.internal_router)
     app.include_router(proxy_api.ws_router)
     app.include_router(proxy_api.wham_router)
+    app.include_router(proxy_api.model_discovery_router)
     app.include_router(proxy_api.v1_router)
+    app.include_router(proxy_api.anthropic_router)
     app.include_router(proxy_api.v1_ws_router)
     app.include_router(proxy_api.transcribe_router)
     app.include_router(proxy_api.files_router)

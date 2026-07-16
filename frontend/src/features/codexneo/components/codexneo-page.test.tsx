@@ -58,6 +58,7 @@ function renderCodexNeoPage({
     startWithWindowsEnabled: false,
     autoDeleteFreeReauthAccountsEnabled: false,
     autoDeleteQuotaExceededAccountsEnabled: false,
+    claudeDesktopSonnetReasoningEffort: "high",
     buyerTokenSaved: true,
     ...settingsOverride,
   };
@@ -161,6 +162,7 @@ function renderCodexNeoPage({
     openCodexHomeMutation: createMutationMock(),
     openDataFolderMutation: createMutationMock(),
     restartCodexMutation: createMutationMock(),
+    restartClaudeMutation: createMutationMock(),
     importFileMutation: createMutationMock(),
     importFolderMutation: createMutationMock(),
     importFileUploadMutation: createMutationMock(),
@@ -266,6 +268,7 @@ describe("CodexNeoPage", () => {
     expect(screen.getByRole("button", { name: "Auth->API Test" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Auth->API Set" })).toHaveClass("bg-emerald-600");
     expect(screen.getByRole("button", { name: "Auth->API Revert" })).toHaveClass("bg-destructive");
+    expect(screen.getByLabelText("Sonnet reasoning")).toHaveTextContent("High");
     expect(screen.getByLabelText("CodexGO API refresh")).toBeChecked();
     expect(screen.queryByLabelText("OpenAI log")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Management log")).not.toBeInTheDocument();
@@ -277,7 +280,7 @@ describe("CodexNeoPage", () => {
     expect(screen.getByRole("button", { name: "Refresh auth" })).toBeInTheDocument();
   });
 
-  it("stacks red CodexNeo and Codex restart controls in the page header", async () => {
+  it("stacks red CodexNeo, Codex, and Claude restart controls in the page header", async () => {
     const user = userEvent.setup();
     const restartApp = vi.fn().mockResolvedValue({ success: true, message: "Codex LB is restarting" });
     const confirmSpy = vi.spyOn(window, "confirm");
@@ -293,6 +296,10 @@ describe("CodexNeoPage", () => {
     expect(restartCodexNeo).toHaveAttribute("data-variant", "destructive");
     expect(headerControls).not.toBeNull();
     expect(within(headerControls as HTMLElement).getByRole("button", { name: "Restart Codex" })).toHaveAttribute(
+      "data-variant",
+      "destructive",
+    );
+    expect(within(headerControls as HTMLElement).getByRole("button", { name: "Restart Claude" })).toHaveAttribute(
       "data-variant",
       "destructive",
     );
@@ -332,6 +339,18 @@ describe("CodexNeoPage", () => {
 
     expect(screen.getByRole("button", { name: "Use auth" })).toHaveClass("h-10", "min-w-28", "px-4");
     expect(screen.getByRole("button", { name: "Refresh auth" })).toHaveClass("h-10", "min-w-28", "px-4");
+  });
+
+  it("persists the Claude Desktop Sonnet reasoning selection", async () => {
+    const user = userEvent.setup();
+    const { mutations } = renderCodexNeoPage();
+
+    await user.click(screen.getByLabelText("Sonnet reasoning"));
+    await user.click(screen.getByRole("option", { name: "Extra" }));
+
+    expect(mutations.updateSettingsMutation.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeDesktopSonnetReasoningEffort: "xhigh" }),
+    );
   });
 
   it("renders safe CodexNeo health diagnostics with copy actions", async () => {
@@ -815,6 +834,17 @@ describe("CodexNeoPage", () => {
     await user.click(screen.getByRole("button", { name: "Restart Codex" }));
 
     expect(mutations.restartCodexMutation.mutateAsync).toHaveBeenCalledTimes(1);
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it("runs Restart Claude directly without a browser confirmation", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+    const { mutations } = renderCodexNeoPage();
+
+    await user.click(screen.getByRole("button", { name: "Restart Claude" }));
+
+    expect(mutations.restartClaudeMutation.mutateAsync).toHaveBeenCalledTimes(1);
     expect(confirmSpy).not.toHaveBeenCalled();
   });
 

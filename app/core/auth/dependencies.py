@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from hmac import compare_digest
 from ipaddress import ip_address, ip_network
 from typing import cast
 
@@ -36,12 +37,18 @@ logger = logging.getLogger(__name__)
 
 _bearer = HTTPBearer(description="API key (e.g. sk-clb-…)", auto_error=False)
 
+_CLAUDE_DESKTOP_LOCAL_API_KEY = "claudedesktop"
+
 
 # --- Error format markers ---
 
 
 def set_openai_error_format(request: Request) -> None:
     request.state.error_format = "openai"
+
+
+def set_anthropic_error_format(request: Request) -> None:
+    request.state.error_format = "anthropic"
 
 
 def set_dashboard_error_format(request: Request) -> None:
@@ -57,6 +64,63 @@ async def validate_proxy_api_key(
 ) -> ApiKeyData | None:
     authorization = None if credentials is None else f"Bearer {credentials.credentials}"
     return await validate_proxy_api_key_authorization(authorization, request=request)
+
+
+async def validate_claude_desktop_or_proxy_api_key(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
+) -> ApiKeyData | None:
+    """Allow the local Claude Desktop profile only on its discovery route.
+
+    The special credential is intentionally not accepted by normal proxy
+    routes. Every other request preserves the existing Bearer-only API-key
+    dependency and its authentication behavior.
+    """
+
+    if is_local_claude_desktop_request(request):
+        return None
+    return await validate_proxy_api_key(request, credentials)
+
+
+async def validate_anthropic_api_key(request: Request) -> ApiKeyData | None:
+    """Authenticate the Messages facade with Claude Code's header convention.
+
+    Claude Code normally sends ``x-api-key`` and some versions include an
+    equivalent Bearer header. Keep that compatibility local to the Anthropic
+    facade so existing proxy routes remain Bearer-only.
+    """
+
+    x_api_key = (request.headers.get("x-api-key") or "").strip()
+    authorization = request.headers.get("authorization")
+    bearer_token = _extract_bearer_token(authorization)
+    if authorization and bearer_token is None:
+        raise ProxyAuthError("Authorization header must use the Bearer scheme")
+    if x_api_key and bearer_token and x_api_key != bearer_token:
+        raise ProxyAuthError("x-api-key and Authorization credentials do not match")
+    token = x_api_key or bearer_token
+    if token and is_local_claude_desktop_request(request):
+        return None
+    normalized_authorization = f"Bearer {token}" if token else None
+    return await validate_proxy_api_key_authorization(normalized_authorization, request=request)
+
+
+def is_local_claude_desktop_request(request: HTTPConnection) -> bool:
+    """Return whether a loopback request selected the Claude Desktop profile.
+
+    This is a profile selector for the Anthropic compatibility facade, not a
+    general-purpose API key. Restricting it to loopback traffic prevents the
+    static Desktop credential from expanding a remote proxy's access surface.
+    """
+
+    x_api_key = (request.headers.get("x-api-key") or "").strip()
+    authorization = request.headers.get("authorization")
+    bearer_token = _extract_bearer_token(authorization)
+    if authorization and bearer_token is None:
+        return False
+    if x_api_key and bearer_token and x_api_key != bearer_token:
+        return False
+    token = x_api_key or bearer_token
+    return bool(token) and compare_digest(token, _CLAUDE_DESKTOP_LOCAL_API_KEY) and is_local_request(request)
 
 
 async def validate_proxy_api_key_authorization(

@@ -75,6 +75,10 @@ export function restartCodexNeoCodex() {
   return post(CODEXNEO_PATH + "/app/restart", CodexNeoActionResponseSchema, { body: {} });
 }
 
+export function restartCodexNeoClaude() {
+  return post(CODEXNEO_PATH + "/claude/restart", CodexNeoActionResponseSchema, { body: {} });
+}
+
 export function importCodexNeoFile(payload: unknown) {
   const validated = CodexNeoPathRequestSchema.parse(payload);
   return post(CODEXNEO_PATH + "/import/file", CodexNeoPathResponseSchema, { body: validated });

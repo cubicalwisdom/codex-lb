@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from cryptography.fernet import Fernet
 
+import app.modules.codexneo.service as codexneo_service_module
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError
 from app.modules.codexneo.service import (
@@ -247,6 +248,7 @@ async def test_update_settings_persists_codex_home_ui_preferences(tmp_path) -> N
     assert settings.start_with_windows_enabled is True
     assert settings.auto_delete_free_reauth_accounts_enabled is True
     assert settings.auto_delete_quota_exceeded_accounts_enabled is True
+    assert settings.claude_desktop_sonnet_reasoning_effort == "high"
     assert saved["codex_home_auto_refresh_enabled"] is True
     assert saved["codex_home_auto_refresh_interval_seconds"] == 5
     assert saved["codex_home_auto_sync_enabled"] is True
@@ -254,6 +256,35 @@ async def test_update_settings_persists_codex_home_ui_preferences(tmp_path) -> N
     assert saved["start_with_windows_enabled"] is True
     assert saved["auto_delete_free_reauth_accounts_enabled"] is True
     assert saved["auto_delete_quota_exceeded_accounts_enabled"] is True
+    assert saved["claude_desktop_sonnet_reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_update_settings_persists_claude_desktop_sonnet_reasoning_effort(tmp_path) -> None:
+    service = CodexNeoService(
+        settings_path=tmp_path / "codexneo-settings.json",
+        codex_home=tmp_path / ".codex",
+        encryptor=_encryptor(),
+    )
+
+    settings = await service.update_settings(claude_desktop_sonnet_reasoning_effort="xhigh")
+
+    assert settings.claude_desktop_sonnet_reasoning_effort == "xhigh"
+    persisted = json.loads((tmp_path / "codexneo-settings.json").read_text(encoding="utf-8"))
+    assert persisted["claude_desktop_sonnet_reasoning_effort"] == "xhigh"
+
+
+def test_configured_claude_desktop_sonnet_reasoning_effort_uses_safe_defaults(tmp_path, monkeypatch) -> None:
+    settings_path = tmp_path / "codexneo-settings.json"
+    monkeypatch.setattr(codexneo_service_module, "default_settings_path", lambda: settings_path)
+
+    assert codexneo_service_module.get_configured_claude_desktop_sonnet_reasoning_effort() == "high"
+
+    settings_path.write_text(json.dumps({"claude_desktop_sonnet_reasoning_effort": "xhigh"}), encoding="utf-8")
+    assert codexneo_service_module.get_configured_claude_desktop_sonnet_reasoning_effort() == "xhigh"
+
+    settings_path.write_text(json.dumps({"claude_desktop_sonnet_reasoning_effort": "not-supported"}), encoding="utf-8")
+    assert codexneo_service_module.get_configured_claude_desktop_sonnet_reasoning_effort() == "high"
 
 
 def test_normalize_codexgo_provider_base_url_strips_action_suffixes() -> None:

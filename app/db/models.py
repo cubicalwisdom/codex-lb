@@ -1105,6 +1105,54 @@ class StoredConversationItem(Base):
     )
 
 
+class AnthropicMessageBatch(Base):
+    """Durable local representation of an Anthropic Message Batches job."""
+
+    __tablename__ = "anthropic_message_batches"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    processing_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    ended_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    expires_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    items: Mapped[list["AnthropicMessageBatchItem"]] = relationship(
+        "AnthropicMessageBatchItem",
+        back_populates="batch",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (Index("idx_anthropic_message_batches_scope_created", "api_key_scope", "created_at"),)
+
+
+class AnthropicMessageBatchItem(Base):
+    __tablename__ = "anthropic_message_batch_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("anthropic_message_batches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    custom_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    params_json: Mapped[str] = mapped_column(Text, nullable=False)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    batch: Mapped[AnthropicMessageBatch] = relationship("AnthropicMessageBatch", back_populates="items")
+
+    __table_args__ = (
+        UniqueConstraint("batch_id", "custom_id", name="uq_anthropic_message_batch_items_custom_id"),
+        Index("idx_anthropic_message_batch_items_batch_sequence", "batch_id", "sequence"),
+        Index("idx_anthropic_message_batch_items_batch_status", "batch_id", "status"),
+    )
+
+
 _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("'primary'"))
 
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)

@@ -37,6 +37,8 @@ MIN_REFRESH_INTERVAL_MINUTES = 5
 MAX_REFRESH_INTERVAL_MINUTES = 1440
 MIN_CODEX_HOME_REFRESH_INTERVAL_SECONDS = 5
 MAX_CODEX_HOME_REFRESH_INTERVAL_SECONDS = 3600
+DEFAULT_CLAUDE_DESKTOP_SONNET_REASONING_EFFORT = "high"
+CLAUDE_DESKTOP_SONNET_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 CONFIG_BEGIN_MARKER = "# BEGIN CodexNeo provider"
 CONFIG_END_MARKER = "# END CodexNeo provider"
 CONFIG_LEGACY_BEGIN_MARKER = "# BEGIN RC Codex Auth Switcher provider"
@@ -51,6 +53,7 @@ OPERATION_BACKUP_MAX_AGE_DAYS = 14
 
 type CodexGoProvider = Callable[[str, str], Awaitable[dict[str, Any]]]
 type CodexRestartProvider = Callable[[], Awaitable["CodexRestartResult"]]
+type ClaudeRestartProvider = Callable[[], Awaitable["CodexRestartResult"]]
 
 
 class CodexGoAction(StrEnum):
@@ -121,6 +124,29 @@ def _safe_codex_home_refresh_interval_seconds(value: Any) -> int:
         return 30
 
 
+def get_configured_claude_desktop_sonnet_reasoning_effort() -> str:
+    """Read the local CodexNeo Sonnet fallback without failing a proxy request on malformed settings."""
+
+    try:
+        raw = json.loads(default_settings_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return DEFAULT_CLAUDE_DESKTOP_SONNET_REASONING_EFFORT
+    if not isinstance(raw, dict):
+        return DEFAULT_CLAUDE_DESKTOP_SONNET_REASONING_EFFORT
+    return _normalize_claude_desktop_sonnet_reasoning_effort(
+        raw.get("claude_desktop_sonnet_reasoning_effort")
+    )
+
+
+def _normalize_claude_desktop_sonnet_reasoning_effort(value: Any) -> str:
+    if not isinstance(value, str):
+        return DEFAULT_CLAUDE_DESKTOP_SONNET_REASONING_EFFORT
+    normalized = value.strip().lower()
+    if normalized in CLAUDE_DESKTOP_SONNET_REASONING_EFFORTS:
+        return normalized
+    return DEFAULT_CLAUDE_DESKTOP_SONNET_REASONING_EFFORT
+
+
 class CodexNeoService:
     def __init__(
         self,
@@ -130,6 +156,7 @@ class CodexNeoService:
         encryptor: TokenEncryptor | None = None,
         codexgo_provider: CodexGoProvider | None = None,
         codex_restart_provider: CodexRestartProvider | None = None,
+        claude_restart_provider: ClaudeRestartProvider | None = None,
         activity_log_service: CodexNeoActivityLogService | None = None,
         account_sync: CodexNeoAccountsSyncService | None = None,
     ) -> None:
@@ -138,6 +165,7 @@ class CodexNeoService:
         self._encryptor = encryptor or TokenEncryptor()
         self._codexgo_provider = codexgo_provider or _post_codexgo_provider
         self._codex_restart_provider = codex_restart_provider or restart_codex_desktop
+        self._claude_restart_provider = claude_restart_provider or restart_claude_desktop
         self._activity_log_service = activity_log_service or CodexNeoActivityLogService(respect_settings=False)
         self._account_sync = account_sync
 
@@ -165,6 +193,7 @@ class CodexNeoService:
         start_with_windows_enabled: bool | None = None,
         auto_delete_free_reauth_accounts_enabled: bool | None = None,
         auto_delete_quota_exceeded_accounts_enabled: bool | None = None,
+        claude_desktop_sonnet_reasoning_effort: str | None = None,
         buyer_token: str | None = None,
         clear_buyer_token: bool = False,
     ) -> CodexNeoSettingsResponse:
@@ -200,6 +229,10 @@ class CodexNeoService:
         if auto_delete_quota_exceeded_accounts_enabled is not None:
             data["auto_delete_quota_exceeded_accounts_enabled"] = bool(
                 auto_delete_quota_exceeded_accounts_enabled
+            )
+        if claude_desktop_sonnet_reasoning_effort is not None:
+            data["claude_desktop_sonnet_reasoning_effort"] = _normalize_claude_desktop_sonnet_reasoning_effort(
+                claude_desktop_sonnet_reasoning_effort
             )
         if clear_buyer_token:
             data["buyer_token_encrypted"] = None
@@ -351,6 +384,17 @@ class CodexNeoService:
             restart_output=restart_result.message,
         )
 
+    async def restart_claude_app(self) -> CodexNeoActionResponse:
+        restart_result = await self._claude_restart_provider()
+        message = "Claude restarted" if restart_result.success else f"Claude restart failed: {restart_result.message}"
+        return CodexNeoActionResponse(
+            success=restart_result.success,
+            message=message,
+            restart_attempted=True,
+            restart_succeeded=restart_result.success,
+            restart_output=restart_result.message,
+        )
+
     def _read_settings_data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "codex_api_base_url": DEFAULT_CODEX_API_BASE_URL,
@@ -366,6 +410,7 @@ class CodexNeoService:
             "start_with_windows_enabled": False,
             "auto_delete_free_reauth_accounts_enabled": False,
             "auto_delete_quota_exceeded_accounts_enabled": False,
+            "claude_desktop_sonnet_reasoning_effort": DEFAULT_CLAUDE_DESKTOP_SONNET_REASONING_EFFORT,
             "codex_home_path": None,
             "buyer_token_encrypted": None,
         }
@@ -399,6 +444,9 @@ class CodexNeoService:
         data["auto_delete_quota_exceeded_accounts_enabled"] = bool(
             data["auto_delete_quota_exceeded_accounts_enabled"]
         )
+        data["claude_desktop_sonnet_reasoning_effort"] = _normalize_claude_desktop_sonnet_reasoning_effort(
+            data["claude_desktop_sonnet_reasoning_effort"]
+        )
         if data.get("buyer_token_encrypted") is not None:
             data["buyer_token_encrypted"] = str(data["buyer_token_encrypted"])
         if migrate_legacy_codex_api_base_url and loaded_settings is not None:
@@ -427,6 +475,7 @@ class CodexNeoService:
             "auto_delete_quota_exceeded_accounts_enabled": data[
                 "auto_delete_quota_exceeded_accounts_enabled"
             ],
+            "claude_desktop_sonnet_reasoning_effort": data["claude_desktop_sonnet_reasoning_effort"],
             "codex_home_path": data.get("codex_home_path"),
             "buyer_token_encrypted": data.get("buyer_token_encrypted"),
         }
@@ -447,6 +496,7 @@ class CodexNeoService:
             start_with_windows_enabled=data["start_with_windows_enabled"],
             auto_delete_free_reauth_accounts_enabled=data["auto_delete_free_reauth_accounts_enabled"],
             auto_delete_quota_exceeded_accounts_enabled=data["auto_delete_quota_exceeded_accounts_enabled"],
+            claude_desktop_sonnet_reasoning_effort=data["claude_desktop_sonnet_reasoning_effort"],
             buyer_token_saved=bool(data.get("buyer_token_encrypted")),
         )
 
@@ -502,6 +552,12 @@ async def restart_codex_desktop() -> CodexRestartResult:
     return await asyncio_to_thread(_restart_codex_desktop_sync)
 
 
+async def restart_claude_desktop() -> CodexRestartResult:
+    if platform.system().lower() != "windows":
+        return CodexRestartResult(success=False, message="Claude restart is only supported on Windows")
+    return await asyncio_to_thread(_restart_claude_desktop_sync)
+
+
 async def asyncio_to_thread(func: Callable[[], CodexRestartResult]) -> CodexRestartResult:
     import asyncio
 
@@ -527,6 +583,27 @@ def _restart_codex_desktop_sync() -> CodexRestartResult:
     )
     output = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
     return CodexRestartResult(success=completed.returncode == 0, message=output or "Codex Desktop restart completed")
+
+
+def _restart_claude_desktop_sync() -> CodexRestartResult:
+    script = _build_claude_desktop_restart_script()
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        check=False,
+    )
+    output = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
+    return CodexRestartResult(success=completed.returncode == 0, message=output or "Claude restart completed")
 
 
 def _build_codex_desktop_restart_script() -> str:
@@ -581,6 +658,61 @@ try {
     exit 0
 } catch {
     $output.Add("Could not relaunch Codex Desktop: $($_.Exception.Message)")
+    $output -join [Environment]::NewLine
+    exit 1
+}
+'''
+
+
+def _build_claude_desktop_restart_script() -> str:
+    return r'''
+$ErrorActionPreference = "Continue"
+$output = New-Object System.Collections.Generic.List[string]
+
+function Get-ClaudePackageProcesses {
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $path = [string]$_.ExecutablePath
+        $path -like "*\WindowsApps\Claude_*\app\Claude.exe"
+    })
+}
+
+$targets = @(Get-ClaudePackageProcesses)
+$shellTargets = @($targets | Where-Object {
+    $_.Name -ieq "Claude.exe" -and ([string]$_.CommandLine) -notmatch "\s--type="
+})
+if ($targets.Count -eq 0) {
+    $output.Add("No running Claude processes found.")
+} else {
+    $output.Add("Closing Claude with $($targets.Count) process(es)...")
+}
+foreach ($target in $shellTargets) {
+    try {
+        $shell = Get-Process -Id $target.ProcessId -ErrorAction Stop
+        if ($shell.MainWindowHandle -ne 0) {
+            [void]$shell.CloseMainWindow()
+            $output.Add("Close requested for Claude.exe shell $($target.ProcessId).")
+        }
+    } catch {
+        $output.Add("Could not request Claude shell close for process $($target.ProcessId): $($_.Exception.Message)")
+    }
+}
+Start-Sleep -Milliseconds 2000
+
+foreach ($target in @(Get-ClaudePackageProcesses)) {
+    try {
+        Stop-Process -Id $target.ProcessId -Force -ErrorAction Stop
+        $output.Add("Stopped remaining Claude process $($target.Name) $($target.ProcessId).")
+    } catch {
+        $output.Add("Could not close Claude process $($target.ProcessId): $($_.Exception.Message)")
+    }
+}
+try {
+    Start-Process "shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude"
+    $output.Add("Claude launch requested.")
+    $output -join [Environment]::NewLine
+    exit 0
+} catch {
+    $output.Add("Could not relaunch Claude: $($_.Exception.Message)")
     $output -join [Environment]::NewLine
     exit 1
 }

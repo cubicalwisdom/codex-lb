@@ -1,5 +1,6 @@
 import {
   CircleAlert,
+  BrainCircuit,
   CircleCheck,
   CircleHelp,
   Copy,
@@ -31,11 +32,19 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useCodexNeo } from "@/features/codexneo/hooks/use-codexneo";
 import type {
   CodexNeoAccountRow,
+  ClaudeDesktopSonnetReasoningEffort,
   CodexNeoHealthItem,
   CodexNeoSettingsUpdateRequest,
 } from "@/features/codexneo/schemas";
@@ -48,6 +57,13 @@ const DEFAULT_INTERVAL_MINUTES = 30;
 const DEFAULT_CODEX_HOME_REFRESH_SECONDS = 30;
 const MIN_CODEX_HOME_REFRESH_SECONDS = 5;
 const MAX_CODEX_HOME_REFRESH_SECONDS = 3600;
+const SONNET_REASONING_OPTIONS: ReadonlyArray<{ value: ClaudeDesktopSonnetReasoningEffort; label: string }> = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra" },
+  { value: "max", label: "Max" },
+];
 type AccountSortKey = "number" | "plan" | "fiveHour" | "weekly" | "availability" | "status";
 type AccountSortDirection = "asc" | "desc";
 type AccountSortState = { key: AccountSortKey; direction: AccountSortDirection } | null;
@@ -75,6 +91,7 @@ export function CodexNeoPage() {
     openCodexHomeMutation,
     openDataFolderMutation,
     restartCodexMutation,
+    restartClaudeMutation,
     importFolderMutation,
     importFolderUploadMutation,
     exportSelectedMutation,
@@ -113,6 +130,8 @@ export function CodexNeoPage() {
   );
   const [minimizeToTrayEnabledOverride, setMinimizeToTrayEnabledOverride] = useState<boolean | null>(null);
   const [startWithWindowsEnabledOverride, setStartWithWindowsEnabledOverride] = useState<boolean | null>(null);
+  const [claudeDesktopSonnetReasoningEffortOverride, setClaudeDesktopSonnetReasoningEffortOverride] =
+    useState<ClaudeDesktopSonnetReasoningEffort | null>(null);
   const [autoSyncFeedback, setAutoSyncFeedback] = useState<string | null>(null);
   const [restartPending, setRestartPending] = useState(false);
   const importFolderInputRef = useRef<HTMLInputElement | null>(null);
@@ -142,6 +161,8 @@ export function CodexNeoPage() {
     autoDeleteQuotaExceededEnabledOverride ?? settings?.autoDeleteQuotaExceededAccountsEnabled ?? false;
   const minimizeToTrayEnabled = minimizeToTrayEnabledOverride ?? settings?.minimizeToTrayEnabled ?? false;
   const startWithWindowsEnabled = startWithWindowsEnabledOverride ?? settings?.startWithWindowsEnabled ?? false;
+  const claudeDesktopSonnetReasoningEffort =
+    claudeDesktopSonnetReasoningEffortOverride ?? settings?.claudeDesktopSonnetReasoningEffort ?? "high";
 
   const busy =
     settingsQuery.isPending ||
@@ -161,6 +182,7 @@ export function CodexNeoPage() {
     openCodexHomeMutation.isPending ||
     openDataFolderMutation.isPending ||
     restartCodexMutation.isPending ||
+    restartClaudeMutation.isPending ||
     importFolderMutation.isPending ||
     importFolderUploadMutation.isPending ||
     exportSelectedMutation.isPending ||
@@ -191,6 +213,7 @@ export function CodexNeoPage() {
       autoDeleteQuotaExceededAccountsEnabled: autoDeleteQuotaExceededEnabled,
       minimizeToTrayEnabled,
       startWithWindowsEnabled,
+      claudeDesktopSonnetReasoningEffort,
     };
     if (buyerToken.trim()) {
       payload.buyerToken = buyerToken.trim();
@@ -204,6 +227,7 @@ export function CodexNeoPage() {
     codexHomeAutoSyncEnabled,
     autoDeleteFreeReauthEnabled,
     autoDeleteQuotaExceededEnabled,
+    claudeDesktopSonnetReasoningEffort,
     codexHomeRefreshSeconds,
     codexgoApiBaseUrl,
     intervalMinutes,
@@ -264,6 +288,10 @@ export function CodexNeoPage() {
     setStartWithWindowsEnabledOverride(checked);
     void electronApi?.setStartWithWindowsEnabled?.(checked);
     persistCodexNeoSetting({ startWithWindowsEnabled: checked });
+  };
+  const setPersistentClaudeDesktopSonnetReasoningEffort = (value: ClaudeDesktopSonnetReasoningEffort) => {
+    setClaudeDesktopSonnetReasoningEffortOverride(value);
+    persistCodexNeoSetting({ claudeDesktopSonnetReasoningEffort: value });
   };
   const minimizeWindow = () => {
     void electronApi?.minimizeToTray({ toTray: minimizeToTrayEnabled });
@@ -462,6 +490,9 @@ export function CodexNeoPage() {
   const restartCodex = useCallback(() => {
     void restartCodexMutation.mutateAsync();
   }, [restartCodexMutation]);
+  const restartClaude = useCallback(() => {
+    void restartClaudeMutation.mutateAsync();
+  }, [restartClaudeMutation]);
 
   if (activeView === "activity") {
     return (
@@ -471,8 +502,10 @@ export function CodexNeoPage() {
           restartPending={restartPending}
           restartCodexDisabled={controlsDisabled}
           restartCodexPending={restartCodexMutation.isPending}
+          restartClaudePending={restartClaudeMutation.isPending}
           onRestart={restartCodexLb}
           onRestartCodex={restartCodex}
+          onRestartClaude={restartClaude}
         />
         <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
         {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
@@ -495,8 +528,10 @@ export function CodexNeoPage() {
           restartPending={restartPending}
           restartCodexDisabled={controlsDisabled}
           restartCodexPending={restartCodexMutation.isPending}
+          restartClaudePending={restartClaudeMutation.isPending}
           onRestart={restartCodexLb}
           onRestartCodex={restartCodex}
+          onRestartClaude={restartClaude}
         />
         <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
         {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
@@ -512,8 +547,10 @@ export function CodexNeoPage() {
         restartPending={restartPending}
         restartCodexDisabled={controlsDisabled}
         restartCodexPending={restartCodexMutation.isPending}
+        restartClaudePending={restartClaudeMutation.isPending}
         onRestart={restartCodexLb}
         onRestartCodex={restartCodex}
+        onRestartClaude={restartClaude}
       />
       <CodexNeoTabs activeView={activeView} onChange={setActiveView} />
 
@@ -618,6 +655,45 @@ export function CodexNeoPage() {
             <RotateCcw className="h-4 w-4" aria-hidden="true" />
             Auth-&gt;API Revert
           </Button>
+        </div>
+      </section>
+
+      <section className="space-y-3 rounded-lg border border-border/70 bg-background/60 p-4">
+        <div className="flex items-center gap-2">
+          <BrainCircuit className="h-4 w-4 text-primary" aria-hidden="true" />
+          <div>
+            <h2 className="text-base font-semibold">Claude Desktop</h2>
+            <p className="text-xs text-muted-foreground">
+              Claude Desktop does not expose its effort picker for the Sonnet custom-endpoint model.
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="min-w-48 space-y-1.5">
+            <Label htmlFor="claude-desktop-sonnet-reasoning">Sonnet reasoning</Label>
+            <Select
+              value={claudeDesktopSonnetReasoningEffort}
+              disabled={controlsDisabled}
+              onValueChange={(value) =>
+                setPersistentClaudeDesktopSonnetReasoningEffort(value as ClaudeDesktopSonnetReasoningEffort)
+              }
+            >
+              <SelectTrigger id="claude-desktop-sonnet-reasoning" aria-label="Sonnet reasoning">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {SONNET_REASONING_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="max-w-xl self-end pb-1 text-xs text-muted-foreground">
+            Applies only to Claude Desktop Sonnet requests that omit an effort value. Opus remains controlled in
+            Claude Desktop.
+          </p>
         </div>
       </section>
 
@@ -1013,15 +1089,19 @@ function PageHeader({
   restartPending,
   restartCodexDisabled,
   restartCodexPending,
+  restartClaudePending,
   onRestart,
   onRestartCodex,
+  onRestartClaude,
 }: {
   restartAvailable: boolean;
   restartPending: boolean;
   restartCodexDisabled: boolean;
   restartCodexPending: boolean;
+  restartClaudePending: boolean;
   onRestart: () => void;
   onRestartCodex: () => void;
+  onRestartClaude: () => void;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1055,6 +1135,17 @@ function PageHeader({
         >
           <RotateCcw className={restartCodexPending ? "h-4 w-4 animate-spin" : "h-4 w-4"} aria-hidden="true" />
           {restartCodexPending ? "Restarting Codex..." : "Restart Codex"}
+        </Button>
+        <Button
+          type="button"
+          variant="destructive"
+          className="min-w-44 justify-center gap-2"
+          disabled={restartCodexDisabled}
+          title="Restart Claude Desktop"
+          onClick={onRestartClaude}
+        >
+          <RotateCcw className={restartClaudePending ? "h-4 w-4 animate-spin" : "h-4 w-4"} aria-hidden="true" />
+          {restartClaudePending ? "Restarting Claude..." : "Restart Claude"}
         </Button>
       </div>
     </div>

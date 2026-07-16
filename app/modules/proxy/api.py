@@ -31,8 +31,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import usage as usage_core
+from app.core.anthropic import messages as anthropic_messages
 from app.core.auth.dependencies import (
+    is_local_claude_desktop_request,
+    set_anthropic_error_format,
     set_openai_error_format,
+    validate_anthropic_api_key,
+    validate_claude_desktop_or_proxy_api_key,
     validate_codex_usage_identity,
     validate_proxy_api_key,
     validate_proxy_api_key_authorization,
@@ -91,6 +96,8 @@ from app.core.utils.sse import (
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
+from app.modules.anthropic_batches import service as anthropic_batches
+from app.modules.anthropic_batches.runtime import get_background_anthropic_batch_manager
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     TRAFFIC_CLASS_OPPORTUNISTIC,
@@ -102,6 +109,7 @@ from app.modules.api_keys.service import (
     ApiKeysService,
     ApiKeyUsageReservationData,
 )
+from app.modules.codexneo.service import get_configured_claude_desktop_sonnet_reasoning_effort
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import affinity as proxy_affinity_module
@@ -197,6 +205,16 @@ v1_router = APIRouter(
     tags=["proxy"],
     dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
 )
+model_discovery_router = APIRouter(
+    prefix="/v1",
+    tags=["proxy"],
+    dependencies=[Depends(set_openai_error_format)],
+)
+anthropic_router = APIRouter(
+    prefix="/v1",
+    tags=["proxy"],
+    dependencies=[Depends(set_anthropic_error_format)],
+)
 v1_ws_router = APIRouter(
     prefix="/v1",
     tags=["proxy"],
@@ -230,6 +248,12 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_additional_quota_eligible_accounts",
 }
 _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
+# The facade must never advertise Claude Desktop's larger product context
+# windows when the mapped upstream Responses model currently has less room.
+# Leave a reserve for the requested completion and compaction overhead.
+_ANTHROPIC_MAPPED_CONTEXT_GUARD_TOKENS = 240_000
+_RESPONSES_INSTRUCTIONS_MAX_CHARS: Final[int] = 1_048_576
+_ANTHROPIC_INSTRUCTION_BLOCK_CHARS: Final[int] = 524_288
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
@@ -243,6 +267,16 @@ _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
     "gpt-5.3-codex": 128_000,
 }
 _OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
+_CLAUDE_DESKTOP_STARTUP_RETRY_DELAYS: Final[tuple[float, ...]] = (0.2, 0.5, 1.0)
+_CLAUDE_DESKTOP_RECOVERABLE_STARTUP_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "account_stream_cap",
+        "no_accounts",
+        "stream_incomplete",
+        "upstream_request_timeout",
+        "upstream_unavailable",
+    }
+)
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -787,6 +821,295 @@ async def v1_responses(
     return _json_response_preserving_headers(result, finalized)
 
 
+@anthropic_router.post("/messages")
+async def anthropic_messages_route(
+    request: Request,
+    payload: dict[str, JsonValue] = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Depends(validate_anthropic_api_key),
+) -> Response:
+    try:
+        claude_desktop = is_local_claude_desktop_request(request)
+        messages_request = anthropic_messages.to_responses_request(
+            payload,
+            api_key=api_key,
+            claude_desktop=claude_desktop,
+            claude_desktop_sonnet_reasoning_effort=(
+                get_configured_claude_desktop_sonnet_reasoning_effort() if claude_desktop else "high"
+            ),
+        )
+    except ClientPayloadError as exc:
+        return _anthropic_error_json_response(
+            400,
+            anthropic_messages.anthropic_error("invalid_request_error", str(exc)),
+        )
+    except ValidationError as exc:
+        return _anthropic_error_json_response(
+            400,
+            anthropic_messages.anthropic_error("invalid_request_error", _validation_error_message(exc)),
+        )
+
+    responses_payload = messages_request.responses
+    messages_request, context_compacted, context_error = await _apply_anthropic_context_guard(
+        request,
+        messages_request,
+        context,
+        api_key,
+        claude_desktop=claude_desktop,
+    )
+    if context_error is not None:
+        return context_error
+    responses_payload = messages_request.responses
+    context_headers = {"x-codex-lb-context-compacted": "true"} if context_compacted else {}
+    if responses_payload.stream:
+        async def run_stream() -> Response:
+            return await _stream_responses(
+                request,
+                responses_payload,
+                context,
+                api_key,
+                codex_session_affinity=False,
+                openai_cache_affinity=True,
+                # Claude Desktop does not use Codex turn affinity. Avoid the
+                # optional HTTP bridge, whose owner-forward stream can close
+                # without a terminal Responses event.
+                prefer_http_bridge=not claude_desktop,
+            )
+
+        result = await _run_claude_desktop_startup_retries(run_stream) if claude_desktop else await run_stream()
+        if isinstance(result, StreamingResponse):
+            return StreamingResponse(
+                anthropic_messages.iter_messages_events(
+                    cast(AsyncIterator[str | bytes], result.body_iterator),
+                    client_model=messages_request.client_model,
+                    recover_incomplete_stream=claude_desktop,
+                ),
+                media_type="text/event-stream",
+                headers={**_anthropic_response_headers(result), **context_headers},
+            )
+        return _anthropic_error_response_from_proxy(result)
+
+    async def run_collect() -> Response:
+        return await _collect_responses(
+            request,
+            responses_payload,
+            context,
+            api_key,
+            codex_session_affinity=False,
+            openai_cache_affinity=True,
+            prefer_http_bridge=not claude_desktop,
+        )
+
+    result = await _run_claude_desktop_startup_retries(run_collect) if claude_desktop else await run_collect()
+    if result.status_code >= 400:
+        return _anthropic_error_response_from_proxy(result)
+    response_payload = _response_json_mapping(result)
+    if response_payload is None:
+        return _anthropic_error_json_response(
+            502,
+            anthropic_messages.anthropic_error("api_error", "Upstream returned an invalid Responses payload."),
+            headers=_anthropic_response_headers(result),
+        )
+    return JSONResponse(
+        content=anthropic_messages.message_from_responses(
+            response_payload,
+            client_model=messages_request.client_model,
+        ),
+        headers={**_anthropic_response_headers(result), **context_headers},
+    )
+
+
+@anthropic_router.post("/messages/count_tokens")
+async def anthropic_messages_count_tokens_route(
+    request: Request,
+    payload: dict[str, JsonValue] = Body(...),
+    api_key: ApiKeyData | None = Depends(validate_anthropic_api_key),
+) -> Response:
+    try:
+        claude_desktop = is_local_claude_desktop_request(request)
+        messages_request = anthropic_messages.to_responses_token_count_request(
+            payload,
+            api_key=api_key,
+            claude_desktop=claude_desktop,
+            claude_desktop_sonnet_reasoning_effort=(
+                get_configured_claude_desktop_sonnet_reasoning_effort() if claude_desktop else "high"
+            ),
+        )
+        forwarded = messages_request.responses.model_dump_for_forwarding()
+        input_tokens = await count_input_tokens(
+            InputTokenCountRequest.model_validate(
+                {
+                    key: forwarded[key]
+                    for key in ("model", "input", "instructions", "tools")
+                    if key in forwarded
+                }
+            ),
+            _responses_api_key_scope(api_key),
+        )
+    except ClientPayloadError as exc:
+        return _anthropic_error_json_response(
+            400,
+            anthropic_messages.anthropic_error("invalid_request_error", str(exc)),
+        )
+    except ValidationError as exc:
+        return _anthropic_error_json_response(
+            400,
+            anthropic_messages.anthropic_error("invalid_request_error", _validation_error_message(exc)),
+        )
+    except OpaqueTokenCountInputError as exc:
+        return _anthropic_error_json_response(
+            400,
+            anthropic_messages.anthropic_error("invalid_request_error", str(exc)),
+        )
+    return JSONResponse(
+        content={"input_tokens": input_tokens},
+        headers={"x-codex-lb-token-count": "local-compatible"},
+    )
+
+
+@anthropic_router.post("/messages/batches")
+async def anthropic_messages_batch_create_route(
+    request: Request,
+    payload: dict[str, JsonValue] = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Depends(validate_anthropic_api_key),
+) -> Response:
+    try:
+        claude_desktop = is_local_claude_desktop_request(request)
+        items = _anthropic_batch_create_items(
+            payload,
+            api_key=api_key,
+            claude_desktop=claude_desktop,
+            claude_desktop_sonnet_reasoning_effort=(
+                get_configured_claude_desktop_sonnet_reasoning_effort() if claude_desktop else "high"
+            ),
+        )
+    except ClientPayloadError as exc:
+        return _anthropic_error_json_response(
+            400,
+            anthropic_messages.anthropic_error("invalid_request_error", str(exc)),
+        )
+    except ValidationError as exc:
+        return _anthropic_error_json_response(
+            400,
+            anthropic_messages.anthropic_error("invalid_request_error", _validation_error_message(exc)),
+        )
+
+    api_key_scope = _responses_api_key_scope(api_key)
+    batch = await anthropic_batches.create_batch(api_key_scope=api_key_scope, requests=items)
+    _start_anthropic_batch(batch.id, request=request, context=context, api_key=api_key, claude_desktop=claude_desktop)
+    return JSONResponse(content=batch.to_public())
+
+
+@anthropic_router.get("/messages/batches")
+async def anthropic_messages_batch_list_route(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Depends(validate_anthropic_api_key),
+    limit: int = Query(default=20, ge=1, le=100),
+    after_id: str | None = Query(default=None, alias="after_id"),
+) -> Response:
+    api_key_scope = _responses_api_key_scope(api_key)
+    batches = await anthropic_batches.list_batches(api_key_scope=api_key_scope, limit=limit + 1, after_id=after_id)
+    visible = batches[:limit]
+    claude_desktop = is_local_claude_desktop_request(request)
+    for batch in visible:
+        if anthropic_batches.is_active(batch):
+            _start_anthropic_batch(
+                batch.id,
+                request=request,
+                context=context,
+                api_key=api_key,
+                claude_desktop=claude_desktop,
+            )
+    return JSONResponse(
+        content={
+            "data": [batch.to_public() for batch in visible],
+            "has_more": len(batches) > limit,
+            "first_id": visible[0].id if visible else None,
+            "last_id": visible[-1].id if visible else None,
+        }
+    )
+
+
+@anthropic_router.get("/messages/batches/{batch_id}/results")
+async def anthropic_messages_batch_results_route(
+    batch_id: str,
+    api_key: ApiKeyData | None = Depends(validate_anthropic_api_key),
+) -> Response:
+    try:
+        items = await anthropic_batches.get_batch_items(batch_id, _responses_api_key_scope(api_key))
+    except anthropic_batches.BatchNotFoundError:
+        return _anthropic_error_json_response(
+            404,
+            anthropic_messages.anthropic_error("not_found_error", "Message batch was not found."),
+        )
+    lines = [
+        json.dumps({"custom_id": item.custom_id, "result": item.result}, ensure_ascii=False, separators=(",", ":"))
+        for item in items
+        if item.result is not None
+    ]
+    return Response(content="\n".join(lines) + ("\n" if lines else ""), media_type="application/jsonl")
+
+
+@anthropic_router.post("/messages/batches/{batch_id}/cancel")
+async def anthropic_messages_batch_cancel_route(
+    batch_id: str,
+    api_key: ApiKeyData | None = Depends(validate_anthropic_api_key),
+) -> Response:
+    try:
+        batch = await anthropic_batches.cancel_batch(batch_id, _responses_api_key_scope(api_key))
+    except anthropic_batches.BatchNotFoundError:
+        return _anthropic_error_json_response(
+            404,
+            anthropic_messages.anthropic_error("not_found_error", "Message batch was not found."),
+        )
+    await get_background_anthropic_batch_manager().cancel(batch_id)
+    return JSONResponse(content=batch.to_public())
+
+
+@anthropic_router.delete("/messages/batches/{batch_id}")
+async def anthropic_messages_batch_delete_route(
+    batch_id: str,
+    api_key: ApiKeyData | None = Depends(validate_anthropic_api_key),
+) -> Response:
+    try:
+        await get_background_anthropic_batch_manager().cancel(batch_id)
+        await anthropic_batches.delete_batch(batch_id, _responses_api_key_scope(api_key))
+    except anthropic_batches.BatchNotFoundError:
+        return _anthropic_error_json_response(
+            404,
+            anthropic_messages.anthropic_error("not_found_error", "Message batch was not found."),
+        )
+    return JSONResponse(content={"id": batch_id, "type": "message_batch", "deleted": True})
+
+
+@anthropic_router.get("/messages/batches/{batch_id}")
+async def anthropic_messages_batch_retrieve_route(
+    batch_id: str,
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Depends(validate_anthropic_api_key),
+) -> Response:
+    api_key_scope = _responses_api_key_scope(api_key)
+    try:
+        batch = await anthropic_batches.get_batch(batch_id, api_key_scope)
+    except anthropic_batches.BatchNotFoundError:
+        return _anthropic_error_json_response(
+            404,
+            anthropic_messages.anthropic_error("not_found_error", "Message batch was not found."),
+        )
+    if anthropic_batches.is_active(batch):
+        _start_anthropic_batch(
+            batch.id,
+            request=request,
+            context=context,
+            api_key=api_key,
+            claude_desktop=is_local_claude_desktop_request(request),
+        )
+    return JSONResponse(content=batch.to_public())
+
+
 @v1_router.get("/responses/{response_id}")
 async def v1_retrieve_response(
     request: Request,
@@ -1301,6 +1624,449 @@ def _response_json_mapping(response: Response) -> dict[str, JsonValue] | None:
     return cast(dict[str, JsonValue], parsed)
 
 
+def _relocate_oversized_claude_desktop_instructions(
+    messages_request: anthropic_messages.AnthropicMessagesRequest,
+    *,
+    claude_desktop: bool,
+) -> anthropic_messages.AnthropicMessagesRequest:
+    """Make an over-limit Desktop system prompt eligible for compaction."""
+
+    if not claude_desktop:
+        return messages_request
+    instructions = messages_request.responses.instructions
+    input_value = messages_request.responses.input
+    if (
+        not isinstance(instructions, str)
+        or len(instructions) <= _RESPONSES_INSTRUCTIONS_MAX_CHARS
+        or not isinstance(input_value, list)
+    ):
+        return messages_request
+
+    instruction_content: list[JsonValue] = [
+        {"type": "input_text", "text": instructions[offset : offset + _ANTHROPIC_INSTRUCTION_BLOCK_CHARS]}
+        for offset in range(0, len(instructions), _ANTHROPIC_INSTRUCTION_BLOCK_CHARS)
+    ]
+    system_item: JsonValue = {"role": "system", "content": instruction_content}
+    relocated_responses = messages_request.responses.model_copy(
+        update={"instructions": "", "input": [system_item, *cast(list[JsonValue], input_value)]}
+    )
+    logger.info(
+        "anthropic_instructions_relocated chars=%d blocks=%d",
+        len(instructions),
+        len(instruction_content),
+    )
+    return anthropic_messages.AnthropicMessagesRequest(
+        responses=relocated_responses,
+        client_model=messages_request.client_model,
+        max_output_tokens=messages_request.max_output_tokens,
+        context_management_requested=messages_request.context_management_requested,
+    )
+
+
+async def _apply_anthropic_context_guard(
+    request: Request,
+    messages_request: anthropic_messages.AnthropicMessagesRequest,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    *,
+    claude_desktop: bool,
+) -> tuple[anthropic_messages.AnthropicMessagesRequest, bool, Response | None]:
+    """Compact an authorized near-limit historic transcript.
+
+    The upstream compact artifact is encrypted and can be reused only by the
+    mapped Responses provider.  It is therefore passed straight back as a
+    native ``compaction`` input item; this avoids fabricating a text summary or
+    claiming a larger Claude product context window than the upstream can use.
+    Explicit context-management remains required except for the authenticated
+    loopback-only Claude Desktop profile selected by the route.
+    """
+
+    relocate_instructions = (
+        claude_desktop
+        and isinstance(messages_request.responses.instructions, str)
+        and len(messages_request.responses.instructions) > _RESPONSES_INSTRUCTIONS_MAX_CHARS
+    )
+    messages_request = _relocate_oversized_claude_desktop_instructions(
+        messages_request,
+        claude_desktop=claude_desktop,
+    )
+    input_value = messages_request.responses.input
+    if not isinstance(input_value, list):
+        return messages_request, False, None
+    input_items = cast(list[JsonValue], input_value)
+    suffix_start = _anthropic_recent_turn_start(input_items)
+    estimated_tokens = _anthropic_input_token_estimate(messages_request.responses)
+    near_limit = estimated_tokens + messages_request.max_output_tokens > _ANTHROPIC_MAPPED_CONTEXT_GUARD_TOKENS
+    if not near_limit:
+        return messages_request, False, None
+    if suffix_start <= 0:
+        return (
+            messages_request,
+            False,
+            _anthropic_error_json_response(
+                400,
+                anthropic_messages.anthropic_error(
+                    "invalid_request_error",
+                    (
+                        "The request exceeds the mapped upstream context budget and has no prior turn "
+                        "that can be compacted."
+                    ),
+                ),
+            ),
+        )
+    if not messages_request.context_management_requested and not claude_desktop:
+        return (
+            messages_request,
+            False,
+            _anthropic_error_json_response(
+                400,
+                anthropic_messages.anthropic_error(
+                    "invalid_request_error",
+                    (
+                        "The request exceeds the mapped upstream context budget. "
+                        "Enable context_management.edits to allow local compaction before retrying."
+                    ),
+                ),
+            ),
+        )
+
+    compact_payload_data = messages_request.responses.model_dump(
+        mode="json",
+        include={"model", "instructions", "reasoning", "store", "service_tier", "prompt_cache_key"},
+        exclude_none=True,
+    )
+    compact_input = input_items[:suffix_start]
+    compact_payload_data["input"] = [] if relocate_instructions else compact_input
+    compact_payload = ResponsesCompactRequest.model_validate(compact_payload_data)
+    if relocate_instructions:
+        # The public compact model normally folds system/developer messages
+        # back into ``instructions``. This internally generated prefix has
+        # already been validated and must remain split so the upstream field
+        # limit is not recreated.
+        compact_payload = compact_payload.model_copy(update={"input": compact_input})
+    compact_response = await _compact_responses(
+        request,
+        compact_payload,
+        context,
+        api_key,
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+    )
+    if compact_response.status_code >= 400:
+        return messages_request, False, _anthropic_error_response_from_proxy(compact_response)
+    compact_payload_value = _response_json_mapping(compact_response)
+    if compact_payload_value is None:
+        return (
+            messages_request,
+            False,
+            _anthropic_error_json_response(
+                502,
+                anthropic_messages.anthropic_error("api_error", "Upstream returned an invalid compact response."),
+            ),
+        )
+    try:
+        compact_item = _compact_response_output_item(CompactResponsePayload.model_validate(compact_payload_value))
+    except ValidationError:
+        compact_item = None
+    if compact_item is None:
+        return (
+            messages_request,
+            False,
+            _anthropic_error_json_response(
+                502,
+                anthropic_messages.anthropic_error(
+                    "api_error",
+                    "Upstream compact response did not contain a reusable artifact.",
+                ),
+            ),
+        )
+    compacted_responses = messages_request.responses.model_copy(
+        update={"input": [compact_item, *input_items[suffix_start:]]}
+    )
+    compaction_trigger = (
+        "claude_desktop_auto"
+        if claude_desktop and not messages_request.context_management_requested
+        else "context_management"
+    )
+    logger.info(
+        "anthropic_context_compacted trigger=%s estimated_input_tokens=%d max_output_tokens=%d",
+        compaction_trigger,
+        estimated_tokens,
+        messages_request.max_output_tokens,
+    )
+    return (
+        anthropic_messages.AnthropicMessagesRequest(
+            responses=compacted_responses,
+            client_model=messages_request.client_model,
+            max_output_tokens=messages_request.max_output_tokens,
+            context_management_requested=messages_request.context_management_requested,
+        ),
+        True,
+        None,
+    )
+
+
+def _anthropic_recent_turn_start(input_items: list[JsonValue]) -> int:
+    latest_user_index = -1
+    for index, item in enumerate(input_items):
+        if is_json_mapping(item) and item.get("role") == "user":
+            latest_user_index = index
+    return latest_user_index
+
+
+def _anthropic_input_token_estimate(payload: ResponsesRequest) -> int:
+    serialized = json.dumps(
+        {"instructions": payload.instructions, "input": payload.input, "tools": payload.tools},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    # This is intentionally a conservative local guard, not an Anthropic token
+    # count. Exact counting remains available through /count_tokens for text.
+    return (len(serialized.encode("utf-8")) + 3) // 4
+
+
+def _anthropic_batch_create_items(
+    payload: Mapping[str, JsonValue],
+    *,
+    api_key: ApiKeyData | None,
+    claude_desktop: bool,
+    claude_desktop_sonnet_reasoning_effort: str,
+) -> list[anthropic_batches.BatchCreateItem]:
+    requests_value = payload.get("requests")
+    if not isinstance(requests_value, list) or not requests_value:
+        raise ClientPayloadError("'requests' must be a non-empty array.", param="requests")
+    if len(requests_value) > 1_000:
+        raise ClientPayloadError("A local Message Batch may contain at most 1000 requests.", param="requests")
+    items: list[anthropic_batches.BatchCreateItem] = []
+    custom_ids: set[str] = set()
+    for index, item_value in enumerate(requests_value):
+        if not is_json_mapping(item_value):
+            raise ClientPayloadError("Batch requests must be objects.", param=f"requests.{index}")
+        custom_id = item_value.get("custom_id")
+        if not isinstance(custom_id, str) or not custom_id or len(custom_id) > 64:
+            raise ClientPayloadError(
+                "Batch request custom_id must be a non-empty string of at most 64 characters.",
+                param=f"requests.{index}.custom_id",
+            )
+        if custom_id in custom_ids:
+            raise ClientPayloadError(
+                "Batch request custom_id values must be unique.",
+                param=f"requests.{index}.custom_id",
+            )
+        custom_ids.add(custom_id)
+        params = item_value.get("params")
+        if not is_json_mapping(params):
+            raise ClientPayloadError("Batch request params must be an object.", param=f"requests.{index}.params")
+        parsed = anthropic_messages.to_responses_request(
+            params,
+            api_key=api_key,
+            claude_desktop=claude_desktop,
+            claude_desktop_sonnet_reasoning_effort=claude_desktop_sonnet_reasoning_effort,
+        )
+        if parsed.responses.stream:
+            raise ClientPayloadError(
+                "Message Batch request params must set stream to false.",
+                param=f"requests.{index}.params.stream",
+            )
+        items.append(anthropic_batches.BatchCreateItem(custom_id=custom_id, params=dict(params)))
+    return items
+
+
+def _start_anthropic_batch(
+    batch_id: str,
+    *,
+    request: Request,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    claude_desktop: bool,
+) -> None:
+    manager = get_background_anthropic_batch_manager()
+    if manager.is_active(batch_id):
+        return
+    manager.start(
+        batch_id,
+        _run_anthropic_batch(
+            batch_id,
+            request=request,
+            context=context,
+            api_key=api_key,
+            claude_desktop=claude_desktop,
+        ),
+    )
+
+
+async def _run_anthropic_batch(
+    batch_id: str,
+    *,
+    request: Request,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    claude_desktop: bool,
+) -> None:
+    api_key_scope = _responses_api_key_scope(api_key)
+    active_item: anthropic_batches.BatchItemData | None = None
+    try:
+        while True:
+            active_item = await anthropic_batches.claim_next_item(batch_id, api_key_scope)
+            if active_item is None:
+                break
+            try:
+                messages_request = anthropic_messages.to_responses_request(
+                    active_item.params,
+                    api_key=api_key,
+                    claude_desktop=claude_desktop,
+                    claude_desktop_sonnet_reasoning_effort=(
+                        get_configured_claude_desktop_sonnet_reasoning_effort() if claude_desktop else "high"
+                    ),
+                )
+                response = await _collect_responses(
+                    request,
+                    messages_request.responses,
+                    context,
+                    api_key,
+                    codex_session_affinity=False,
+                    openai_cache_affinity=True,
+                    prefer_http_bridge=not claude_desktop,
+                )
+                if response.status_code >= 400:
+                    result = _anthropic_batch_error_result(response)
+                    await anthropic_batches.complete_item(item_id=active_item.id, status="errored", result=result)
+                    continue
+                response_payload = _response_json_mapping(response)
+                if response_payload is None:
+                    await anthropic_batches.complete_item(
+                        item_id=active_item.id,
+                        status="errored",
+                        result={
+                            "type": "errored",
+                            "error": {
+                                "type": "api_error",
+                                "message": "Upstream returned an invalid Responses payload.",
+                            },
+                        },
+                    )
+                    continue
+                await anthropic_batches.complete_item(
+                    item_id=active_item.id,
+                    status="succeeded",
+                    result={
+                        "type": "succeeded",
+                        "message": anthropic_messages.message_from_responses(
+                            response_payload,
+                            client_model=messages_request.client_model,
+                        ),
+                    },
+                )
+            except asyncio.CancelledError:
+                raise
+            except (ClientPayloadError, ValidationError) as exc:
+                await anthropic_batches.complete_item(
+                    item_id=active_item.id,
+                    status="errored",
+                    result={"type": "errored", "error": {"type": "invalid_request_error", "message": str(exc)}},
+                )
+            except Exception:
+                logger.exception("Anthropic batch item failed batch_id=%s item_id=%s", batch_id, active_item.id)
+                await anthropic_batches.complete_item(
+                    item_id=active_item.id,
+                    status="errored",
+                    result={
+                        "type": "errored",
+                        "error": {"type": "api_error", "message": "Local batch execution failed."},
+                    },
+                )
+            finally:
+                active_item = None
+        await anthropic_batches.finalize_batch(batch_id, api_key_scope)
+    except asyncio.CancelledError:
+        # The cancel endpoint has already made queued/in-flight rows terminal.
+        # On process shutdown startup recovery requeues an in-progress row.
+        raise
+    except anthropic_batches.BatchNotFoundError:
+        return
+
+
+def _anthropic_batch_error_result(response: Response) -> dict[str, JsonValue]:
+    payload = _response_json_mapping(response)
+    if payload is None:
+        error = anthropic_messages.anthropic_error("api_error", "Upstream request failed.")
+    else:
+        error = anthropic_messages.anthropic_error_from_openai(payload, status_code=response.status_code)
+    error_body = error.get("error")
+    return {
+        "type": "errored",
+        "error": error_body if is_json_mapping(error_body) else {"type": "api_error", "message": "Request failed."},
+    }
+
+
+async def _run_claude_desktop_startup_retries(operation: Callable[[], Awaitable[Response]]) -> Response:
+    """Retry only pre-stream Desktop failures that cannot duplicate output.
+
+    Claude Desktop opens parallel requests, and a just-released account lease
+    can otherwise surface as an avoidable 503. A ``Response`` (rather than a
+    ``StreamingResponse``) means no bytes were sent to the client yet, so a
+    bounded retry is safe.
+    """
+
+    result = await operation()
+    for delay_seconds in _CLAUDE_DESKTOP_STARTUP_RETRY_DELAYS:
+        if isinstance(result, StreamingResponse) or not _is_claude_desktop_recoverable_startup_response(result):
+            return result
+        await asyncio.sleep(delay_seconds)
+        result = await operation()
+    return result
+
+
+def _is_claude_desktop_recoverable_startup_response(response: Response) -> bool:
+    if response.status_code not in {502, 503}:
+        return False
+    payload = _response_json_mapping(response)
+    if payload is None:
+        return False
+    error_value = payload.get("error")
+    error = error_value if is_json_mapping(error_value) else {}
+    code = error.get("code")
+    return isinstance(code, str) and code in _CLAUDE_DESKTOP_RECOVERABLE_STARTUP_CODES
+
+
+def _anthropic_response_headers(response: Response) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in response.headers.items()
+        if key.lower() not in {"content-length", "content-type", "transfer-encoding"}
+    }
+
+
+def _anthropic_error_json_response(
+    status_code: int,
+    content: Mapping[str, JsonValue],
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content=dict(content), headers=dict(headers or {}))
+
+
+def _anthropic_error_response_from_proxy(response: Response) -> JSONResponse:
+    payload = _response_json_mapping(response)
+    if payload is None:
+        content = anthropic_messages.anthropic_error("api_error", "Upstream request failed.")
+    else:
+        content = anthropic_messages.anthropic_error_from_openai(payload, status_code=response.status_code)
+    return _anthropic_error_json_response(
+        response.status_code,
+        content,
+        headers=_anthropic_response_headers(response),
+    )
+
+
+def _validation_error_message(exc: ValidationError) -> str:
+    if exc.errors():
+        message = exc.errors()[0].get("msg")
+        if isinstance(message, str) and message:
+            return message
+    return "Invalid request payload."
+
+
 def _json_response_preserving_headers(
     original: Response,
     content: Mapping[str, JsonValue],
@@ -1445,11 +2211,13 @@ async def models(
     return await _build_codex_models_response(api_key)
 
 
-@v1_router.get("/models", response_model=None)
+@model_discovery_router.get("/models", response_model=None)
 async def v1_models(
     request: Request,
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Depends(validate_claude_desktop_or_proxy_api_key),
 ) -> Response:
+    if is_local_claude_desktop_request(request):
+        return await _build_claude_desktop_models_response()
     if request.query_params.get("client_version"):
         return await _build_codex_models_response(api_key)
     return await _build_models_response(api_key)
@@ -2625,6 +3393,21 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
         if not is_public_model(model, allowed_models):
             continue
         items.append(_to_model_list_item(slug, model, created=created))
+    await _release_reservation(reservation)
+    return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
+
+
+async def _build_claude_desktop_models_response() -> Response:
+    reservation = await _enforce_request_limits(
+        None,
+        request_model=None,
+        request_service_tier=None,
+    )
+    created = int(time.time())
+    items = [
+        ModelListItem(id=model_id, created=created, owned_by="anthropic")
+        for model_id in anthropic_messages.CLAUDE_DESKTOP_MODEL_IDS
+    ]
     await _release_reservation(reservation)
     return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
 

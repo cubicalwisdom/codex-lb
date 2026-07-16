@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const ClaudeDesktopSonnetReasoningEffortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
+
 export const CodexNeoSettingsSchema = z.object({
   codexApiBaseUrl: z.string().trim().min(1),
   codexgoApiBaseUrl: z.string().trim().min(1),
@@ -14,6 +16,7 @@ export const CodexNeoSettingsSchema = z.object({
   startWithWindowsEnabled: z.boolean(),
   autoDeleteFreeReauthAccountsEnabled: z.boolean().default(false),
   autoDeleteQuotaExceededAccountsEnabled: z.boolean().default(false),
+  claudeDesktopSonnetReasoningEffort: ClaudeDesktopSonnetReasoningEffortSchema.default("high"),
   buyerTokenSaved: z.boolean(),
 });
 
@@ -31,6 +34,7 @@ export const CodexNeoSettingsUpdateRequestSchema = z.object({
   startWithWindowsEnabled: z.boolean().optional(),
   autoDeleteFreeReauthAccountsEnabled: z.boolean().optional(),
   autoDeleteQuotaExceededAccountsEnabled: z.boolean().optional(),
+  claudeDesktopSonnetReasoningEffort: ClaudeDesktopSonnetReasoningEffortSchema.optional(),
   buyerToken: z.string().optional(),
   clearBuyerToken: z.boolean().optional(),
 });
@@ -163,6 +167,7 @@ export const CodexNeoAccountsResponseSchema = z.object({
 
 export type CodexNeoSettings = z.infer<typeof CodexNeoSettingsSchema>;
 export type CodexNeoSettingsUpdateRequest = z.infer<typeof CodexNeoSettingsUpdateRequestSchema>;
+export type ClaudeDesktopSonnetReasoningEffort = z.infer<typeof ClaudeDesktopSonnetReasoningEffortSchema>;
 export type CodexNeoApiUrlRequest = z.infer<typeof CodexNeoApiUrlRequestSchema>;
 export type CodexNeoLocationRequest = z.infer<typeof CodexNeoLocationRequestSchema>;
 export type CodexNeoBulkLocationRequest = z.infer<typeof CodexNeoBulkLocationRequestSchema>;
