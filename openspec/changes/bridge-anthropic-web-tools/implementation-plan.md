@@ -10,8 +10,8 @@
 
 ## Global Constraints
 
-- Preserve the current dirty parity work and remain on branch `claude-code`. After the complete Claude adapter line was verified, the user explicitly authorized updating its documentation, committing the approved work, and leaving this branch clean on 2026-07-17.
-- Do not push, merge, or modify another repository without separate authorization.
+- The temporary `claude-code` branch was the isolated implementation line. After the complete Claude adapter was verified and committed as `163b7d0`, the user authorized a fast-forward consolidation into `codexneo-portable-windows`, documentation update, push, and redundant local-branch cleanup on 2026-07-17.
+- Keep `main` and every other repository untouched. Only `codexneo-portable-windows` may receive this change, and the temporary branch may be retired only after ancestry and pushed-tip verification.
 - Do not restart the active portable runtime until source verification and both portable mirrors are complete.
 - Do not restart Claude Desktop; the user will exercise its built-in tools after the adapter is healthy.
 - Supported WebSearch types are `web_search_20250305`, `web_search_20260209`, and `web_search_20260318`.
