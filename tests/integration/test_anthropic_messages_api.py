@@ -70,6 +70,151 @@ async def test_messages_route_returns_anthropic_non_streaming_message(async_clie
 
 
 @pytest.mark.asyncio
+async def test_messages_route_round_trips_long_tool_identity(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+) -> None:
+    app_instance.dependency_overrides[get_proxy_context] = lambda: ProxyContext(service=object())
+    original_name = "mcp__workspace__" + "identity" * 12
+    original_call_id = "toolu_" + "continuity" * 10
+    observed: dict[str, object] = {}
+    caplog.set_level("INFO", logger="app.core.anthropic.messages")
+
+    async def fake_collect(*args, **kwargs):
+        del kwargs
+        forwarded = args[1].model_dump_for_forwarding()
+        forwarded_tool = forwarded["tools"][0]
+        forwarded_call = next(item for item in forwarded["input"] if item.get("type") == "function_call")
+        forwarded_output = next(item for item in forwarded["input"] if item.get("type") == "function_call_output")
+        observed["tool_name"] = forwarded_tool["name"]
+        observed["call_id"] = forwarded_call["call_id"]
+        observed["output_call_id"] = forwarded_output["call_id"]
+        return JSONResponse(
+            {
+                "id": "resp_long_identity",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "toolu_new",
+                        "name": forwarded_tool["name"],
+                        "arguments": "{}",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(proxy_api_module, "_collect_responses", fake_collect)
+    response = await async_client.post(
+        "/v1/messages",
+        headers={"x-api-key": "sk-clb-local"},
+        json={
+            "model": "gpt-5.6-terra",
+            "max_tokens": 1024,
+            "tools": [{"name": original_name, "input_schema": {"type": "object", "properties": {}}}],
+            "tool_choice": {"type": "tool", "name": original_name},
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": original_call_id, "name": original_name, "input": {}}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": original_call_id, "content": "done"}],
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(str(observed["tool_name"]).encode("utf-8")) <= 64
+    assert len(str(observed["call_id"]).encode("utf-8")) <= 64
+    assert observed["output_call_id"] == observed["call_id"]
+    assert response.json()["content"][0]["name"] == original_name
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "anthropic_protocol_identifier_mapped" in log_text
+    assert original_name not in log_text
+    assert original_call_id not in log_text
+
+
+@pytest.mark.asyncio
+async def test_claude_desktop_route_round_trips_opaque_reasoning_without_logging_content(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+) -> None:
+    app_instance.dependency_overrides[get_proxy_context] = lambda: ProxyContext(service=object())
+    observed: dict[str, object] = {}
+    input_summary = "SENTINEL_VISIBLE_INPUT_REASONING"
+    input_signature = "SENTINEL_OPAQUE_INPUT_SIGNATURE"
+    output_summary = "SENTINEL_VISIBLE_OUTPUT_REASONING"
+    output_signature = "SENTINEL_OPAQUE_OUTPUT_SIGNATURE"
+    caplog.set_level("INFO", logger="app.core.anthropic.messages")
+
+    async def fake_collect(*args, **kwargs):
+        del kwargs
+        observed["request"] = args[1].model_dump_for_forwarding()
+        return JSONResponse(
+            {
+                "id": "resp_reasoning_route",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "rs_reasoning_route",
+                        "type": "reasoning",
+                        "encrypted_content": output_signature,
+                        "summary": [{"type": "summary_text", "text": output_summary}],
+                    },
+                    {"type": "message", "content": [{"type": "output_text", "text": "continued"}]},
+                ],
+            }
+        )
+
+    monkeypatch.setattr(proxy_api_module, "_collect_responses", fake_collect)
+    response = await async_client.post(
+        "/v1/messages?beta=true",
+        headers={"x-api-key": "claudedesktop"},
+        json={
+            "model": "claude-opus-4-8",
+            "max_tokens": 1024,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": input_summary, "signature": input_signature},
+                        {"type": "text", "text": "prior answer"},
+                    ],
+                },
+                {"role": "user", "content": "continue"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    forwarded = observed["request"]
+    assert forwarded["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert forwarded["include"] == ["reasoning.encrypted_content"]
+    assert forwarded["input"][0] == {
+        "type": "reasoning",
+        "encrypted_content": input_signature,
+        "summary": [],
+        "content": None,
+    }
+    assert input_summary not in json.dumps(forwarded["input"])
+    assert response.json()["content"][:2] == [
+        {"type": "thinking", "thinking": output_summary, "signature": output_signature},
+        {"type": "text", "text": "continued"},
+    ]
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "anthropic_protocol_reasoning" in log_text
+    for sentinel in (input_summary, input_signature, output_summary, output_signature):
+        assert sentinel not in log_text
+
+
+@pytest.mark.asyncio
 async def test_claude_desktop_messages_route_maps_web_search_and_web_fetch(
     async_client,
     app_instance,
@@ -261,9 +406,7 @@ async def test_claude_desktop_route_accepts_hosted_workspace_alias_in_tool_searc
                         {
                             "type": "tool_result",
                             "tool_use_id": "call_tool_search",
-                            "content": [
-                                {"type": "tool_reference", "tool_name": "mcp__workspace__web_fetch"}
-                            ],
+                            "content": [{"type": "tool_reference", "tool_name": "mcp__workspace__web_fetch"}],
                         }
                     ],
                 },
@@ -357,9 +500,7 @@ async def test_claude_desktop_tool_reference_history_reaches_responses(
                         {
                             "type": "tool_result",
                             "tool_use_id": "call_tool_search",
-                            "content": [
-                                {"type": "tool_reference", "tool_name": "mcp__workspace__web_fetch"}
-                            ],
+                            "content": [{"type": "tool_reference", "tool_name": "mcp__workspace__web_fetch"}],
                         }
                     ],
                 },
@@ -842,8 +983,7 @@ async def test_claude_desktop_automatically_compacts_near_limit_history(
     ]
     assert response.headers["x-codex-lb-context-compacted"] == "true"
     assert any(
-        "anthropic_context_compacted trigger=claude_desktop_auto" in record.getMessage()
-        for record in caplog.records
+        "anthropic_context_compacted trigger=claude_desktop_auto" in record.getMessage() for record in caplog.records
     )
 
 
@@ -1182,10 +1322,10 @@ async def test_claude_desktop_route_uses_persisted_sonnet_fallback_effort(
         "model": "gpt-5.6-terra",
         "instructions": "",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
-        "reasoning": {"effort": "xhigh"},
+        "reasoning": {"effort": "xhigh", "summary": "auto"},
         "store": False,
         "stream": False,
-        "include": [],
+        "include": ["reasoning.encrypted_content"],
     }
     assert response.json()["model"] == "claude-sonnet-5"
 
@@ -1227,10 +1367,10 @@ async def test_claude_desktop_route_accepts_beta_developer_messages(async_client
         "model": "gpt-5.6-sol",
         "instructions": "Use concise answers.",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
-        "reasoning": {"effort": "max"},
+        "reasoning": {"effort": "max", "summary": "auto"},
         "store": False,
         "stream": False,
-        "include": [],
+        "include": ["reasoning.encrypted_content"],
     }
 
 
@@ -1343,6 +1483,90 @@ async def test_claude_desktop_stream_bypasses_bridge_and_closes_recoverable_term
     assert '"text":"done"' in response.text
     assert "event: message_stop" in response.text
     assert "terminal frame lost" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_claude_desktop_retries_comment_then_first_semantic_stream_error(
+    async_client,
+    app_instance,
+    monkeypatch,
+) -> None:
+    app_instance.dependency_overrides[get_proxy_context] = lambda: ProxyContext(service=object())
+    calls = 0
+
+    async def fake_stream(*args, **kwargs):
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        if calls == 1:
+            return StreamingResponse(
+                _stream(
+                    ": keepalive\n\n",
+                    (
+                        'data: {"type":"response.failed","response":{"error":{"code":"no_accounts",'
+                        '"type":"server_error","message":"No available accounts"}}}\n\n'
+                    ),
+                ),
+                media_type="text/event-stream",
+            )
+        return StreamingResponse(_openai_stream(), media_type="text/event-stream")
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(proxy_api_module, "_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_api_module.asyncio, "sleep", fake_sleep)
+    response = await async_client.post(
+        "/v1/messages?beta=true",
+        headers={"x-api-key": "claudedesktop"},
+        json={
+            "model": "claude-sonnet-5",
+            "max_tokens": 1024,
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == 2
+    assert "event: message_stop" in response.text
+    assert "No available accounts" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_messages_route_returns_http_error_for_first_semantic_stream_failure(
+    async_client,
+    app_instance,
+    monkeypatch,
+) -> None:
+    app_instance.dependency_overrides[get_proxy_context] = lambda: ProxyContext(service=object())
+
+    async def fake_stream(*args, **kwargs):
+        del args, kwargs
+        return StreamingResponse(
+            _stream(
+                'data: {"type":"response.failed","response":{"error":{"code":"upstream_error",'
+                '"type":"server_error","message":"startup failed"}}}\n\n'
+            ),
+            media_type="text/event-stream",
+        )
+
+    monkeypatch.setattr(proxy_api_module, "_stream_responses", fake_stream)
+    response = await async_client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-5.6-terra",
+            "max_tokens": 1024,
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "type": "error",
+        "error": {"type": "api_error", "message": "startup failed"},
+    }
 
 
 @pytest.mark.asyncio

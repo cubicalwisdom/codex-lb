@@ -121,9 +121,7 @@ def test_messages_request_translates_system_tools_and_tool_results() -> None:
     ]
     assert payload["input"] == [
         {"role": "user", "content": [{"type": "input_text", "text": "Inspect app.py"}]},
-        {
-            "role": "assistant", "content": [{"type": "output_text", "text": "I will inspect it."}]
-        },
+        {"role": "assistant", "content": [{"type": "output_text", "text": "I will inspect it."}]},
         {
             "type": "function_call",
             "call_id": "toolu_read",
@@ -132,6 +130,105 @@ def test_messages_request_translates_system_tools_and_tool_results() -> None:
         },
         {"type": "function_call_output", "call_id": "toolu_read", "output": "print('ok')"},
     ]
+
+
+def test_messages_request_maps_long_tool_names_and_call_ids_consistently() -> None:
+    shared_name_prefix = "mcp__workspace__" + "a" * 70
+    first_name = f"{shared_name_prefix}_first"
+    second_name = f"{shared_name_prefix}_second"
+    shared_call_prefix = "toolu_" + "b" * 70
+    first_call_id = f"{shared_call_prefix}_first"
+    second_call_id = f"{shared_call_prefix}_second"
+
+    request = anthropic_messages.to_responses_request(
+        {
+            "model": "gpt-5.6-terra",
+            "max_tokens": 4096,
+            "tools": [
+                {"name": first_name, "input_schema": {"type": "object", "properties": {}}},
+                {"name": second_name, "input_schema": {"type": "object", "properties": {}}},
+            ],
+            "tool_choice": {"type": "tool", "name": first_name},
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": first_call_id, "name": first_name, "input": {}},
+                        {"type": "tool_use", "id": second_call_id, "name": second_name, "input": {}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": first_call_id, "content": "first"},
+                        {"type": "tool_result", "tool_use_id": second_call_id, "content": "second"},
+                    ],
+                },
+            ],
+        },
+        api_key=None,
+    )
+
+    payload = request.responses.model_dump_for_forwarding()
+    tool_names = [tool["name"] for tool in payload["tools"]]
+    call_items = [item for item in payload["input"] if item.get("type") == "function_call"]
+    output_items = [item for item in payload["input"] if item.get("type") == "function_call_output"]
+
+    assert all(len(cast(str, name).encode("utf-8")) <= 64 for name in tool_names)
+    assert tool_names[0] != tool_names[1]
+    assert payload["tool_choice"] == {"type": "function", "name": tool_names[0]}
+    assert [item["name"] for item in call_items] == tool_names
+    assert all(len(cast(str, item["call_id"]).encode("utf-8")) <= 64 for item in call_items)
+    assert call_items[0]["call_id"] != call_items[1]["call_id"]
+    assert [item["call_id"] for item in output_items] == [item["call_id"] for item in call_items]
+    assert request.tool_name_aliases == {tool_names[0]: first_name, tool_names[1]: second_name}
+
+
+def test_messages_request_preserves_identifiers_at_exact_byte_limit() -> None:
+    tool_name = "t" * 64
+    call_id = "c" * 64
+    request = anthropic_messages.to_responses_request(
+        {
+            "model": "gpt-5.6-terra",
+            "max_tokens": 1024,
+            "tools": [{"name": tool_name, "input_schema": {"type": "object", "properties": {}}}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": call_id, "name": tool_name, "input": {}}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": call_id, "content": "done"}],
+                },
+            ],
+        },
+        api_key=None,
+    )
+
+    payload = request.responses.model_dump_for_forwarding()
+    call = next(item for item in payload["input"] if item.get("type") == "function_call")
+    result = next(item for item in payload["input"] if item.get("type") == "function_call_output")
+    assert payload["tools"][0]["name"] == tool_name
+    assert call["name"] == tool_name
+    assert call["call_id"] == call_id
+    assert result["call_id"] == call_id
+
+
+def test_messages_request_rejects_duplicate_tool_names_before_upstream() -> None:
+    with pytest.raises(ClientPayloadError, match="Duplicate tool name"):
+        anthropic_messages.to_responses_request(
+            {
+                "model": "gpt-5.6-terra",
+                "max_tokens": 1024,
+                "tools": [
+                    {"name": "duplicate_tool", "input_schema": {"type": "object", "properties": {}}},
+                    {"name": "duplicate_tool", "input_schema": {"type": "object", "properties": {}}},
+                ],
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            api_key=None,
+        )
 
 
 def test_messages_request_maps_tool_reference_history_to_native_tool_search_items() -> None:
@@ -258,9 +355,7 @@ def test_messages_request_preserves_tool_reference_for_an_ordinary_tool_result()
             "messages": [
                 {
                     "role": "assistant",
-                    "content": [
-                        {"type": "tool_use", "id": "call_catalog", "name": "custom_catalog", "input": {}}
-                    ],
+                    "content": [{"type": "tool_use", "id": "call_catalog", "name": "custom_catalog", "input": {}}],
                 },
                 {
                     "role": "user",
@@ -284,8 +379,7 @@ def test_messages_request_preserves_tool_reference_for_an_ordinary_tool_result()
         "type": "function_call_output",
         "call_id": "call_catalog",
         "output": (
-            '[{"text":"Found:","type":"text"},'
-            '{"tool_name":"mcp__workspace__web_fetch","type":"tool_reference"}]'
+            '[{"text":"Found:","type":"text"},{"tool_name":"mcp__workspace__web_fetch","type":"tool_reference"}]'
         ),
     }
 
@@ -531,9 +625,7 @@ def test_claude_desktop_accepts_hosted_workspace_alias_in_tool_search_history(de
                         {
                             "type": "tool_result",
                             "tool_use_id": "call_tool_search",
-                            "content": [
-                                {"type": "tool_reference", "tool_name": "mcp__workspace__web_fetch"}
-                            ],
+                            "content": [{"type": "tool_reference", "tool_name": "mcp__workspace__web_fetch"}],
                         }
                     ],
                 },
@@ -1063,6 +1155,75 @@ def test_claude_desktop_model_profile_routes_opus_and_sonnet(
     assert request.responses.reasoning.effort == "high"
 
 
+def test_claude_desktop_requests_encrypted_reasoning_continuity() -> None:
+    request = anthropic_messages.to_responses_request(
+        {
+            "model": "claude-opus-4-8",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Think carefully."}],
+        },
+        api_key=None,
+        claude_desktop=True,
+    )
+
+    assert request.responses.reasoning is not None
+    assert request.responses.reasoning.summary == "auto"
+    assert request.responses.include == ["reasoning.encrypted_content"]
+
+
+def test_assistant_thinking_signature_replays_as_opaque_reasoning_item() -> None:
+    request = anthropic_messages.to_responses_request(
+        {
+            "model": "gpt-5.6-terra",
+            "max_tokens": 1024,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "SENTINEL_VISIBLE_SUMMARY_MUST_NOT_REPLAY",
+                            "signature": "SENTINEL_OPAQUE_ENCRYPTED_REASONING",
+                        },
+                        {"type": "text", "text": "Prior answer."},
+                    ],
+                },
+                {"role": "user", "content": "Continue."},
+            ],
+        },
+        api_key=None,
+    )
+
+    payload = request.responses.model_dump_for_forwarding()
+    assert payload["input"][0] == {
+        "type": "reasoning",
+        "encrypted_content": "SENTINEL_OPAQUE_ENCRYPTED_REASONING",
+        "summary": [],
+        "content": None,
+    }
+    assert "SENTINEL_VISIBLE_SUMMARY_MUST_NOT_REPLAY" not in json.dumps(payload["input"])
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"type": "thinking", "thinking": "summary"},
+        {"type": "thinking", "thinking": "summary", "signature": ""},
+        {"type": "thinking", "thinking": 7, "signature": "opaque"},
+    ],
+)
+def test_assistant_thinking_rejects_malformed_state(block: dict[str, JsonValue]) -> None:
+    with pytest.raises(ClientPayloadError, match="thinking blocks require"):
+        anthropic_messages.to_responses_request(
+            {
+                "model": "gpt-5.6-terra",
+                "max_tokens": 1024,
+                "messages": [{"role": "assistant", "content": [block]}],
+            },
+            api_key=None,
+        )
+
+
 def test_claude_desktop_sonnet_uses_codexneo_fallback_effort() -> None:
     request = anthropic_messages.to_responses_request(
         {"model": "claude-sonnet-5", "max_tokens": 1024, "messages": [{"role": "user", "content": "Hi"}]},
@@ -1217,6 +1378,85 @@ def test_completed_responses_payload_becomes_anthropic_message() -> None:
         "stop_sequence": None,
         "usage": {"input_tokens": 12, "output_tokens": 7},
     }
+
+
+def test_completed_responses_payload_restores_original_tool_name() -> None:
+    message = anthropic_messages.message_from_responses(
+        {
+            "id": "resp_alias",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "toolu_alias",
+                    "name": "mcp__short_0123456789abcdef",
+                    "arguments": "{}",
+                }
+            ],
+        },
+        client_model="claude-sonnet-5",
+        tool_name_aliases={"mcp__short_0123456789abcdef": "mcp__workspace__sentinel_original_tool"},
+    )
+
+    assert message["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_alias",
+            "name": "mcp__workspace__sentinel_original_tool",
+            "input": {},
+        }
+    ]
+
+
+def test_completed_responses_payload_preserves_reasoning_summary_and_signature() -> None:
+    message = anthropic_messages.message_from_responses(
+        {
+            "id": "resp_reasoning",
+            "status": "completed",
+            "output": [
+                {
+                    "id": "rs_reasoning",
+                    "type": "reasoning",
+                    "encrypted_content": "SENTINEL_ENCRYPTED_REASONING_OUTPUT",
+                    "summary": [
+                        {"type": "summary_text", "text": "First summary."},
+                        {"type": "summary_text", "text": "Second summary."},
+                    ],
+                },
+                {"type": "message", "content": [{"type": "output_text", "text": "Final answer."}]},
+            ],
+        },
+        client_model="claude-opus-4-8",
+    )
+
+    assert message["content"] == [
+        {
+            "type": "thinking",
+            "thinking": "First summary.\n\nSecond summary.",
+            "signature": "SENTINEL_ENCRYPTED_REASONING_OUTPUT",
+        },
+        {"type": "text", "text": "Final answer."},
+    ]
+
+
+def test_completed_responses_payload_preserves_signature_only_reasoning() -> None:
+    message = anthropic_messages.message_from_responses(
+        {
+            "id": "resp_signature_only",
+            "status": "completed",
+            "output": [
+                {
+                    "id": "rs_signature_only",
+                    "type": "reasoning",
+                    "encrypted_content": "SENTINEL_SIGNATURE_ONLY",
+                    "summary": [],
+                }
+            ],
+        },
+        client_model="claude-opus-4-8",
+    )
+
+    assert message["content"] == [{"type": "thinking", "thinking": "", "signature": "SENTINEL_SIGNATURE_ONLY"}]
 
 
 def test_completed_responses_payload_keeps_text_fallback_for_incomplete_web_search_data() -> None:
@@ -1672,6 +1912,166 @@ async def test_tool_stream_uses_input_json_deltas() -> None:
     assert parsed[1]["content_block"] == {"type": "tool_use", "id": "toolu_run", "name": "run_command", "input": {}}
     assert parsed[2]["delta"] == {"type": "input_json_delta", "partial_json": '{"command":"pwd"}'}
     assert parsed[4]["delta"]["stop_reason"] == "tool_use"
+
+
+@pytest.mark.asyncio
+async def test_tool_stream_restores_original_tool_name() -> None:
+    blocks = [
+        _sse({"type": "response.created", "response": {"id": "resp_tool_alias"}}),
+        _sse(
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_alias",
+                    "type": "function_call",
+                    "call_id": "toolu_alias",
+                    "name": "mcp__short_0123456789abcdef",
+                },
+            }
+        ),
+        _sse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_alias",
+                    "type": "function_call",
+                    "call_id": "toolu_alias",
+                    "name": "mcp__short_0123456789abcdef",
+                    "arguments": "{}",
+                },
+            }
+        ),
+        _sse({"type": "response.completed", "response": {"id": "resp_tool_alias"}}),
+    ]
+
+    parsed = [
+        event
+        for event in [
+            parse_sse_data_json(event)
+            async for event in anthropic_messages.iter_messages_events(
+                _stream(*blocks),
+                client_model="claude-sonnet-5",
+                tool_name_aliases={"mcp__short_0123456789abcdef": "mcp__workspace__sentinel_original_tool"},
+            )
+        ]
+        if event is not None
+    ]
+
+    assert parsed[1]["content_block"]["name"] == "mcp__workspace__sentinel_original_tool"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_stream_preserves_summary_and_final_signature_order() -> None:
+    blocks = [
+        _sse({"type": "response.created", "response": {"id": "resp_reasoning_stream"}}),
+        _sse(
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "rs_stream",
+                    "type": "reasoning",
+                    "encrypted_content": "SENTINEL_INITIAL_SIGNATURE",
+                    "summary": [],
+                },
+            }
+        ),
+        _sse(
+            {
+                "type": "response.reasoning_summary_part.added",
+                "output_index": 0,
+                "item_id": "rs_stream",
+            }
+        ),
+        _sse(
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "output_index": 0,
+                "item_id": "rs_stream",
+                "delta": "Careful summary.",
+            }
+        ),
+        _sse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "rs_stream",
+                    "type": "reasoning",
+                    "encrypted_content": "SENTINEL_FINAL_SIGNATURE",
+                    "summary": [{"type": "summary_text", "text": "Careful summary."}],
+                },
+            }
+        ),
+        _sse({"type": "response.completed", "response": {"id": "resp_reasoning_stream"}}),
+    ]
+
+    parsed = [
+        event
+        for event in [
+            parse_sse_data_json(event)
+            async for event in anthropic_messages.iter_messages_events(_stream(*blocks), client_model="claude-opus-4-8")
+        ]
+        if event is not None
+    ]
+
+    assert [event["type"] for event in parsed] == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]
+    assert parsed[1]["content_block"] == {"type": "thinking", "thinking": ""}
+    assert parsed[2]["delta"] == {"type": "thinking_delta", "thinking": "Careful summary."}
+    assert parsed[3]["delta"] == {"type": "signature_delta", "signature": "SENTINEL_FINAL_SIGNATURE"}
+
+
+@pytest.mark.asyncio
+async def test_signature_only_reasoning_stream_keeps_opaque_state() -> None:
+    blocks = [
+        _sse({"type": "response.created", "response": {"id": "resp_signature_stream"}}),
+        _sse(
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"id": "rs_signature", "type": "reasoning", "summary": []},
+            }
+        ),
+        _sse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "rs_signature",
+                    "type": "reasoning",
+                    "encrypted_content": "SENTINEL_SIGNATURE_ONLY_STREAM",
+                    "summary": [],
+                },
+            }
+        ),
+        _sse({"type": "response.completed", "response": {"id": "resp_signature_stream"}}),
+    ]
+
+    parsed = [
+        event
+        for event in [
+            parse_sse_data_json(event)
+            async for event in anthropic_messages.iter_messages_events(_stream(*blocks), client_model="claude-opus-4-8")
+        ]
+        if event is not None
+    ]
+
+    assert parsed[1]["content_block"] == {"type": "thinking", "thinking": ""}
+    assert parsed[2]["delta"] == {
+        "type": "signature_delta",
+        "signature": "SENTINEL_SIGNATURE_ONLY_STREAM",
+    }
+    assert parsed[3]["type"] == "content_block_stop"
 
 
 @pytest.mark.asyncio

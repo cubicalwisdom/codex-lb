@@ -319,10 +319,7 @@ def _has_openai_responses_shape(payload: V1ResponsesRequest | Mapping[str, JsonV
         continuation_only = (
             payload_dict.get("input") is None
             and payload_dict.get("messages") is None
-            and (
-                bool(payload_dict.get("previous_response_id"))
-                or bool(payload_dict.get("conversation"))
-            )
+            and (bool(payload_dict.get("previous_response_id")) or bool(payload_dict.get("conversation")))
         )
         return (
             ("input" in payload_dict and payload_dict.get("instructions") is None)
@@ -866,8 +863,9 @@ async def anthropic_messages_route(
     responses_payload = messages_request.responses
     context_headers = {"x-codex-lb-context-compacted": "true"} if context_compacted else {}
     if responses_payload.stream:
+
         async def run_stream() -> Response:
-            return await _stream_responses(
+            result = await _stream_responses(
                 request,
                 responses_payload,
                 context,
@@ -879,6 +877,7 @@ async def anthropic_messages_route(
                 # without a terminal Responses event.
                 prefer_http_bridge=not claude_desktop,
             )
+            return await _probe_anthropic_stream_startup(request, result)
 
         result = await _run_claude_desktop_startup_retries(run_stream) if claude_desktop else await run_stream()
         if isinstance(result, StreamingResponse):
@@ -887,6 +886,7 @@ async def anthropic_messages_route(
                     cast(AsyncIterator[str | bytes], result.body_iterator),
                     client_model=messages_request.client_model,
                     recover_incomplete_stream=claude_desktop,
+                    tool_name_aliases=messages_request.tool_name_aliases,
                 ),
                 media_type="text/event-stream",
                 headers={**_anthropic_response_headers(result), **context_headers},
@@ -918,6 +918,7 @@ async def anthropic_messages_route(
         content=anthropic_messages.message_from_responses(
             response_payload,
             client_model=messages_request.client_model,
+            tool_name_aliases=messages_request.tool_name_aliases,
         ),
         headers={**_anthropic_response_headers(result), **context_headers},
     )
@@ -942,11 +943,7 @@ async def anthropic_messages_count_tokens_route(
         forwarded = messages_request.responses.model_dump_for_forwarding()
         input_tokens = await count_input_tokens(
             InputTokenCountRequest.model_validate(
-                {
-                    key: forwarded[key]
-                    for key in ("model", "input", "instructions", "tools")
-                    if key in forwarded
-                }
+                {key: forwarded[key] for key in ("model", "input", "instructions", "tools") if key in forwarded}
             ),
             _responses_api_key_scope(api_key),
         )
@@ -1394,11 +1391,7 @@ async def _observe_lifecycle_stream(
     output_items: dict[int, dict[str, JsonValue]] = {}
     terminal_response: dict[str, JsonValue] | None = None
     async for chunk in stream:
-        text_chunk = (
-            bytes(chunk).decode("utf-8", errors="replace")
-            if isinstance(chunk, (bytes, memoryview))
-            else chunk
-        )
+        text_chunk = bytes(chunk).decode("utf-8", errors="replace") if isinstance(chunk, (bytes, memoryview)) else chunk
         payload = _parse_sse_payload(text_chunk)
         if payload is not None:
             _collect_output_item_event(payload, output_items)
@@ -1529,9 +1522,7 @@ async def _run_background_response(
             )
             return
         upstream_response_id_value = response_payload.get("id")
-        upstream_response_id = (
-            upstream_response_id_value if isinstance(upstream_response_id_value, str) else None
-        )
+        upstream_response_id = upstream_response_id_value if isinstance(upstream_response_id_value, str) else None
         response_base = dict(in_progress)
         response_base.update(response_payload)
         finalized = responses_lifecycle.finalize_public_response(
@@ -1664,6 +1655,7 @@ def _relocate_oversized_claude_desktop_instructions(
         client_model=messages_request.client_model,
         max_output_tokens=messages_request.max_output_tokens,
         context_management_requested=messages_request.context_management_requested,
+        tool_name_aliases=messages_request.tool_name_aliases,
     )
 
 
@@ -1804,6 +1796,7 @@ async def _apply_anthropic_context_guard(
             client_model=messages_request.client_model,
             max_output_tokens=messages_request.max_output_tokens,
             context_management_requested=messages_request.context_management_requested,
+            tool_name_aliases=messages_request.tool_name_aliases,
         ),
         True,
         None,
@@ -1954,6 +1947,7 @@ async def _run_anthropic_batch(
                         "message": anthropic_messages.message_from_responses(
                             response_payload,
                             client_model=messages_request.client_model,
+                            tool_name_aliases=messages_request.tool_name_aliases,
                         ),
                     },
                 )
@@ -2017,6 +2011,30 @@ async def _run_claude_desktop_startup_retries(operation: Callable[[], Awaitable[
     return result
 
 
+async def _probe_anthropic_stream_startup(request: Request, response: Response) -> Response:
+    if not isinstance(response, StreamingResponse):
+        return response
+    stream, startup_error = await _probe_stream_startup_error(
+        cast(AsyncIterator[str], response.body_iterator),
+        convert_event_errors=True,
+        max_startup_events=8,
+        skip_sse_comments=True,
+    )
+    if startup_error is not None:
+        logger.info("anthropic_protocol_stream_startup outcome=error_pre_header")
+        return _stream_startup_error_response(
+            request,
+            startup_error,
+            headers=_anthropic_response_headers(response),
+        )
+    logger.info("anthropic_protocol_stream_startup outcome=stream_ready")
+    return StreamingResponse(
+        stream,
+        media_type="text/event-stream",
+        headers=_anthropic_response_headers(response),
+    )
+
+
 def _is_claude_desktop_recoverable_startup_response(response: Response) -> bool:
     if response.status_code not in {502, 503}:
         return False
@@ -2072,9 +2090,7 @@ def _json_response_preserving_headers(
     content: Mapping[str, JsonValue],
 ) -> JSONResponse:
     headers = {
-        key: value
-        for key, value in original.headers.items()
-        if key.lower() not in {"content-length", "content-type"}
+        key: value for key, value in original.headers.items() if key.lower() not in {"content-length", "content-type"}
     }
     return JSONResponse(content=dict(content), status_code=original.status_code, headers=headers)
 
@@ -4300,29 +4316,37 @@ async def _probe_stream_startup_error(
     *,
     convert_event_errors: bool = False,
     timeout_seconds: float | None = None,
+    max_startup_events: int = 1,
+    skip_sse_comments: bool = False,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
-    first_task = asyncio.create_task(_read_first_stream_item(stream))
-    try:
-        first = await asyncio.wait_for(
-            asyncio.shield(first_task),
-            timeout=timeout_seconds,
-        )
-    except TimeoutError:
-        return _prepend_first_task(first_task, stream), None
-    except StopAsyncIteration:
-        return _prepend_first(None, stream), None
-    except ProxyResponseError as exc:
-        return _prepend_first(None, stream), exc
-    if convert_event_errors:
-        first_error = _stream_event_error_envelope(first)
-        if first_error is not None:
-            aclose = getattr(stream, "aclose", None)
-            if callable(aclose):
-                await aclose()
-            return _prepend_first(None, stream), first_error
-    return _prepend_first(first, stream), None
+    buffered: list[str] = []
+    for _ in range(max_startup_events):
+        first_task = asyncio.create_task(_read_first_stream_item(stream))
+        try:
+            first = await asyncio.wait_for(
+                asyncio.shield(first_task),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None
+        except StopAsyncIteration:
+            return _prepend_items(buffered, _prepend_first(None, stream)), None
+        except ProxyResponseError as exc:
+            return _prepend_items(buffered, _prepend_first(None, stream)), exc
+        if convert_event_errors:
+            first_error = _stream_event_error_envelope(first)
+            if first_error is not None:
+                aclose = getattr(stream, "aclose", None)
+                if callable(aclose):
+                    await aclose()
+                return _prepend_first(None, stream), first_error
+        buffered.append(first)
+        if skip_sse_comments and _looks_like_sse_comment_block(first):
+            continue
+        return _prepend_items(buffered, stream), None
+    return _prepend_items(buffered, stream), None
 
 
 _CHAT_COMPLETIONS_STARTUP_EVENT_TYPES: Final[set[str]] = {

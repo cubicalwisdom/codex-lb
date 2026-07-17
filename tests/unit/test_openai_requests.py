@@ -508,6 +508,42 @@ def test_interleaved_reasoning_sanitization_preserves_top_level_reasoning():
     assert dumped["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
 
 
+def test_native_encrypted_reasoning_input_preserves_explicit_null_content():
+    payload = {
+        "model": "gpt-5.6-terra",
+        "instructions": "",
+        "input": [
+            {
+                "type": "reasoning",
+                "encrypted_content": "opaque-state",
+                "summary": [],
+                "content": None,
+            }
+        ],
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.to_payload()["input"] == payload["input"]
+
+
+def test_compact_encrypted_reasoning_input_preserves_explicit_null_content():
+    payload = {
+        "model": "gpt-5.6-terra",
+        "instructions": "",
+        "input": [
+            {
+                "type": "reasoning",
+                "encrypted_content": "opaque-compact-state",
+                "summary": [],
+                "content": None,
+            }
+        ],
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    assert request.to_payload()["input"] == payload["input"]
+
+
 def test_interleaved_reasoning_sanitization_preserves_nested_function_call_arguments():
     payload = {
         "model": "gpt-5.1",

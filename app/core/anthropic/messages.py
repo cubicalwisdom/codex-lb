@@ -6,6 +6,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import logging
 import re
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
@@ -22,6 +23,8 @@ from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.api_keys.service import ApiKeyData
 
+logger = logging.getLogger(__name__)
+
 CLAUDE_DESKTOP_MODEL_IDS: Final[tuple[str, str]] = (
     "claude-opus-4-8",
     "claude-sonnet-5",
@@ -37,12 +40,8 @@ _CLAUDE_DESKTOP_EFFORTS: Final[dict[str, str]] = {
     "xhigh": "xhigh",
     "max": "max",
 }
-_SUPPORTED_IMAGE_MEDIA_TYPES: Final[frozenset[str]] = frozenset(
-    {"image/jpeg", "image/png", "image/gif", "image/webp"}
-)
-_SUPPORTED_DOCUMENT_MEDIA_TYPES: Final[frozenset[str]] = frozenset(
-    {"application/pdf", "text/plain", "text/csv"}
-)
+_SUPPORTED_IMAGE_MEDIA_TYPES: Final[frozenset[str]] = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+_SUPPORTED_DOCUMENT_MEDIA_TYPES: Final[frozenset[str]] = frozenset({"application/pdf", "text/plain", "text/csv"})
 _SUPPORTED_WEB_SERVER_TOOLS: Final[dict[str, frozenset[str]]] = {
     "web_search": frozenset(
         {
@@ -78,9 +77,7 @@ _WEB_SERVER_TOOL_FIELDS: Final[frozenset[str]] = frozenset(
         "defer_loading",
     }
 )
-_WEB_USER_LOCATION_FIELDS: Final[frozenset[str]] = frozenset(
-    {"type", "city", "region", "country", "timezone"}
-)
+_WEB_USER_LOCATION_FIELDS: Final[frozenset[str]] = frozenset({"type", "city", "region", "country", "timezone"})
 _CLAUDE_TOOL_SEARCH_NAME: Final = "ToolSearch"
 _CLAUDE_WORKSPACE_WEB_FETCH_NAME: Final = "mcp__workspace__web_fetch"
 _PUBLIC_HTTP_URL_RE: Final = re.compile(r"https?://[^\s<>()\"']+", re.IGNORECASE)
@@ -89,6 +86,8 @@ _MAX_INLINE_ATTACHMENT_BYTES: Final = 10 * 1024 * 1024
 _MAX_PDF_PAGES: Final = 500
 _MAX_PDF_PAGE_CONTENT_BYTES: Final = 16 * 1024 * 1024
 _MAX_EXTRACTED_DOCUMENT_CHARS: Final = 1_000_000
+_RESPONSES_IDENTIFIER_MAX_BYTES: Final = 64
+_RESPONSES_IDENTIFIER_HASH_HEX_CHARS: Final = 16
 
 
 def anthropic_error(error_type: str, message: str) -> dict[str, JsonValue]:
@@ -137,6 +136,7 @@ class AnthropicMessagesRequest:
     client_model: str
     max_output_tokens: int
     context_management_requested: bool
+    tool_name_aliases: Mapping[str, str] = field(default_factory=dict)
 
 
 def to_responses_request(
@@ -152,7 +152,12 @@ def to_responses_request(
     messages = _required_list(payload, "messages")
     tools = payload.get("tools")
     if tools is not None:
-        converted_tools, hosted_web_aliases = _tools_to_responses(
+        (
+            converted_tools,
+            hosted_web_aliases,
+            tool_names_to_responses,
+            tool_name_aliases,
+        ) = _tools_to_responses(
             tools,
             claude_desktop=claude_desktop,
             route_workspace_web_fetch=claude_desktop and _latest_user_prompt_targets_public_web(messages),
@@ -160,10 +165,13 @@ def to_responses_request(
     else:
         converted_tools = []
         hosted_web_aliases = frozenset()
+        tool_names_to_responses = {}
+        tool_name_aliases = {}
     tool_search_history = _tool_search_history(
         messages,
         converted_tools=converted_tools,
         hosted_tool_aliases=hosted_web_aliases,
+        tool_names_to_responses=tool_names_to_responses,
     )
 
     input_items: list[JsonValue] = []
@@ -175,6 +183,7 @@ def to_responses_request(
                 index=index,
                 claude_desktop=claude_desktop,
                 tool_search_history=tool_search_history,
+                tool_names_to_responses=tool_names_to_responses,
             )
         )
 
@@ -190,6 +199,7 @@ def to_responses_request(
     tool_choice, parallel_tool_calls = _tool_choice_to_responses(
         payload.get("tool_choice"),
         hosted_web_aliases=hosted_web_aliases,
+        tool_names_to_responses=tool_names_to_responses,
     )
     if tool_choice is not None:
         request_data["tool_choice"] = tool_choice
@@ -203,8 +213,10 @@ def to_responses_request(
                     client_model,
                     sonnet_effort=claude_desktop_sonnet_reasoning_effort,
                 ),
-            )
+            ),
+            "summary": "auto",
         }
+        request_data["include"] = ["reasoning.encrypted_content"]
     cache_affinity_key = _cache_affinity_key(payload, effective_model=effective_model)
     if cache_affinity_key is not None:
         request_data["prompt_cache_key"] = cache_affinity_key
@@ -214,6 +226,7 @@ def to_responses_request(
         client_model=client_model,
         max_output_tokens=max_output_tokens,
         context_management_requested=_context_management_requested(payload.get("context_management")),
+        tool_name_aliases=tool_name_aliases,
     )
 
 
@@ -241,7 +254,12 @@ def to_responses_token_count_request(
     )
 
 
-def message_from_responses(response: Mapping[str, JsonValue], *, client_model: str) -> dict[str, JsonValue]:
+def message_from_responses(
+    response: Mapping[str, JsonValue],
+    *,
+    client_model: str,
+    tool_name_aliases: Mapping[str, str] | None = None,
+) -> dict[str, JsonValue]:
     content: list[JsonValue] = []
     saw_tool_use = False
     output = response.get("output")
@@ -251,11 +269,16 @@ def message_from_responses(response: Mapping[str, JsonValue], *, client_model: s
             if item is None:
                 continue
             item_type = item.get("type")
+            if item_type == "reasoning":
+                reasoning_block = _anthropic_reasoning_block(item)
+                if reasoning_block is not None:
+                    content.append(reasoning_block)
+                continue
             if item_type == "web_search_call":
                 content.extend(_anthropic_web_search_blocks(item))
                 continue
             if item_type == "function_call":
-                content.append(_tool_use_block(item))
+                content.append(_tool_use_block(item, tool_name_aliases=tool_name_aliases))
                 saw_tool_use = True
                 continue
             if item_type != "message":
@@ -295,8 +318,12 @@ async def iter_messages_events(
     *,
     client_model: str,
     recover_incomplete_stream: bool = False,
+    tool_name_aliases: Mapping[str, str] | None = None,
 ) -> AsyncIterator[str]:
-    state = _MessagesStreamState(client_model=client_model)
+    state = _MessagesStreamState(
+        client_model=client_model,
+        tool_name_aliases=tool_name_aliases or {},
+    )
     async for raw_chunk in source:
         chunk = raw_chunk.decode("utf-8", errors="replace") if isinstance(raw_chunk, bytes) else raw_chunk
         payload = parse_sse_data_json(chunk)
@@ -314,6 +341,16 @@ async def iter_messages_events(
         if event_type == "response.output_item.added":
             for event in state.handle_output_item_added(payload):
                 yield event
+            continue
+        if event_type == "response.reasoning_summary_part.added":
+            for event in state.handle_reasoning_summary_part_added(payload):
+                yield event
+            continue
+        if event_type == "response.reasoning_summary_text.delta":
+            for event in state.handle_reasoning_summary_delta(payload):
+                yield event
+            continue
+        if event_type == "response.reasoning_summary_part.done":
             continue
         if event_type == "response.content_part.added":
             for event in state.handle_content_part_added(payload):
@@ -363,6 +400,9 @@ class _ContentBlockState:
     call_id: str | None = None
     name: str | None = None
     arguments: str = ""
+    reasoning_text: str = ""
+    signature: str | None = None
+    signature_emitted: bool = False
     started: bool = False
     closed: bool = False
     emitted: bool = False
@@ -371,11 +411,13 @@ class _ContentBlockState:
 @dataclass(slots=True)
 class _MessagesStreamState:
     client_model: str
+    tool_name_aliases: Mapping[str, str] = field(default_factory=dict)
     started: bool = False
     terminal: bool = False
     next_index: int = 0
     blocks: dict[str, _ContentBlockState] = field(default_factory=dict)
     saw_tool_use: bool = False
+    current_reasoning_key: str | None = None
 
     def ensure_started(self, response_value: JsonValue) -> list[str]:
         if self.started:
@@ -404,10 +446,34 @@ class _MessagesStreamState:
     def handle_output_item_added(self, payload: Mapping[str, JsonValue]) -> list[str]:
         item_value = payload.get("item")
         item = item_value if is_json_mapping(item_value) else None
-        if item is None or item.get("type") != "function_call":
+        if item is None:
+            return []
+        if item.get("type") == "reasoning":
+            block = self._reasoning_block(payload, item)
+            block.signature = _optional_string(item.get("encrypted_content"))
+            return []
+        if item.get("type") != "function_call":
             return []
         block = self._tool_block(payload, item)
         return self._start_tool_block(block)
+
+    def handle_reasoning_summary_part_added(self, payload: Mapping[str, JsonValue]) -> list[str]:
+        return self._start_reasoning_block(self._reasoning_block(payload, None))
+
+    def handle_reasoning_summary_delta(self, payload: Mapping[str, JsonValue]) -> list[str]:
+        delta = payload.get("delta")
+        if not isinstance(delta, str):
+            return []
+        block = self._reasoning_block(payload, None)
+        events = self._start_reasoning_block(block)
+        block.reasoning_text += delta
+        events.append(
+            _anthropic_event(
+                "content_block_delta",
+                {"index": block.index, "delta": {"type": "thinking_delta", "thinking": delta}},
+            )
+        )
+        return events
 
     def handle_content_part_added(self, payload: Mapping[str, JsonValue]) -> list[str]:
         part_value = payload.get("part")
@@ -464,6 +530,28 @@ class _MessagesStreamState:
         item = item_value if is_json_mapping(item_value) else None
         if item is None:
             return []
+        if item.get("type") == "reasoning":
+            block = self._reasoning_block(payload, item)
+            final_signature = _optional_string(item.get("encrypted_content"))
+            if final_signature is not None:
+                block.signature = final_signature
+            events: list[str] = []
+            summary_text = _reasoning_summary_text(item)
+            if summary_text and not block.reasoning_text:
+                events.extend(self._start_reasoning_block(block))
+                block.reasoning_text = summary_text
+                events.append(
+                    _anthropic_event(
+                        "content_block_delta",
+                        {
+                            "index": block.index,
+                            "delta": {"type": "thinking_delta", "thinking": summary_text},
+                        },
+                    )
+                )
+            events.extend(self._finish_reasoning_block(block))
+            self.current_reasoning_key = None
+            return events
         if item.get("type") == "web_search_call":
             blocks = _anthropic_web_search_blocks(item)
             events: list[str] = []
@@ -526,7 +614,10 @@ class _MessagesStreamState:
         response = response_value if is_json_mapping(response_value) else {}
         events = self.ensure_started(response)
         for block in self.blocks.values():
-            events.extend(self._stop_block(block))
+            if block.kind == "thinking":
+                events.extend(self._finish_reasoning_block(block))
+            else:
+                events.extend(self._stop_block(block))
         usage_value = response.get("usage")
         usage = usage_value if is_json_mapping(usage_value) else {}
         events.append(
@@ -565,9 +656,7 @@ class _MessagesStreamState:
         Tool-use and empty streams remain explicit errors.
         """
 
-        has_emitted_text = any(
-            block.kind == "text" and block.emitted for block in self.blocks.values()
-        )
+        has_emitted_text = any(block.kind == "text" and block.emitted for block in self.blocks.values())
         if self.saw_tool_use or not has_emitted_text:
             return None
         events: list[str] = []
@@ -594,6 +683,26 @@ class _MessagesStreamState:
         block = self.blocks.get(key)
         if block is None:
             block = self._new_block("text", key=key, output_index=output_index, item_id=item_id)
+        return block
+
+    def _reasoning_block(
+        self,
+        payload: Mapping[str, JsonValue],
+        item: Mapping[str, JsonValue] | None,
+    ) -> _ContentBlockState:
+        output_index = _integer_or_none(payload.get("output_index"))
+        item_id = _optional_string(payload.get("item_id"))
+        if item is not None:
+            item_id = _optional_string(item.get("id")) or item_id
+        if item_id is None and self.current_reasoning_key is not None:
+            current = self.blocks.get(self.current_reasoning_key)
+            if current is not None:
+                return current
+        key = f"thinking:{output_index}:{item_id}"
+        block = self.blocks.get(key)
+        if block is None:
+            block = self._new_block("thinking", key=key, output_index=output_index, item_id=item_id)
+        self.current_reasoning_key = key
         return block
 
     def _block_for_text(self, payload: Mapping[str, JsonValue]) -> _ContentBlockState | None:
@@ -661,13 +770,51 @@ class _MessagesStreamState:
             )
         ]
 
+    def _start_reasoning_block(self, block: _ContentBlockState) -> list[str]:
+        if block.started:
+            return []
+        block.started = True
+        return self.ensure_started(None) + [
+            _anthropic_event(
+                "content_block_start",
+                {"index": block.index, "content_block": {"type": "thinking", "thinking": ""}},
+            )
+        ]
+
+    def _finish_reasoning_block(self, block: _ContentBlockState) -> list[str]:
+        if block.closed:
+            return []
+        if not block.started and block.signature is None and not block.reasoning_text:
+            return []
+        events = self._start_reasoning_block(block)
+        if block.signature is not None and not block.signature_emitted:
+            block.signature_emitted = True
+            events.append(
+                _anthropic_event(
+                    "content_block_delta",
+                    {
+                        "index": block.index,
+                        "delta": {"type": "signature_delta", "signature": block.signature},
+                    },
+                )
+            )
+        events.extend(self._stop_block(block))
+        _log_reasoning_translation(
+            direction="response_stream",
+            outcome="emitted",
+            summary_chars=len(block.reasoning_text),
+            signature_chars=len(block.signature or ""),
+        )
+        return events
+
     def _start_tool_block(self, block: _ContentBlockState) -> list[str]:
         if block.started:
             return []
         block.started = True
         self.saw_tool_use = True
         call_id = block.call_id or block.item_id or f"toolu_{block.index}"
-        name = block.name or "unknown_tool"
+        upstream_name = block.name or "unknown_tool"
+        name = self.tool_name_aliases.get(upstream_name, upstream_name)
         return self.ensure_started(None) + [
             _anthropic_event(
                 "content_block_start",
@@ -729,12 +876,7 @@ def _anthropic_web_search_blocks(item: Mapping[str, JsonValue]) -> list[dict[str
     item_id = _optional_string(item.get("id"))
     action_value = item.get("action")
     action = action_value if is_json_mapping(action_value) else None
-    if (
-        item_id is None
-        or not item_id.startswith("srvtoolu_")
-        or action is None
-        or action.get("type") != "search"
-    ):
+    if item_id is None or not item_id.startswith("srvtoolu_") or action is None or action.get("type") != "search":
         return []
     query = _optional_string(action.get("query"))
     if query is None:
@@ -1087,12 +1229,36 @@ def _cache_key_for_prefix(prefix: Mapping[str, JsonValue]) -> str:
     return f"anthropic-cache-{digest[:32]}"
 
 
+def _responses_identifier(value: str, *, kind: str) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= _RESPONSES_IDENTIFIER_MAX_BYTES:
+        return value
+
+    suffix = f"_{hashlib.sha256(encoded).hexdigest()[:_RESPONSES_IDENTIFIER_HASH_HEX_CHARS]}"
+    prefix_bytes = encoded[: _RESPONSES_IDENTIFIER_MAX_BYTES - len(suffix)]
+    while True:
+        try:
+            prefix = prefix_bytes.decode("utf-8")
+            break
+        except UnicodeDecodeError:
+            prefix_bytes = prefix_bytes[:-1]
+    mapped = f"{prefix}{suffix}"
+    logger.info(
+        "anthropic_protocol_identifier_mapped kind=%s original_bytes=%d mapped_bytes=%d",
+        kind,
+        len(encoded),
+        len(mapped.encode("utf-8")),
+    )
+    return mapped
+
+
 def _message_to_responses_input(
     message: Mapping[str, JsonValue],
     *,
     index: int,
     claude_desktop: bool,
     tool_search_history: Mapping[str, list[JsonValue] | None],
+    tool_names_to_responses: Mapping[str, str],
 ) -> list[JsonValue]:
     role = _required_string(message, "role")
     if role not in {"user", "assistant", "system", "developer"}:
@@ -1103,7 +1269,12 @@ def _message_to_responses_input(
             raise ClientPayloadError("Messages role must be 'user' or 'assistant'.", param=f"messages.{index}.role")
         return _desktop_instruction_input(content, index=index, role=role)
     if role == "assistant":
-        return _assistant_input(content, index=index, tool_search_history=tool_search_history)
+        return _assistant_input(
+            content,
+            index=index,
+            tool_search_history=tool_search_history,
+            tool_names_to_responses=tool_names_to_responses,
+        )
     return _user_content(content, index=index, tool_search_history=tool_search_history)
 
 
@@ -1138,6 +1309,7 @@ def _assistant_input(
     *,
     index: int,
     tool_search_history: Mapping[str, list[JsonValue] | None],
+    tool_names_to_responses: Mapping[str, str],
 ) -> list[JsonValue]:
     converted: list[JsonValue] = []
     pending_text: list[JsonValue] = []
@@ -1158,10 +1330,41 @@ def _assistant_input(
                 )
             pending_text.append({"type": "output_text", "text": text})
             continue
+        if block_type == "thinking":
+            flush_text()
+            thinking = block.get("thinking")
+            signature = block.get("signature")
+            if not isinstance(thinking, str):
+                raise ClientPayloadError(
+                    "Assistant thinking blocks require string 'thinking'.",
+                    param=f"messages.{index}.content.{content_index}.thinking",
+                )
+            if not isinstance(signature, str) or not signature:
+                raise ClientPayloadError(
+                    "Assistant thinking blocks require non-empty string 'signature'.",
+                    param=f"messages.{index}.content.{content_index}.signature",
+                )
+            converted.append(
+                {
+                    "type": "reasoning",
+                    "encrypted_content": signature,
+                    "summary": [],
+                    "content": None,
+                }
+            )
+            _log_reasoning_translation(
+                direction="request",
+                outcome="replayed",
+                summary_chars=len(thinking),
+                signature_chars=len(signature),
+            )
+            continue
         if block_type == "tool_use":
             flush_text()
             tool_id = _required_string(block, "id")
+            responses_tool_id = _responses_identifier(tool_id, kind="call_id")
             name = _required_string(block, "name")
+            responses_name = tool_names_to_responses.get(name) or _responses_identifier(name, kind="tool_name")
             tool_input = block.get("input")
             if not is_json_mapping(tool_input):
                 raise ClientPayloadError(
@@ -1173,7 +1376,7 @@ def _assistant_input(
                 converted.append(
                     {
                         "type": "tool_search_call",
-                        "call_id": tool_id,
+                        "call_id": responses_tool_id,
                         "arguments": dict(tool_input),
                         "execution": "client",
                         "status": "completed",
@@ -1183,8 +1386,8 @@ def _assistant_input(
                 converted.append(
                     {
                         "type": "function_call",
-                        "call_id": tool_id,
-                        "name": name,
+                        "call_id": responses_tool_id,
+                        "name": responses_name,
                         "arguments": json.dumps(tool_input, ensure_ascii=False, separators=(",", ":")),
                     }
                 )
@@ -1225,6 +1428,7 @@ def _user_content(
         if block_type == "tool_result":
             flush_text()
             tool_use_id = _required_string(block, "tool_use_id")
+            responses_tool_use_id = _responses_identifier(tool_use_id, kind="call_id")
             if tool_use_id in tool_search_history:
                 selected_tools = tool_search_history[tool_use_id]
                 if selected_tools is None:
@@ -1236,7 +1440,7 @@ def _user_content(
                 converted.append(
                     {
                         "type": "tool_search_output",
-                        "call_id": tool_use_id,
+                        "call_id": responses_tool_use_id,
                         "tools": selected_tools,
                         "execution": "client",
                         "status": "incomplete" if is_error else "completed",
@@ -1246,7 +1450,7 @@ def _user_content(
                 converted.append(
                     {
                         "type": "function_call_output",
-                        "call_id": tool_use_id,
+                        "call_id": responses_tool_use_id,
                         "output": _tool_result_output(
                             block.get("content"),
                             param=f"messages.{index}.content.{content_index}.content",
@@ -1488,6 +1692,7 @@ def _tool_search_history(
     *,
     converted_tools: list[JsonValue],
     hosted_tool_aliases: frozenset[str],
+    tool_names_to_responses: Mapping[str, str],
 ) -> dict[str, list[JsonValue] | None]:
     tool_use_names: dict[str, str] = {}
     for message_index, message_value in enumerate(messages):
@@ -1535,7 +1740,8 @@ def _tool_search_history(
                 seen_names.add(reference_name)
                 if reference_name in hosted_tool_aliases:
                     continue
-                selected_tool = functions_by_name.get(reference_name)
+                responses_name = tool_names_to_responses.get(reference_name, reference_name)
+                selected_tool = functions_by_name.get(responses_name)
                 if selected_tool is None:
                     raise ClientPayloadError(
                         f"Tool reference '{reference_name}' not found in available tools.",
@@ -1570,7 +1776,7 @@ def _tools_to_responses(
     *,
     claude_desktop: bool,
     route_workspace_web_fetch: bool,
-) -> tuple[list[JsonValue], frozenset[str]]:
+) -> tuple[list[JsonValue], frozenset[str], dict[str, str], dict[str, str]]:
     if not is_json_list(value):
         raise ClientPayloadError("'tools' must be an array.", param="tools")
     converted: list[JsonValue] = []
@@ -1578,6 +1784,8 @@ def _tools_to_responses(
     hosted_web_tool_index: int | None = None
     hosted_web_tool_source: str | None = None
     hosted_web_aliases: set[str] = set()
+    tool_names_to_responses: dict[str, str] = {}
+    tool_name_aliases: dict[str, str] = {}
     for index, tool_value in enumerate(value):
         tool = _required_mapping(tool_value, f"tools.{index}")
         converted_web_tool: dict[str, JsonValue] | None = _web_server_tool_to_responses(
@@ -1591,9 +1799,7 @@ def _tools_to_responses(
             if isinstance(server_tool_name, str):
                 hosted_web_aliases.add(server_tool_name)
         workspace_alias = (
-            claude_desktop
-            and route_workspace_web_fetch
-            and tool.get("name") == _CLAUDE_WORKSPACE_WEB_FETCH_NAME
+            claude_desktop and route_workspace_web_fetch and tool.get("name") == _CLAUDE_WORKSPACE_WEB_FETCH_NAME
         )
         if workspace_alias:
             input_schema = tool.get("input_schema")
@@ -1625,17 +1831,35 @@ def _tools_to_responses(
                 )
             continue
         name = _required_string(tool, "name")
+        if name in tool_names_to_responses:
+            raise ClientPayloadError(
+                f"Duplicate tool name '{name}'.",
+                param=f"tools.{index}.name",
+            )
+        responses_name = _responses_identifier(name, kind="tool_name")
+        previous_name = tool_name_aliases.get(responses_name)
+        if previous_name is not None and previous_name != name:
+            raise ClientPayloadError(
+                "Tool names map to an ambiguous Responses identifier.",
+                param=f"tools.{index}.name",
+            )
+        tool_names_to_responses[name] = responses_name
+        tool_name_aliases[responses_name] = name
         input_schema = tool.get("input_schema")
         if not is_json_mapping(input_schema):
             raise ClientPayloadError(
                 "Tool definitions require object 'input_schema'.", param=f"tools.{index}.input_schema"
             )
-        converted_tool: dict[str, JsonValue] = {"type": "function", "name": name, "parameters": input_schema}
+        converted_tool: dict[str, JsonValue] = {
+            "type": "function",
+            "name": responses_name,
+            "parameters": input_schema,
+        }
         description = tool.get("description")
         if isinstance(description, str):
             converted_tool["description"] = description
         converted.append(converted_tool)
-    return converted, frozenset(hosted_web_aliases)
+    return converted, frozenset(hosted_web_aliases), tool_names_to_responses, tool_name_aliases
 
 
 def _latest_user_prompt_targets_public_web(messages: list[JsonValue]) -> bool:
@@ -1664,9 +1888,7 @@ def _latest_user_prompt_targets_public_web(messages: list[JsonValue]) -> bool:
         if not prompt_text:
             continue
         targets = [
-            match.group(0).rstrip(".,;:!?)]}")
-            for text in prompt_text
-            for match in _PUBLIC_HTTP_URL_RE.finditer(text)
+            match.group(0).rstrip(".,;:!?)]}") for text in prompt_text for match in _PUBLIC_HTTP_URL_RE.finditer(text)
         ]
         return bool(targets) and all(_is_public_http_url(target) for target in targets)
     return False
@@ -1794,6 +2016,7 @@ def _tool_choice_to_responses(
     value: JsonValue,
     *,
     hosted_web_aliases: frozenset[str] = frozenset(),
+    tool_names_to_responses: Mapping[str, str] | None = None,
 ) -> tuple[JsonValue | None, bool | None]:
     if value is None:
         return None, None
@@ -1810,13 +2033,65 @@ def _tool_choice_to_responses(
         name = _required_string(value, "name")
         if name in _SUPPORTED_WEB_SERVER_TOOLS or name in hosted_web_aliases:
             return {"type": "web_search"}, False if disable_parallel else None
-        return {"type": "function", "name": name}, False if disable_parallel else None
+        responses_name = (tool_names_to_responses or {}).get(name) or _responses_identifier(name, kind="tool_name")
+        return {"type": "function", "name": responses_name}, False if disable_parallel else None
     if choice_type == "none":
         return "none", False if disable_parallel else None
     raise ClientPayloadError("Unsupported tool_choice type.", param="tool_choice.type")
 
 
-def _tool_use_block(item: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+def _anthropic_reasoning_block(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    thinking = _reasoning_summary_text(item)
+    signature = _optional_string(item.get("encrypted_content"))
+    if not thinking and signature is None:
+        return None
+    _log_reasoning_translation(
+        direction="response",
+        outcome="emitted",
+        summary_chars=len(thinking),
+        signature_chars=len(signature or ""),
+    )
+    block: dict[str, JsonValue] = {"type": "thinking", "thinking": thinking}
+    if signature is not None:
+        block["signature"] = signature
+    return block
+
+
+def _reasoning_summary_text(item: Mapping[str, JsonValue]) -> str:
+    summary = item.get("summary")
+    if not is_json_list(summary):
+        return ""
+    parts: list[str] = []
+    for part_value in summary:
+        if not is_json_mapping(part_value) or part_value.get("type") != "summary_text":
+            continue
+        text = part_value.get("text")
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _log_reasoning_translation(
+    *,
+    direction: str,
+    outcome: str,
+    summary_chars: int,
+    signature_chars: int,
+) -> None:
+    logger.info(
+        "anthropic_protocol_reasoning direction=%s outcome=%s summary_chars=%d signature_chars=%d",
+        direction,
+        outcome,
+        summary_chars,
+        signature_chars,
+    )
+
+
+def _tool_use_block(
+    item: Mapping[str, JsonValue],
+    *,
+    tool_name_aliases: Mapping[str, str] | None = None,
+) -> dict[str, JsonValue]:
     arguments = item.get("arguments")
     parsed_input: JsonValue = {}
     if isinstance(arguments, str) and arguments:
@@ -1828,10 +2103,11 @@ def _tool_use_block(item: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
             parsed_input = decoded
     call_id = item.get("call_id")
     name = item.get("name")
+    upstream_name = name if isinstance(name, str) and name else "unknown_tool"
     return {
         "type": "tool_use",
         "id": call_id if isinstance(call_id, str) and call_id else "toolu_unknown",
-        "name": name if isinstance(name, str) and name else "unknown_tool",
+        "name": (tool_name_aliases or {}).get(upstream_name, upstream_name),
         "input": parsed_input,
     }
 

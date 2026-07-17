@@ -404,6 +404,8 @@ def _sanitize_interleaved_reasoning_input_item(item: JsonValue) -> JsonValue | N
     item_mapping = _json_mapping_or_none(item)
     if item_mapping is None:
         return item
+    if item_mapping.get("type") == "reasoning" and isinstance(item_mapping.get("encrypted_content"), str):
+        return dict(item_mapping)
 
     sanitized_item: MutableJsonObject = {}
     for key, value in item_mapping.items():
@@ -755,6 +757,7 @@ _UNSUPPORTED_UPSTREAM_FIELDS = {
     "truncation",
     "user",
 }
+
 
 def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _normalize_openai_compatible_aliases(payload)
