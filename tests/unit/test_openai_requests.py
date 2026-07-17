@@ -18,6 +18,34 @@ from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRe
 from app.core.types import JsonValue
 
 
+def test_responses_request_preserves_multimodal_function_call_output_array() -> None:
+    request = ResponsesRequest(
+        model="gpt-5.6-terra",
+        instructions="",
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": "call_image",
+                "output": [
+                    {"type": "input_text", "text": "Screenshot:"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="},
+                ],
+            }
+        ],
+    )
+
+    assert request.model_dump_for_forwarding()["input"] == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_image",
+            "output": [
+                {"type": "input_text", "text": "Screenshot:"},
+                {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="},
+            ],
+        }
+    ]
+
+
 def _responses_lite_input_items() -> tuple[list[JsonValue], list[JsonValue]]:
     additional_tools_before: JsonValue = {
         "type": "additional_tools",

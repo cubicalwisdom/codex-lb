@@ -11724,6 +11724,39 @@ def test_slim_response_create_payload_rewrites_top_level_historical_input_image(
     assert slimmed_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "ping"}]}
 
 
+def test_slim_response_create_payload_rewrites_historical_function_output_image():
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {
+                "type": "function_call_output",
+                "call_id": "call_screenshot",
+                "output": [
+                    {"type": "input_text", "text": "Screenshot:"},
+                    {"type": "input_image", "image_url": "data:image/png;base64," + ("A" * 1500)},
+                ],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+    }
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=512)
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+
+    assert summary is not None
+    assert summary["historical_images_slimmed"] == 1
+    assert slimmed_input[0] == {
+        "type": "function_call_output",
+        "call_id": "call_screenshot",
+        "output": [
+            {"type": "input_text", "text": "Screenshot:"},
+            {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE},
+        ],
+    }
+    assert slimmed_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+
+
 def test_slim_response_create_preserves_all_items_when_no_user_message():
     payload: dict[str, JsonValue] = {
         "type": "response.create",

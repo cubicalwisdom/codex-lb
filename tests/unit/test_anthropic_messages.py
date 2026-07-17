@@ -384,6 +384,219 @@ def test_messages_request_preserves_tool_reference_for_an_ordinary_tool_result()
     }
 
 
+def test_messages_request_preserves_ordered_text_and_image_tool_result() -> None:
+    request = anthropic_messages.to_responses_request(
+        {
+            "model": "gpt-5.6-terra",
+            "max_tokens": 1024,
+            "tools": [{"name": "take_screenshot", "input_schema": {"type": "object", "properties": {}}}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "call_screenshot", "name": "take_screenshot", "input": {}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_screenshot",
+                            "content": [
+                                {"type": "text", "text": "Before image"},
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": "aW1hZ2UtYnl0ZXM=",
+                                    },
+                                },
+                                {"type": "text", "text": "After image"},
+                            ],
+                        }
+                    ],
+                },
+            ],
+        },
+        api_key=None,
+    )
+
+    assert request.responses.model_dump_for_forwarding()["input"][-1] == {
+        "type": "function_call_output",
+        "call_id": "call_screenshot",
+        "output": [
+            {"type": "input_text", "text": "Before image"},
+            {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2UtYnl0ZXM="},
+            {"type": "input_text", "text": "After image"},
+        ],
+    }
+
+
+def test_messages_request_extracts_tool_result_documents_and_preserves_search_results() -> None:
+    search_result = {
+        "type": "search_result",
+        "source": "kb://runbook/capacity",
+        "title": "Capacity runbook",
+        "content": [{"type": "text", "text": "Use bounded retries."}],
+        "citations": {"enabled": True},
+        "cache_control": {"type": "ephemeral"},
+    }
+    request = anthropic_messages.to_responses_request(
+        {
+            "model": "gpt-5.6-terra",
+            "max_tokens": 1024,
+            "tools": [
+                {"name": "read_document", "input_schema": {"type": "object", "properties": {}}},
+                {"name": "search_knowledge", "input_schema": {"type": "object", "properties": {}}},
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "call_document", "name": "read_document", "input": {}},
+                        {"type": "tool_use", "id": "call_search", "name": "search_knowledge", "input": {}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_document",
+                            "content": [
+                                {
+                                    "type": "document",
+                                    "title": "notes.txt",
+                                    "source": {
+                                        "type": "text",
+                                        "media_type": "text/plain",
+                                        "data": "inline document text",
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_search",
+                            "content": [search_result],
+                        },
+                    ],
+                },
+            ],
+        },
+        api_key=None,
+    )
+
+    outputs = [
+        item
+        for item in request.responses.model_dump_for_forwarding()["input"]
+        if item.get("type") == "function_call_output"
+    ]
+    assert outputs == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_document",
+            "output": (
+                "[Document: notes.txt; media_type=text/plain]\n"
+                "inline document text\n"
+                "[End document: notes.txt]"
+            ),
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_search",
+            "output": json.dumps(search_result, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        },
+    ]
+
+
+def test_messages_request_extracts_pdf_inside_tool_result() -> None:
+    request = anthropic_messages.to_responses_request(
+        {
+            "model": "gpt-5.6-terra",
+            "max_tokens": 1024,
+            "tools": [{"name": "read_pdf", "input_schema": {"type": "object", "properties": {}}}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "call_pdf", "name": "read_pdf", "input": {}}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_pdf",
+                            "content": [
+                                {
+                                    "type": "document",
+                                    "title": "result.pdf",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "application/pdf",
+                                        "data": _base64_pdf("Tool PDF"),
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+            ],
+        },
+        api_key=None,
+    )
+
+    assert request.responses.model_dump_for_forwarding()["input"][-1]["output"] == (
+        "[Document: result.pdf; media_type=application/pdf]\n"
+        "[Page 1]\nTool PDF\n"
+        "[End document: result.pdf]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        (
+            [{"type": "search_result", "source": "https://example.com", "title": "Example", "content": []}],
+            "search_result content must be a non-empty array",
+        ),
+        ([{"type": "audio", "source": {"type": "base64", "data": "YQ=="}}], "Unsupported tool_result"),
+    ],
+)
+def test_messages_request_rejects_malformed_or_unknown_structured_tool_result(
+    content: list[JsonValue],
+    message: str,
+) -> None:
+    with pytest.raises(ClientPayloadError, match=message) as exc_info:
+        anthropic_messages.to_responses_request(
+            {
+                "model": "gpt-5.6-terra",
+                "max_tokens": 1024,
+                "tools": [{"name": "structured_tool", "input_schema": {"type": "object", "properties": {}}}],
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_use", "id": "call_structured", "name": "structured_tool", "input": {}}
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "call_structured", "content": content}
+                        ],
+                    },
+                ],
+            },
+            api_key=None,
+        )
+
+    assert exc_info.value.param is not None
+    assert exc_info.value.param.startswith("messages.1.content.0.content.0")
+
+
 def test_messages_request_rejects_unknown_native_tool_reference() -> None:
     with pytest.raises(ClientPayloadError, match="Tool reference 'missing_tool' not found"):
         anthropic_messages.to_responses_request(

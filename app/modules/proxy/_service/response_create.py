@@ -23,7 +23,7 @@ from app.core.config.settings import DEFAULT_HOME_DIR, get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
-from app.core.utils.json_guards import is_json_mapping
+from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.modules.proxy._service.support import (
     _WebSocketRequestState,
 )
@@ -392,6 +392,11 @@ def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, in
                 bytes=len(output_text.encode("utf-8"))
             )
             tool_outputs_slimmed += 1
+        elif is_json_list(output):
+            slimmed_output, output_images_slimmed = _slim_historical_response_content(output)
+            if output_images_slimmed > 0:
+                item_mapping["output"] = slimmed_output
+                images_slimmed += output_images_slimmed
 
     content = item_mapping.get("content")
     slimmed_content, content_images_slimmed = _slim_historical_response_content(content)

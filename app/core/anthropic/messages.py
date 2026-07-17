@@ -42,6 +42,7 @@ _CLAUDE_DESKTOP_EFFORTS: Final[dict[str, str]] = {
 }
 _SUPPORTED_IMAGE_MEDIA_TYPES: Final[frozenset[str]] = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 _SUPPORTED_DOCUMENT_MEDIA_TYPES: Final[frozenset[str]] = frozenset({"application/pdf", "text/plain", "text/csv"})
+_SUPPORTED_INLINE_TEXT_DOCUMENT_MEDIA_TYPES: Final[frozenset[str]] = frozenset({"text/plain"})
 _SUPPORTED_WEB_SERVER_TOOLS: Final[dict[str, frozenset[str]]] = {
     "web_search": frozenset(
         {
@@ -1516,6 +1517,28 @@ def _document_input(block: Mapping[str, JsonValue], *, param: str) -> dict[str, 
             "type": "input_text",
             "text": f"[Document: {filename}; media_type={media_type}]\n{extracted}\n[End document: {filename}]",
         }
+    if source_type == "text":
+        media_type = _attachment_media_type(
+            source,
+            allowed=_SUPPORTED_INLINE_TEXT_DOCUMENT_MEDIA_TYPES,
+            param=f"{param}.source.media_type",
+        )
+        filename = _document_filename(
+            block.get("title"),
+            media_type=media_type,
+            param=f"{param}.title",
+        )
+        data = source.get("data")
+        if not isinstance(data, str):
+            raise ClientPayloadError(
+                "Text document source requires string 'data'.",
+                param=f"{param}.source.data",
+            )
+        extracted = _bounded_document_text(data, param=f"{param}.source.data")
+        return {
+            "type": "input_text",
+            "text": f"[Document: {filename}; media_type={media_type}]\n{extracted}\n[End document: {filename}]",
+        }
     if source_type == "url":
         _safe_attachment_url(source.get("url"), param=f"{param}.source.url")
         raise ClientPayloadError(
@@ -1523,7 +1546,7 @@ def _document_input(block: Mapping[str, JsonValue], *, param: str) -> dict[str, 
             param=f"{param}.source.type",
         )
     raise ClientPayloadError(
-        "Document source type must be 'base64' or 'url'.",
+        "Document source type must be 'base64', 'text', or 'url'.",
         param=f"{param}.source.type",
     )
 
@@ -1660,31 +1683,88 @@ def _document_filename(value: JsonValue, *, media_type: str, param: str) -> str:
     return value.strip()[:255]
 
 
-def _tool_result_output(value: JsonValue, *, param: str) -> str:
+def _tool_result_output(value: JsonValue, *, param: str) -> str | list[JsonValue]:
     if value is None:
         return ""
     if isinstance(value, str):
         return value
     if not is_json_list(value):
-        raise ClientPayloadError("tool_result content must be a string or array of text blocks.")
-    text_parts: list[str] = []
+        raise ClientPayloadError(
+            "tool_result content must be a string or array of supported content blocks.",
+            param=param,
+        )
+    converted_parts: list[JsonValue] = []
     has_tool_reference = False
     for index, part_value in enumerate(value):
-        part = _required_mapping(part_value, f"{param}.{index}")
+        part_param = f"{param}.{index}"
+        part = _required_mapping(part_value, part_param)
         part_type = part.get("type")
-        if part_type == "text" and isinstance(part.get("text"), str):
-            text_parts.append(cast(str, part.get("text")))
+        if part_type == "text":
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise ClientPayloadError(
+                    "tool_result text blocks require string 'text'.",
+                    param=f"{part_param}.text",
+                )
+            converted_parts.append({"type": "input_text", "text": text})
             continue
         if part_type == "tool_reference":
-            _tool_reference_name(part, param=f"{param}.{index}")
+            _tool_reference_name(part, param=part_param)
             has_tool_reference = True
             continue
-        if part_type == "text":
-            raise ClientPayloadError("Only text tool_result blocks are supported.")
-        raise ClientPayloadError("Only text and tool_reference tool_result blocks are supported.")
+        if part_type == "image":
+            converted_parts.append(_image_input(part, param=part_param))
+            continue
+        if part_type == "document":
+            converted_parts.append(_document_input(part, param=part_param))
+            continue
+        if part_type == "search_result":
+            converted_parts.append({"type": "input_text", "text": _search_result_text(part, param=part_param)})
+            continue
+        raise ClientPayloadError(
+            f"Unsupported tool_result content block type '{part_type}'.",
+            param=f"{part_param}.type",
+        )
     if has_tool_reference:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "".join(text_parts)
+    if any(is_json_mapping(part) and part.get("type") == "input_image" for part in converted_parts):
+        return converted_parts
+    return "".join(
+        cast(str, part.get("text"))
+        for part in converted_parts
+        if is_json_mapping(part) and isinstance(part.get("text"), str)
+    )
+
+
+def _search_result_text(block: Mapping[str, JsonValue], *, param: str) -> str:
+    for field_name in ("source", "title"):
+        value = block.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise ClientPayloadError(
+                f"search_result requires non-empty string '{field_name}'.",
+                param=f"{param}.{field_name}",
+            )
+    content = block.get("content")
+    if not is_json_list(content) or not content:
+        raise ClientPayloadError(
+            "search_result content must be a non-empty array of text blocks.",
+            param=f"{param}.content",
+        )
+    for content_index, content_value in enumerate(content):
+        content_param = f"{param}.content.{content_index}"
+        content_block = _required_mapping(content_value, content_param)
+        if content_block.get("type") != "text":
+            raise ClientPayloadError(
+                "search_result content may contain only text blocks.",
+                param=f"{content_param}.type",
+            )
+        text = content_block.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ClientPayloadError(
+                "search_result text must be a non-empty string.",
+                param=f"{content_param}.text",
+            )
+    return json.dumps(block, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _tool_search_history(

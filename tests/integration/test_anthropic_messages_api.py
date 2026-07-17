@@ -70,6 +70,80 @@ async def test_messages_route_returns_anthropic_non_streaming_message(async_clie
 
 
 @pytest.mark.asyncio
+async def test_messages_route_forwards_multimodal_tool_result_inside_function_output(
+    async_client,
+    app_instance,
+    monkeypatch,
+) -> None:
+    app_instance.dependency_overrides[get_proxy_context] = lambda: ProxyContext(service=object())
+    observed: dict[str, object] = {}
+
+    async def fake_collect(*args, **kwargs):
+        del kwargs
+        observed["request"] = args[1].model_dump_for_forwarding()
+        return JSONResponse(
+            {
+                "id": "resp_multimodal_result",
+                "status": "completed",
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "seen"}]}],
+            }
+        )
+
+    monkeypatch.setattr(proxy_api_module, "_collect_responses", fake_collect)
+    response = await async_client.post(
+        "/v1/messages",
+        headers={"x-api-key": "sk-clb-local"},
+        json={
+            "model": "gpt-5.6-terra",
+            "max_tokens": 1024,
+            "tools": [{"name": "take_screenshot", "input_schema": {"type": "object", "properties": {}}}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "call_screenshot", "name": "take_screenshot", "input": {}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_screenshot",
+                            "content": [
+                                {"type": "text", "text": "Screenshot:"},
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": "aW1hZ2UtYnl0ZXM=",
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    forwarded = observed["request"]
+    assert isinstance(forwarded, dict)
+    function_output = next(item for item in forwarded["input"] if item.get("type") == "function_call_output")
+    assert function_output == {
+        "type": "function_call_output",
+        "call_id": "call_screenshot",
+        "output": [
+            {"type": "input_text", "text": "Screenshot:"},
+            {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2UtYnl0ZXM="},
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_messages_route_round_trips_long_tool_identity(
     async_client,
     app_instance,
