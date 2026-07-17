@@ -77,13 +77,19 @@ The service MUST expose low-cardinality logs and metrics for account-local in-fl
 
 ### Requirement: Streaming timeout diagnostics are emitted
 
-For `/v1/responses` HTTP/SSE streams, the service MUST log low-cardinality diagnostics for early heartbeat emission, keepalive emission, startup wait timeout, downstream disconnect, and stream idle timeout. The diagnostics MUST include request id, route family, account id when known, timeout stage, and elapsed seconds where available, without exposing payload content or raw affinity keys.
+For `/v1/responses` HTTP/SSE streams, the service MUST log low-cardinality diagnostics for early heartbeat emission, keepalive emission, account-capacity recovery waits, startup wait timeout, downstream disconnect, and stream idle timeout. The diagnostics MUST include request id, route family, account id when known, timeout or wait stage, model when known, bounded sleep or elapsed seconds where available, and normalized error code/message where available, without exposing payload content, API keys, raw affinity keys, or raw account emails.
 
 #### Scenario: Keepalive path is diagnosable
 
 - **WHEN** a streaming Responses request waits for upstream events long enough to emit keepalive data
 - **THEN** the service records heartbeat or keepalive diagnostics
 - **AND** the diagnostic does not include raw prompt-cache keys or request payloads
+
+#### Scenario: Account-capacity recovery wait is diagnosable
+
+- **WHEN** a streaming Responses request waits because account selection returned a recoverable capacity or rate-limit retry hint
+- **THEN** the service logs the request id, route family, model when known, bounded wait seconds, recovery hint seconds, and normalized selection error
+- **AND** the diagnostic does not include account emails, API keys, raw affinity keys, prompt text, or request payload content
 
 ### Requirement: HTTP bridge startup wait timeouts are logged
 
@@ -150,3 +156,36 @@ Every generated OpenAPI operation SHALL have a unique operation identifier, incl
 
 - **WHEN** the OpenAPI document is generated
 - **THEN** the GET and POST operations SHALL have distinct identifiers
+
+### Requirement: Request-log metadata keeps local routing failures unbound from upstream status
+
+When request routing fails before contacting upstream, `upstream_status_code` MUST be
+`null` even if the internal failure exception carried an HTTP-like status. The
+logged `upstream_error_code` MUST keep the local routing code for triage and
+analytics.
+
+#### Scenario: Additional quota or plan-routing failure is classified as local
+
+- **WHEN** a request fails with one of `no_plan_support_for_model`,
+  `additional_quota_data_unavailable`, or
+  `no_additional_quota_eligible_accounts`
+- **THEN** request-log metadata stores `upstream_error_code` with that exact code
+- **AND** request-log metadata stores `upstream_status_code = null`
+
+### Requirement: Request logs persist prompt-client user-agent metadata
+The proxy MUST persist prompt-client user-agent metadata on `request_logs` for both HTTP and WebSocket Responses traffic. Each persisted row MUST store the full inbound `User-Agent` header value when present and a derived `useragent_group` value extracted from the first product token. When the inbound header is missing or blank after trimming, both persisted values MUST be `null`.
+
+#### Scenario: HTTP request log stores user-agent metadata
+- **WHEN** an HTTP or HTTP/SSE proxy request includes `User-Agent: opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`
+- **THEN** the persisted `request_logs` row stores `useragent = "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"`
+- **AND** the persisted row stores `useragent_group = "opencode"`
+
+#### Scenario: WebSocket request log stores user-agent metadata
+- **WHEN** a proxied WebSocket Responses session is opened with `User-Agent: opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`
+- **THEN** the persisted `request_logs` row for that request stores the full header in `useragent`
+- **AND** the persisted row stores `useragent_group = "opencode"`
+
+#### Scenario: Missing or blank user-agent remains null
+- **WHEN** a proxied HTTP or WebSocket request omits the `User-Agent` header or sends only blank whitespace
+- **THEN** the persisted `request_logs` row stores `useragent = null`
+- **AND** the persisted row stores `useragent_group = null`

@@ -228,23 +228,27 @@ For fixed-model endpoints such as `/v1/audio/transcriptions` and `/backend-api/t
 - **THEN** the response preserves the original `/backend-api/codex/models` behavior because there is no allowlist to apply
 
 ### Requirement: Weekly token usage tracking
-
-The system SHALL atomically increment `weekly_tokens_used` on the API key record when a proxy request completes with token usage data. The token count MUST be `input_tokens + output_tokens`. If token usage is unavailable (error response), the counter MUST NOT be incremented.
+The system SHALL atomically increment `weekly_tokens_used` on the API key record when a non-warmup proxy request completes with token usage data. The token count MUST be `input_tokens + output_tokens`. If token usage is unavailable (error response), the counter MUST NOT be incremented.
 
 #### Scenario: Successful request with usage
 
-- **WHEN** a proxy request completes with `input_tokens: 100, output_tokens: 50` for an authenticated key
+- **WHEN** a non-warmup proxy request completes with `input_tokens: 100, output_tokens: 50` for an authenticated key
 - **THEN** `weekly_tokens_used` is atomically incremented by 150
 
 #### Scenario: Request with no usage data
 
-- **WHEN** a proxy request fails with an error and no usage data is returned
+- **WHEN** a non-warmup proxy request fails with an error and no usage data is returned
 - **THEN** `weekly_tokens_used` is not incremented
 
 #### Scenario: Request without API key auth
 
-- **WHEN** `api_key_auth_enabled` is false and a proxy request completes
+- **WHEN** `api_key_auth_enabled` is false and a non-warmup proxy request completes
 - **THEN** no API key usage tracking occurs
+
+#### Scenario: Warmup request is excluded from weekly usage tracking
+
+- **WHEN** an authenticated `POST /v1/warmup` execution writes request log rows
+- **THEN** those warmup rows are excluded from API key weekly token usage increments
 
 ### Requirement: Weekly token usage reset
 
@@ -818,3 +822,62 @@ API-key creation and update MUST accept `max` and `ultra` reasoning efforts in a
 - **WHEN** an operator creates or updates an API key with reasoning effort `ultra`
 - **THEN** validation succeeds and the policy is stored
 - **AND** a compatible GPT-5.6 request forwards `max` upstream without losing the configured display value
+
+### Requirement: API Keys Declare Traffic Class
+
+API keys SHALL have a `traffic_class` value. The default SHALL be `foreground`. The system SHALL also accept `opportunistic` for clients that may only use burnable quota.
+
+#### Scenario: Create opportunistic key
+- **WHEN** admin creates an API key with `trafficClass: "opportunistic"`
+- **THEN** the key is persisted and returned with `trafficClass: "opportunistic"`
+
+#### Scenario: Omitted traffic class defaults to foreground
+- **WHEN** admin creates an API key without `trafficClass`
+- **THEN** the key is persisted and returned with `trafficClass: "foreground"`
+
+### Requirement: Stored API key allowed-model values are normalized
+
+When reading stored `allowed_models`, JSON `null`, blank strings, and non-string
+array entries MUST be ignored and MUST NOT become model names.
+
+#### Scenario: Stored null allowed-model entries are ignored
+
+- **GIVEN** an API key row stores `allowed_models` as `[null, "gpt-5.2", 42, ""]`
+- **WHEN** the key policy is loaded
+- **THEN** the effective allowed model list is `["gpt-5.2"]`
+- **AND** `null` is not converted to `"None"`
+
+### Requirement: Assigned-account quota badges reflect monthly-only free accounts
+
+The API key create and edit dialogs SHALL display assigned-account quota badges according to the normalized quota model of each account.
+
+#### Scenario: Free account shows monthly badge only
+- **WHEN** assigned-account selection renders a free account whose normalized quota model is monthly-only
+- **THEN** the dialog shows a `Monthly <percent>% left` badge for that account
+- **AND** it does not show a weekly-left badge for that account
+
+#### Scenario: Paid account retains 5h and 7d badges
+- **WHEN** assigned-account selection renders an account with normalized 5h and 7d quota windows
+- **THEN** the dialog shows `5h <percent>% left` and `7d <percent>% left` badges for that account
+
+### Requirement: API key edit selectors commit exact typed matches
+
+The Settings API-key edit dialog SHALL persist assigned account, allowed model, and enforced model changes made by an admin.
+
+#### Scenario: Exact searched account is saved
+
+- **WHEN** an admin opens Edit API key, types an exact account email, display name, or account id into the Assigned accounts search box, and closes the selector or presses Enter
+- **THEN** the selector SHALL commit that exact account before the dialog is saved
+- **AND** saving the dialog SHALL persist the selected account restriction instead of reverting to all accounts
+
+#### Scenario: Exact searched model is saved
+
+- **WHEN** an admin opens Edit API key, types an exact model id or model name into the Allowed models search box, and closes the selector or presses Enter
+- **THEN** the selector SHALL commit that exact model before the dialog is saved
+- **AND** saving the dialog SHALL persist the selected model restriction instead of reverting to all models
+
+#### Scenario: Enforced model is saved
+
+- **WHEN** an admin edits the Enforced model field and saves the dialog
+- **THEN** the submitted API-key update SHALL include the enforced model value
+- **AND** the saved key SHALL not silently discard that value because a selector popover closed

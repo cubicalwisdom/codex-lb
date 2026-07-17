@@ -66,7 +66,7 @@ For `/v1/responses`, `/backend-api/codex/responses`, and compact Responses traff
 
 ### Requirement: Local overload reasons are stable and distinguishable
 
-Local Responses overload failures MUST expose stable low-cardinality reason fields in logs and metrics so operators can distinguish `bridge_queue_full`, `response_create_gate_timeout`, `hard_affinity_saturated`, `previous_response_owner_unavailable`, `global_admission_timeout`, `capacity_exhausted_active_sessions`, `account_response_create_cap`, and `account_stream_cap`. These local reasons MUST NOT be reported as upstream rate limits.
+Local Responses overload failures MUST expose stable low-cardinality reason fields in logs and metrics so operators can distinguish `bridge_queue_full`, `response_create_gate_timeout`, `hard_affinity_saturated`, `previous_response_owner_unavailable`, `global_admission_timeout`, `capacity_exhausted_active_sessions`, `account_response_create_cap`, and `account_stream_cap`. These local reasons MUST NOT be reported as upstream rate limits. Local usage snapshots and synthetic budget pressure MUST NOT be converted into local overload unless an explicit operator-configured local admission policy is exhausted.
 
 #### Scenario: Bridge queue saturation is not ambiguous
 
@@ -85,6 +85,13 @@ Local Responses overload failures MUST expose stable low-cardinality reason fiel
 
 - **WHEN** account selection fails with the local message `Rate limit exceeded. Try again in Ns`
 - **THEN** the proxy does not enter the upstream account-capacity recovery sleep loop for that local selection error
+
+#### Scenario: Usage snapshot exhaustion is not local overload
+
+- **GIVEN** at least one account is active and below explicit local concurrency caps
+- **AND** local usage snapshots report exhausted standard budget
+- **WHEN** foreground proxy routing evaluates the request
+- **THEN** the request is not rejected as local overload solely because of those snapshots
 
 ### Requirement: HTTP bridge startup admission waits are bounded
 
@@ -254,4 +261,112 @@ Concurrent reconnect attempts for one session MUST serialize their complete reso
 - **THEN** terminal settlement alone owns the old installed socket and lease
 - **AND** reconnect rejects the installation and provisional cleanup alone owns the losing new socket and lease
 - **AND** every old and provisional handle is closed or released exactly once
+
+### Requirement: The fill_first routing strategy MUST select the highest-usage eligible account deterministically
+
+The load balancer MUST pick a single account from the effective candidate
+pool by selecting the highest primary 5h `used_percent` when the configured
+`routing_strategy` is `fill_first`, treating an unknown `used_percent` as
+`0.0`.
+
+When two or more candidates share the same primary `used_percent`, the
+balancer MUST prefer the candidate with the **higher** secondary
+(weekly) `used_percent` — i.e. the one with the least remaining weekly
+capacity — so the most-saturated account is drained first and the
+freshest account is preserved for later cycles. An unknown
+`secondary_used_percent` MUST be treated as `0.0` for this comparison.
+`account_id` ascending MUST be the final stable tiebreaker.
+
+The strategy MUST NOT use randomness. For a fixed snapshot of account
+states and clock value, repeated invocations MUST return the same
+account.
+
+The strategy MUST reuse the existing effective candidate pool (preferring
+healthy accounts, then probing, then draining, falling back to all
+available accounts only when no higher-tier candidate exists). It MUST
+NOT bypass error backoff, rate-limit cooldown, quota-exceeded cooldown,
+or any other availability gate enforced by `select_account`.
+
+When `prefer_earlier_reset` is enabled, `fill_first` MUST narrow the
+candidate pool to accounts whose secondary reset bucket is earliest
+before applying the highest-`used_percent` ranking, mirroring the
+`capacity_weighted` strategy.
+
+#### Scenario: Highest primary usage wins
+
+- **GIVEN** the routing strategy is `fill_first`
+- **AND** all eligible accounts share `health_tier = HEALTHY`
+- **AND** account `A` has primary `used_percent = 30.0`,
+  account `B` has primary `used_percent = 5.0`,
+  and account `C` has primary `used_percent = 0.0`
+- **WHEN** an account is selected
+- **THEN** account `A` is returned
+
+#### Scenario: Stable selection across consecutive calls
+
+- **GIVEN** the routing strategy is `fill_first`
+- **AND** the eligible pool and clock are unchanged between calls
+- **WHEN** the balancer is invoked repeatedly
+- **THEN** the same account is returned every time
+
+#### Scenario: Selection moves on when the current pick leaves the pool
+
+- **GIVEN** the routing strategy is `fill_first`
+- **AND** the previously selected account becomes `RATE_LIMITED`,
+  `QUOTA_EXCEEDED`, enters cooldown, or transitions to `DRAINING`
+  while at least one other healthy account remains
+- **WHEN** the balancer is invoked
+- **THEN** the next-highest-`used_percent` healthy account is returned
+- **AND** no random draw influences the outcome
+
+#### Scenario: Highest secondary usage breaks primary ties
+
+- **GIVEN** the routing strategy is `fill_first`
+- **AND** three eligible accounts share primary `used_percent = 99.0`
+- **AND** account `alpha` has secondary `used_percent = 29.0`,
+  account `bravo` has secondary `used_percent = 98.0`,
+  and account `charlie` has secondary `used_percent = 93.0`
+- **WHEN** an account is selected
+- **THEN** account `bravo` is returned
+
+#### Scenario: Tiebreak by account id when both windows tie
+
+- **GIVEN** the routing strategy is `fill_first`
+- **AND** two eligible accounts share the same primary `used_percent`
+- **AND** they also share the same secondary `used_percent`
+- **WHEN** the balancer is invoked
+- **THEN** the account with the lexicographically smaller `account_id`
+  is returned
+
+### Requirement: Opportunistic Proxy Traffic Burns Only Safe Quota
+
+When a proxy request is authenticated by an API key whose `traffic_class` is `opportunistic`, the proxy SHALL admit the request only if at least one eligible account can serve opportunistic traffic without crossing the routing policy floors.
+
+Burn-first and normal accounts MAY be drained to zero only when another usable foreground account remains. The last usable normal account SHALL keep an emergency reserve. Preserve accounts SHALL require fresh usage data and SHALL remain above dynamic weekly and 5h floors.
+
+#### Scenario: Closed burn window returns OpenAI rate limit
+- **WHEN** an opportunistic API key calls a protected Codex-compatible route and no account is currently burnable
+- **THEN** the proxy returns HTTP `429`
+- **AND** the response uses an OpenAI-style error with code `rate_limit_exceeded`
+- **AND** the message begins with `opportunistic burn window closed:`
+- **AND** the response includes `Retry-After`
+
+#### Scenario: Preflight admission mirrors routing
+- **WHEN** an opportunistic API key calls `/backend-api/codex/opportunistic/admission`
+- **THEN** the proxy returns `200` only when the same traffic class could select an account for a real request
+- **AND** otherwise returns the same OpenAI-style `429` denial shape
+
+### Requirement: Additional Quota Routing Policies Inherit Or Override Account Policy
+
+When a model is mapped to an additional quota, the proxy SHALL use fresh additional-quota availability as the routing gate and SHALL NOT reject an account solely because its standard 5h or 7d Codex quota is exhausted.
+
+Additional quota routing policy `inherit` SHALL use the selected account's routing policy. Additional quota routing policies `burn_first`, `normal`, and `preserve` SHALL override account routing policy for requests gated by that additional quota.
+
+The dashboard SHALL expose the configured routing policy for each known additional quota and allow operators to switch between `inherit`, `burn_first`, `normal`, and `preserve`.
+
+#### Scenario: Spark can burn its separate pool
+- **GIVEN** an account has fresh available `codex_spark` additional quota
+- **AND** the account's standard Codex quota is exhausted
+- **WHEN** a request selects `gpt-5.3-codex-spark`
+- **THEN** the proxy MAY select that account
 

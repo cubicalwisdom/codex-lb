@@ -62,3 +62,196 @@ Every Dashboard account presentation SHALL expose Resume for a paused account an
 - **WHEN** Dashboard renders its actions
 - **THEN** it SHALL NOT offer Pause or Resume for that account
 
+### Requirement: Sequential drain routing
+The proxy account selector SHALL support a `sequential_drain` routing strategy. The strategy SHALL evaluate only accounts that pass the existing eligibility, model-plan, quota, cooldown, circuit-breaker, and budget-safety gates, then select the usable account with the lowest effective secondary capacity before moving to higher-capacity accounts.
+
+#### Scenario: Lowest-capacity usable account is drained first
+- **GIVEN** multiple healthy eligible accounts with different effective secondary capacities
+- **WHEN** account selection uses `sequential_drain`
+- **THEN** the account with the lowest effective secondary capacity is selected
+
+#### Scenario: Exhausted lower-capacity accounts are skipped
+- **GIVEN** the lowest-capacity account has no usable quota
+- **WHEN** account selection uses `sequential_drain`
+- **THEN** the selector chooses the next-lowest usable capacity account
+
+### Requirement: Reset drain routing
+The proxy account selector SHALL support a `reset_drain` routing strategy. The strategy SHALL evaluate only accounts that pass the existing eligibility, model-plan, quota, cooldown, circuit-breaker, and budget-safety gates, then prefer usable accounts whose secondary quota reset is nearest. When secondary reset data is unavailable, it SHALL fall back to the primary reset time. Within the same reset bucket, it SHALL prefer the account with more remaining usable quota.
+
+#### Scenario: Soonest resetting usable account is selected
+- **GIVEN** multiple healthy eligible accounts with usable quota
+- **AND** their secondary quota windows reset at different times
+- **WHEN** account selection uses `reset_drain`
+- **THEN** the usable account with the nearest secondary reset is selected
+
+#### Scenario: Same-reset accounts drain higher remaining quota first
+- **GIVEN** multiple healthy eligible accounts in the same reset bucket
+- **WHEN** account selection uses `reset_drain`
+- **THEN** the account with more remaining usable quota is selected
+
+### Requirement: Single-account routing
+The proxy routing layer SHALL support a `single_account` routing strategy configured by `single_account_id`. When enabled, the proxy SHALL route only through the configured account if that account exists, is available, and matches the requested model-plan scope. If the setting is missing, unavailable, or incompatible with the request, the proxy SHALL fail the request with a routing error instead of silently falling back to another account.
+
+#### Scenario: Configured account serves matching traffic
+- **GIVEN** `single_account` routing is enabled with a configured available account
+- **AND** the account matches the requested model-plan scope
+- **WHEN** the proxy selects an account
+- **THEN** the configured account is selected
+
+#### Scenario: Missing or unavailable selected account does not fall back
+- **GIVEN** `single_account` routing is enabled
+- **AND** the configured account is missing, unavailable, exhausted, or outside the requested model-plan scope
+- **WHEN** the proxy selects an account
+- **THEN** no alternate account is selected
+- **AND** the request fails with a routing error
+
+### Requirement: Drain routing dashboard settings
+Dashboard settings SHALL expose `sequential_drain`, `reset_drain`, and `single_account` as valid routing strategies. When `single_account` is selected, the dashboard SHALL allow choosing the configured account id and the backend SHALL persist it as nullable `single_account_id`.
+
+#### Scenario: Operator saves a single-account route
+- **WHEN** an operator selects `single_account` and chooses an account
+- **THEN** the settings API persists the selected account id
+- **AND** subsequent settings responses include that id
+
+### Requirement: Manual account routing policy
+
+Each account SHALL have a persisted manual routing policy with one of `normal`, `burn_first`, or `preserve`. Missing or legacy values SHALL be treated as `normal`.
+
+#### Scenario: expendable accounts are selected before normal accounts
+
+- **GIVEN** at least one eligible account has routing policy `burn_first`
+- **AND** at least one eligible account has routing policy `normal`
+- **WHEN** the load balancer selects an account
+- **THEN** it selects from the `burn_first` pool before considering `normal` accounts
+
+#### Scenario: preserved accounts are fallback only
+
+- **GIVEN** at least one eligible account has routing policy `normal`
+- **AND** at least one eligible account has routing policy `preserve`
+- **WHEN** the load balancer selects an account
+- **THEN** it selects from the `normal` pool before considering `preserve` accounts
+
+#### Scenario: routing policy does not bypass eligibility gates
+
+- **GIVEN** a request is filtered by model plan or additional quota eligibility
+- **WHEN** an account has routing policy `burn_first`
+- **THEN** that account is still excluded if it fails the model plan or additional quota gate
+
+### Requirement: Additional quota routing policy
+
+Each known additional quota MAY have a routing policy of `inherit`, `normal`, `burn_first`, or `preserve`. `inherit` SHALL use the selected account's routing policy. The other values SHALL override account routing policy for requests gated by that additional quota.
+
+For additional-quota-gated requests, account selection SHALL use fresh additional-quota usage windows for budget and reset comparison and SHALL NOT reject an account solely because its standard 5h or 7d quota is exhausted.
+
+#### Scenario: additional quota inherits account policy
+
+- **GIVEN** an additional quota has routing policy `inherit`
+- **WHEN** the load balancer selects an account for that additional quota
+- **THEN** it applies the account's own routing policy
+
+#### Scenario: additional quota override takes precedence
+
+- **GIVEN** an additional quota has routing policy `burn_first`
+- **AND** an account with fresh available quota for that additional quota has standard Codex quota exhausted
+- **WHEN** the load balancer selects an account for that additional quota
+- **THEN** the account remains eligible and is treated as `burn_first` for that selection
+
+### Requirement: Reset-window preference selection
+When earlier-reset routing preference is enabled, the account selector SHALL
+support choosing which quota window drives reset-time ordering. The supported
+windows SHALL be `primary` and `secondary`. The default SHALL be `secondary` to
+preserve existing behavior.
+
+#### Scenario: Primary reset window is selected
+- **GIVEN** two healthy eligible accounts with different primary reset times
+- **AND** earlier-reset preference is enabled with reset window `primary`
+- **WHEN** account selection evaluates otherwise comparable candidates
+- **THEN** the account with the earlier primary reset is preferred
+
+#### Scenario: Secondary reset window remains the default
+- **GIVEN** earlier-reset preference is enabled without an explicit reset-window override
+- **WHEN** account selection evaluates otherwise comparable candidates
+- **THEN** the account selector uses secondary-window reset ordering
+
+### Requirement: Reset-window preference propagation
+All proxy account-selection surfaces SHALL pass the configured reset-window
+preference into the canonical load balancer. This includes HTTP responses,
+WebSocket responses, bridge requests, compact requests, transcription requests,
+file-backed responses, Codex control requests, and sticky fallback selection.
+
+#### Scenario: WebSocket selection uses the configured window
+- **GIVEN** dashboard settings set the reset-window preference to `primary`
+- **WHEN** a WebSocket response request selects an account
+- **THEN** the load balancer receives `primary` as the reset-window preference
+
+### Requirement: Re-authentication-required accounts are not selectable
+
+When an account credential/session is invalidated but the upstream account is
+not known to be disabled, the system MUST mark the account `reauth_required`.
+The selector MUST remove `reauth_required` accounts from every routing strategy
+and hard-affinity fallback until the account is re-authenticated. Operator
+pickers that configure single-account routing or account-scoped routing MUST
+only offer accounts that are not hard-blocked by paused, reauth-required, or
+deactivated status.
+
+#### Scenario: Token invalidated account leaves the pool
+
+- **GIVEN** account A is `reauth_required`
+- **AND** account B is active
+- **WHEN** a proxy request selects an account
+- **THEN** account B is selected
+- **AND** account A is not considered an eligible candidate
+
+#### Scenario: Hard-blocked account cannot be newly selected for scoped routing
+
+- **GIVEN** account A is paused, reauth-required, or deactivated
+- **WHEN** an operator opens a scoped account-routing picker
+- **THEN** account A is not offered as a new selectable account
+
+#### Scenario: Re-authentication-required account cannot be paused into resumable state
+
+- **GIVEN** account A is `reauth_required`
+- **WHEN** an operator attempts to pause account A
+- **THEN** the request is rejected
+- **AND** account A remains `reauth_required`
+
+### Requirement: Foreground routing treats local usage snapshots as non-authoritative
+
+Foreground proxy account selection MUST NOT reject an otherwise active account solely because local standard usage snapshots, synthetic planner costs, or inferred budget pressure report that the account has reached or exceeded 100 percent usage. Such local usage data MAY influence ranking, health/drain decisions, opportunistic burn policy, dashboards, and diagnostics, but it MUST NOT be reported as upstream rate limiting and MUST NOT produce `no_accounts` before an upstream attempt when no explicit local policy or local capacity guard is exhausted.
+
+#### Scenario: Active account at local primary usage exhaustion is still selectable
+
+- **GIVEN** an upstream account is persisted as active
+- **AND** its latest local primary usage snapshot reports 100 percent usage with a future reset
+- **WHEN** foreground account selection evaluates the account
+- **THEN** the account remains eligible for upstream routing
+- **AND** the selection result does not report a local `Rate limit exceeded` or `no_accounts` failure
+
+#### Scenario: Active account at local secondary usage exhaustion is still selectable
+
+- **GIVEN** an upstream account is persisted as active
+- **AND** its latest local secondary usage snapshot reports 100 percent usage with a future reset
+- **WHEN** foreground account selection evaluates the account
+- **THEN** the account remains eligible for upstream routing
+- **AND** the local secondary usage snapshot is not promoted into a persisted upstream quota-exceeded state before an upstream response proves quota exhaustion
+
+#### Scenario: Advisory usage reset is not persisted as an account block
+
+- **GIVEN** an upstream account is persisted as active
+- **AND** its latest local usage snapshot reports 100 percent usage with a future reset
+- **WHEN** foreground account selection evaluates and persists selection state for the active account
+- **THEN** the account-level blocking reset remains unset
+- **AND** a later upstream rate-limit response without reset metadata is governed by upstream retry/backoff cooldown rather than the advisory usage reset
+
+### Requirement: Upstream rate and quota penalties are account-scoped by default
+
+When upstream returns rate-limit or quota-exhaustion evidence for a selected account, the proxy MUST apply that penalty to the selected upstream account identity. The proxy MUST NOT invent model-scoped, transport-scoped, or request-kind-scoped upstream cooldown semantics unless upstream documentation or captured upstream response metadata proves that narrower upstream scope.
+
+#### Scenario: Upstream 429 marks only the selected account
+
+- **GIVEN** account A is selected for a request
+- **AND** upstream returns a rate-limit response for that request
+- **WHEN** the proxy records the penalty
+- **THEN** it marks account A as rate-limited or cooling down
+- **AND** it does not create model-scoped or transport-scoped upstream cooldown buckets without upstream evidence
+

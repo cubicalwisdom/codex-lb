@@ -1479,3 +1479,318 @@ The server MUST accept decompressed incoming Responses WebSocket messages up to 
 - **WHEN** a client sends a Responses WebSocket frame larger than the historical 16 MiB server default but within the configured ingress budget
 - **THEN** the frame reaches the application-level response-create guard
 - **AND** an unslimmable request receives a status-400 `payload_too_large` error instead of a WebSocket 1009 close
+
+### Requirement: File-pinned compact refresh/connect failures fail closed
+
+The proxy SHALL preserve file-owner routing during pre-visible refresh and
+upstream-connect failure handling. If the pinned account cannot refresh or open
+the upstream compact connection before any compact response is emitted, the proxy
+MUST surface a stable upstream-unavailable failure for that request instead of
+excluding the pinned account and replaying the compact request on another
+account. This fail-closed rule applies only to file-pinned compact requests;
+replayable compact/connect requests without a live file-id pin continue to use
+the existing pre-visible forced-refresh and eligible-account failover behavior.
+
+#### Scenario: file-pinned compact request fails closed on refresh transport failure
+
+- **GIVEN** `file_pinned` was uploaded through `account_a` and its in-memory pin is live
+- **AND** a compact request references `{"type": "input_file", "file_id": "file_pinned"}`
+- **WHEN** `account_a` fails token refresh with a pre-visible transport or connection error
+- **THEN** the proxy returns an upstream-unavailable error for that compact request
+- **AND** it does not select another account for that request
+
+#### Scenario: replayable compact request without file pins can still fail over
+
+- **GIVEN** at least two accounts are eligible for a compact request
+- **AND** the compact request has no live `input_file.file_id` routing pin
+- **WHEN** the selected account fails before compact output is emitted and the
+  failure is classified by an existing pre-visible failover rule
+- **THEN** the proxy may exclude that account for the current request and try
+  another eligible account
+
+### Requirement: Pre-visible unary refresh/connect failures fail over
+
+For unary proxy requests that have not emitted downstream-visible output, the proxy MUST treat retryable token-refresh or upstream-connect transport failures as account-local transient failures.
+
+This applies to Codex thread-goal requests, Codex control requests,
+transcription requests, and file create/finalize requests. When another
+eligible account is available within the request budget, the proxy MUST record
+the failed account, exclude it from the current request, and retry the unary
+operation on the fallback account. The proxy MUST NOT fail over strict
+account-owner requests whose upstream resource is bound to the selected account.
+
+#### Scenario: Unary refresh transport failure uses another account
+
+- **GIVEN** at least two accounts are eligible for a Codex thread-goal, Codex
+  control, transcription, or file-create request
+- **AND** the selected account fails during token refresh or upstream connect
+  with a retryable transient transport error before downstream-visible output
+- **WHEN** another eligible account can complete the request within the request
+  budget
+- **THEN** the downstream request succeeds from the fallback account
+- **AND** the failed account is recorded and excluded from further attempts for
+  that request
+
+#### Scenario: Strict file-owner refresh failure fails closed
+
+- **GIVEN** a file-finalize request is pinned to the account that owns the file
+- **AND** the pinned account fails during token refresh or upstream connect with
+  a retryable transient transport error before downstream-visible output
+- **WHEN** another account would otherwise be eligible for proxy traffic
+- **THEN** the proxy fails the request with an upstream-unavailable error
+- **AND** the proxy does not send the file-finalize operation through another
+  account
+
+### Requirement: Responses input images bypass the HTTP bridge
+
+The service MUST bypass the HTTP responses bridge when a `/v1/responses`,
+`/backend-api/codex/responses`, `/responses/compact`, or `/v1/responses/compact`
+request contains any `input_image` part in top-level input items, nested
+message content, or tool output content, and send the request over the raw HTTP
+Responses stream path. This bypass MUST happen after rejecting unsupported
+uploaded-image references and MUST be limited to the current request; subsequent
+text-only requests MAY continue using the HTTP responses bridge.
+
+The raw HTTP path is the source of truth for image validation and upstream image
+error semantics. The bridge MUST NOT hold image requests waiting for
+`response.created` when upstream rejects an invalid inline image payload.
+
+#### Scenario: Nested input_image bypasses bridge
+
+- **GIVEN** the HTTP responses bridge is enabled
+- **WHEN** a Responses request contains a nested content part with `type = "input_image"`
+- **THEN** the request is sent through the raw HTTP stream path
+- **AND** the HTTP responses bridge is not used for that request
+
+#### Scenario: Image bypass does not disable future text bridge use
+
+- **GIVEN** the HTTP responses bridge is enabled
+- **WHEN** an image-bearing request bypasses the bridge
+- **THEN** the bypass applies only to that request
+- **AND** a later text-only request can still use the HTTP responses bridge
+
+### Requirement: Security-work authorization errors can route to authorized accounts
+
+When an upstream Responses request fails because the work requires cybersecurity authorization, codex-lb MUST retry the request on an account marked as security-work-authorized when the request can be safely replayed on a different account. The retry MUST exclude the account that produced the authorization error.
+
+#### Scenario: Unpinned stream request retries on an authorized account
+
+- **WHEN** an unpinned streamed Responses request fails with a security-work authorization error on an account that is not security-work-authorized
+- **AND** at least one eligible security-work-authorized account is available
+- **THEN** codex-lb emits a non-terminal `codex_lb.warning` with `code="security_work_authorization_required"` and `action="retry_security_work_authorized"`
+- **AND** codex-lb retries the request with account selection restricted to security-work-authorized accounts
+
+#### Scenario: No authorized account is available
+
+- **WHEN** codex-lb attempts a security-work-authorized retry
+- **AND** no security-work-authorized accounts are available
+- **THEN** codex-lb emits a non-terminal `codex_lb.warning` with `code="no_security_work_authorized_accounts"`
+- **AND** codex-lb either continues normal account failover when safe or returns the original security-work authorization error when normal failover is exhausted or unsafe
+
+#### Scenario: Pinned requests are not moved to another account
+
+- **WHEN** a security-work authorization error occurs for a request pinned by file ownership or previous-response ownership
+- **THEN** codex-lb MUST NOT replay the request on a different account
+- **AND** the client receives the original security-work authorization failure.
+
+#### Scenario: WebSocket replay releases the response-create gate
+
+- **WHEN** a downstream websocket request is eligible for security-work replay
+- **THEN** codex-lb releases the request's response-create gate before scheduling the replay
+- **AND** the replay can acquire the gate instead of blocking behind the failed first attempt
+
+### Requirement: Token-invalidated compact auth failures require re-authentication and fail over
+
+When a `/backend-api/codex/responses/compact` request receives an upstream
+`401 token_invalidated` response for the selected account, the proxy MUST
+attempt one forced token refresh and retry the compact request on that same
+account. If the refreshed retry also returns `401`, the proxy MUST mark the
+account `reauth_required`, exclude it from the current compact request, and try
+another eligible account when one is available.
+
+#### Scenario: Refreshed compact token invalidation uses another account
+
+- **GIVEN** at least two accounts are eligible for a compact request
+- **AND** the selected account returns `401 token_invalidated` for compact before and after a forced refresh
+- **WHEN** another eligible account can complete the compact request
+- **THEN** the downstream compact response succeeds from the second account
+- **AND** the selected account is marked `reauth_required`
+- **AND** the selected account is excluded from further attempts for that compact request
+
+### Requirement: Token-invalidated pre-visible auth failures require re-authentication and fail over
+
+Before any downstream-visible output is emitted, a repeated upstream
+`401 token_invalidated` response after forced refresh MUST mark the selected
+account `reauth_required`, exclude that account from the current request, and
+try another eligible account when replay is safe. The proxy MUST preserve the
+existing no-replay rule for unsafe continuations and after visible output.
+
+#### Scenario: Pre-visible token invalidation uses another account
+
+- **GIVEN** at least two accounts are eligible for a pre-visible proxy request
+- **AND** the selected account returns `401 token_invalidated` before and after a forced refresh
+- **WHEN** another eligible account can complete the request
+- **THEN** the downstream request succeeds from another account
+- **AND** the selected account is marked `reauth_required`
+
+#### Scenario: Non-replayable pre-visible auth failure still records the account
+
+- **GIVEN** a pre-visible HTTP bridge continuation cannot be replayed safely
+- **AND** the selected account returns `401 token_invalidated`
+- **WHEN** the proxy forwards the terminal auth error instead of replaying
+- **THEN** the selected account is marked `reauth_required`
+- **AND** the unsafe continuation is not replayed
+
+### Requirement: HTTP bridge stale-session cleanup is bounded
+
+The HTTP responses bridge MUST NOT hold the global bridge session registry lock
+while awaiting operations that can block on a stale session's upstream websocket,
+per-session pending lock, durable session repository, account lease release, or
+other external cleanup work.
+
+When stale bridge sessions are discovered during `/v1/responses`,
+`/backend-api/codex/responses`, `/v1/responses/compact`, or
+`/backend-api/codex/responses/compact` startup, the registry lock MAY be used to
+remove closed or idle sessions from in-memory indexes, but potentially blocking
+session close/fail-pending work MUST run after the lock is released or under a
+bounded cleanup path. A wedged stale session MUST NOT prevent unrelated soft
+HTTP Responses work from creating or reusing another bridge session.
+
+Idle pruning MUST make pending-request decisions only while holding the
+session's pending-request lock. If that lock cannot be acquired immediately,
+the service MUST skip pruning that session instead of inferring that it is idle
+from unlocked pending-request state.
+
+If cleanup cannot complete within the bounded cleanup path, the service MUST log
+a low-cardinality local bridge cleanup warning and continue protecting registry
+progress. Requests that cannot safely proceed because a hard-continuity session
+is unavailable MUST fail closed with an explicit local overload or continuity
+error rather than silently hanging.
+
+When a replacement bridge session claims the same durable key after stale local
+session detachment, the durable owner generation MUST advance so that a late
+cleanup from the stale local session cannot release or close the replacement
+session's durable ownership. This MUST also apply when the detached local
+session is retiring but still has visible in-flight requests and will release
+its durable ownership later after draining. After a detached retiring session
+finishes draining its visible requests, it MUST release its durable ownership
+and account lease instead of only closing the upstream websocket.
+If that retirement is initiated by the upstream-reader task after processing
+the terminal upstream event, session close MUST NOT cancel or await the current
+upstream-reader task itself.
+
+When bridge capacity eviction removes an idle local session to admit a
+replacement session, the evicted session's close MUST be awaited through a
+bounded path before the replacement selects an account, so the evicted
+session's account lease cannot cause a spurious no-account or local-capacity
+failure.
+
+If a request is cancelled while awaiting that pre-creation eviction close after
+registering replacement session creation as in-flight, the service MUST fail or
+remove the in-flight creation marker before propagating cancellation. Later
+requests MUST NOT wait on an orphaned creation future that can never complete.
+
+#### Scenario: wedged stale pending lock does not block fresh soft request
+
+- **GIVEN** the HTTP responses bridge has an idle or stale local session whose
+  pending-request lock does not complete promptly
+- **WHEN** a new soft-affinity `/v1/responses` request starts bridge session
+  selection
+- **THEN** the global bridge registry lock is not held indefinitely by stale
+  cleanup
+- **AND** the stale session is not pruned based on unlocked pending-request
+  state
+- **AND** the new request either creates/reuses an eligible bridge session or
+  returns an explicit bounded local error
+- **AND** it does not hang before account selection or bridge create/reuse
+  logging
+
+#### Scenario: stale close runs outside registry lock
+
+- **GIVEN** bridge startup identifies an idle stale session that must be closed
+- **WHEN** closing that session awaits upstream-reader cancellation, websocket
+  close, durable release, or account lease release
+- **THEN** the global bridge registry lock is already released
+- **AND** unrelated bridge startup requests can continue to inspect or mutate
+  the registry
+
+#### Scenario: stale durable release cannot fence out replacement owner
+
+- **GIVEN** a stale or retiring bridge session for a durable key is replaced by
+  a new local session after local detachment
+- **WHEN** the stale session's bounded background close releases durable
+  ownership after the replacement has claimed the same durable key
+- **THEN** the stale release does not clear the replacement owner's durable
+  lease
+- **AND** follow-up requests for the replacement session do not receive a
+  spurious bridge owner mismatch caused by the stale close
+
+#### Scenario: detached retiring session releases resources after drain
+
+- **GIVEN** a retiring bridge session was detached while visible requests were
+  still draining
+- **WHEN** those visible requests drain and the session is retired
+- **THEN** the service releases the old session's durable ownership
+- **AND** the service releases the old session's account lease
+- **AND** upstream-reader-owned retirement does not self-cancel the current
+  upstream reader task
+- **AND** the detached session no longer holds bridge capacity until process
+  exit
+
+#### Scenario: LRU eviction releases lease before replacement account selection
+
+- **GIVEN** the bridge is at local session capacity and an idle session is
+  selected for LRU eviction
+- **WHEN** a replacement bridge session is created after that eviction
+- **THEN** the evicted session is closed through a bounded path before the
+  replacement selects an account
+- **AND** the evicted session's account lease does not cause the replacement to
+  fail with a spurious no-account or local-capacity error
+
+#### Scenario: cancellation during LRU close clears in-flight creation
+
+- **GIVEN** the bridge is at local session capacity and an idle session is
+  detached for LRU eviction before replacement creation
+- **WHEN** the replacement request is cancelled while the bounded eviction close
+  is still awaiting cleanup
+- **THEN** the replacement in-flight creation marker is removed or failed before
+  cancellation is propagated
+- **AND** later requests for the same bridge key do not wait on that abandoned
+  creation marker
+
+### Requirement: Streaming Responses requests use a bounded retry budget
+When a streaming `/v1/responses` request encounters upstream instability, the proxy MUST enforce a configurable total request budget across selection, token refresh, account-capacity recovery waits, and upstream stream attempts. Each upstream stream attempt MUST clamp its connect timeout, idle timeout, and total request timeout to the remaining request budget.
+
+#### Scenario: Remaining budget constrains all stream attempt timeouts
+- **WHEN** account selection, account-capacity recovery, or token refresh leaves only part of the request budget available before a stream attempt starts
+- **THEN** the proxy limits the upstream connect timeout, SSE idle timeout, and upstream request total timeout to that same remaining budget
+- **AND** the client receives `response.failed` with `upstream_request_timeout` once that budget is exhausted instead of waiting through the full configured stream windows
+
+#### Scenario: Forced refresh retry recomputes all attempt timeouts
+- **WHEN** a first stream attempt fails with an authentication error that triggers a forced token refresh and retry
+- **THEN** the proxy recomputes the remaining request budget after the refresh
+- **AND** the retry attempt reapplies connect, idle, and total timeout limits from that recomputed budget
+
+#### Scenario: Recoverable account-capacity wait is bounded by the request budget
+- **WHEN** account selection reports a recoverable retry hint such as temporary rate-limit or stream-capacity exhaustion
+- **AND** the streaming request still has remaining request budget
+- **THEN** the proxy may wait for at most the smaller of the recovery hint and the remaining request budget before retrying selection
+- **AND** if the budget is exhausted before an account becomes available, the request fails through the normal no-account or rate-limit error path instead of starting a fresh full-budget wait
+
+### Requirement: Streaming account-capacity waits keep clients alive
+When a streaming Responses request waits for temporary account capacity to recover before account selection can continue, the proxy MUST emit downstream progress events during the wait. HTTP/SSE and HTTP bridge streams MUST emit `codex.keepalive` events with `status = "waiting_for_account_capacity"`, request id, elapsed wait seconds, and retry-after seconds when known. HTTP bridge streams MAY also emit `response.in_progress` to satisfy OpenAI Responses stream parsers before later terminal events. WebSocket clients MUST receive equivalent `codex.keepalive` JSON messages. These progress events MUST NOT expose account emails, API keys, raw affinity keys, prompt content, or request payloads.
+
+#### Scenario: HTTP/SSE capacity wait emits keepalive
+- **WHEN** `/v1/responses` streaming account selection can recover after a retry hint
+- **THEN** the stream emits `codex.keepalive` with `status = "waiting_for_account_capacity"`
+- **AND** includes the request id, waited seconds, and bounded retry-after seconds
+
+#### Scenario: HTTP bridge capacity wait preserves parser progress
+- **WHEN** an HTTP responses bridge request waits for session creation or account selection capacity
+- **THEN** the bridge stream emits a capacity-wait keepalive
+- **AND** emits OpenAI-compatible in-progress events when needed so downstream Responses stream parsers do not time out before the terminal response
+
+#### Scenario: WebSocket capacity wait emits JSON keepalive
+- **WHEN** a WebSocket Responses request waits for account capacity recovery
+- **THEN** the downstream WebSocket receives a JSON `codex.keepalive` message with `status = "waiting_for_account_capacity"`
+- **AND** the connection remains open until selection retries, the request budget expires, or the client disconnects

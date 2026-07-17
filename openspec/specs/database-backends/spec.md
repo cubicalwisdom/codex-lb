@@ -98,7 +98,6 @@ A background task that is intentionally decoupled from its caller's lifetime —
 - **AND** the background engine pool (`database_background_pool_size` + `database_background_max_overflow`) is not driven to exhaustion by stranded refresh connections
 - **AND** `/backend-api/codex/*` requests do not begin returning `500` from `QueuePool limit ... connection timed out` as a result of this path
 
-
 ### Requirement: SQLite usage history supports raw-window latest lookups
 SQLite deployments MUST maintain an index that supports latest `usage_history` lookup by raw usage window, account id, and newest recorded sample ordering.
 
@@ -113,3 +112,38 @@ SQLite deployments MUST maintain an index that supports latest `usage_history` l
 - **GIVEN** `idx_usage_window_raw_account_latest` was already created manually as a live SQLite hotfix
 - **WHEN** the schema migration is applied
 - **THEN** the migration MUST complete without failing on duplicate index creation
+
+### Requirement: Persisted reset-window routing setting
+Dashboard settings storage SHALL persist `prefer_earlier_reset_window` as a
+non-null setting with allowed values `primary` and `secondary`. New and migrated
+installations SHALL default the value to `secondary`.
+
+#### Scenario: Existing dashboard settings are migrated
+- **GIVEN** an existing dashboard settings row without `prefer_earlier_reset_window`
+- **WHEN** migrations are applied
+- **THEN** the row has `prefer_earlier_reset_window = "secondary"`
+
+#### Scenario: Settings API rejects unsupported windows
+- **WHEN** a settings update requests a reset-window value other than `primary` or `secondary`
+- **THEN** the API rejects the payload instead of persisting it
+
+### Requirement: SQLite account writes share the local writer section
+
+SQLite account mutation paths SHALL enter the shared SQLite writer section
+before performing database writes. This includes account import/upsert,
+reauthentication upsert, token refresh persistence, status transitions,
+account-level dashboard preference writes, and account deletion.
+
+PostgreSQL account mutation paths SHALL preserve their existing transaction and
+advisory-lock behavior.
+
+#### Scenario: Account token persistence is serialized on SQLite
+
+- **GIVEN** the deployment uses a file-backed SQLite database
+- **WHEN** an account token refresh persists new encrypted token values
+- **THEN** the write executes inside the shared SQLite writer section
+#### Scenario: Account status persistence is serialized on SQLite
+
+- **GIVEN** the deployment uses a file-backed SQLite database
+- **WHEN** an account status transition is persisted
+- **THEN** the write executes inside the shared SQLite writer section

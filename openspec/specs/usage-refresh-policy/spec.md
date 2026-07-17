@@ -19,34 +19,26 @@ Background usage refresh MUST apply a cooldown to accounts that repeatedly fail 
 
 ### Requirement: Usage refresh deactivates on clear deactivation signals
 
-The system MUST deactivate accounts when usage refresh receives a permanent deactivation signal. At minimum, `402`, `404`, and `401` responses whose message explicitly indicates that the OpenAI account has been deactivated MUST be treated as deactivation signals.
+The system MUST deactivate accounts when usage refresh receives a permanent
+account deactivation signal. At minimum, `402`, `404`, and `401` responses
+whose message explicitly indicates that the OpenAI account has been deactivated
+MUST be treated as deactivation signals. Credential/session invalidation codes
+such as `token_invalidated` and `token_expired` MUST be marked
+`reauth_required` instead of `deactivated`.
 
 #### Scenario: Usage 401 deactivation message deactivates the account
+
 - **WHEN** usage refresh receives HTTP `401`
 - **AND** the upstream message states that the OpenAI account has been deactivated
 - **THEN** the account is marked `deactivated`
 - **AND** later usage refresh cycles skip that account
 
-### Requirement: token_expired at the refresh boundary deactivates the account
+#### Scenario: Usage 401 token invalidated requires re-authentication
 
-When the OAuth refresh endpoint fails with error code `token_expired`, the system MUST treat it as a permanent authentication failure on par with `refresh_token_expired` / `refresh_token_reused` / `refresh_token_invalidated`. The affected account MUST be deactivated and removed from the routing pool until it is re-authenticated.
-
-#### Scenario: Refresh-time `token_expired` is classified as permanent
-
-- **WHEN** `classify_refresh_error("token_expired")` is evaluated
-- **THEN** it returns `True`
-
-#### Scenario: Refresh-time `token_expired` deactivates the account
-
-- **WHEN** `AuthManager.refresh_account` receives a `RefreshError("token_expired", ..., is_permanent=True)` from `refresh_access_token`
-- **THEN** the account is transitioned to `DEACTIVATED`
-- **AND** the deactivation reason references the re-login requirement so the dashboard can surface it
-- **AND** the account is no longer selected by the load balancer until it is re-authenticated
-
-#### Scenario: Usage-refresh-time `token_expired` deactivates the account
-
-- **WHEN** background usage refresh observes an upstream error whose code is `token_expired` (via `_should_deactivate_for_usage_error`'s permanent-code check)
-- **THEN** the account is transitioned to `DEACTIVATED` immediately, without entering the ambiguous-401 cooldown loop
+- **WHEN** usage refresh receives HTTP `401`
+- **AND** the upstream error code is `token_invalidated`
+- **THEN** the account is marked `reauth_required`
+- **AND** later usage refresh cycles skip that account until re-authentication
 
 ### Requirement: Usage capacity recognizes upstream ChatGPT plan types
 
@@ -219,4 +211,263 @@ The system SHALL support an optional limit warm-up mechanism that is disabled by
 - **WHEN** multiple refresh workers observe the same account/window/reset candidate
 - **THEN** the database permits at most one persisted attempt for that tuple
 - **AND** later refresh cycles skip that tuple after a prior attempt exists
+
+### Requirement: Credit-backed usage remains selectable after quota windows fill
+
+When deriving effective account status from upstream usage samples, the system MUST treat the latest credit metadata as an override for secondary quota-derived blocking state. If the latest usage sample with credit metadata reports `credits_has = true`, `credits_unlimited = true`, or `credits_balance > 0`, then secondary quota windows at `100%` MUST NOT by themselves make the account `quota_exceeded`. Primary-window exhaustion MUST keep `rate_limited` precedence even when credits are available.
+
+This override MUST NOT reactivate accounts that are explicitly `paused` or
+`deactivated`. When multiple usage samples carry credit metadata, the newest
+sample by `recorded_at` MUST be used.
+
+#### Scenario: Credit-backed weekly account remains selectable
+
+- **GIVEN** an account is otherwise routable
+- **AND** its weekly usage window reports `used_percent = 100`
+- **AND** its primary usage window is below `100`
+- **AND** the newest usage sample with credit metadata reports a positive credit balance
+- **WHEN** the load balancer derives account state
+- **THEN** the derived status remains `active`
+- **AND** the account remains eligible for selection
+
+#### Scenario: Credit-backed account remains rate-limited when primary window is exhausted
+
+- **GIVEN** an account is otherwise routable
+- **AND** its primary usage window reports `used_percent = 100`
+- **AND** the newest usage sample with credit metadata reports a positive credit balance
+- **WHEN** the load balancer derives account state
+- **THEN** the derived status is `rate_limited`
+- **AND** the reset guard points at the primary reset time
+
+#### Scenario: Newer zero-credit sample removes the override
+
+- **GIVEN** an older usage sample reports available credits
+- **AND** a newer usage sample reports no credits and zero credit balance
+- **WHEN** quota status is derived from usage
+- **THEN** the newer zero-credit sample is authoritative
+- **AND** a full quota window can still derive `rate_limited` or `quota_exceeded`
+
+#### Scenario: Paused account is not reactivated by credits
+
+- **GIVEN** an account is paused
+- **AND** its newest usage sample reports available credits
+- **WHEN** quota status is derived from usage
+- **THEN** the account remains paused
+
+### Requirement: token_expired at the refresh boundary requires re-authentication
+
+When the OAuth refresh endpoint fails with a credential-token error code such as
+`token_expired`, `invalid_grant`, `refresh_token_expired`,
+`refresh_token_reused`, or `refresh_token_invalidated`, the system MUST treat it
+as a permanent refresh-token/session failure. The affected account MUST be
+marked `reauth_required` and removed from the routing pool until it is
+re-authenticated.
+
+#### Scenario: Refresh-time `token_expired` is classified as permanent
+
+- **WHEN** `classify_refresh_error("token_expired")` is evaluated
+- **THEN** it returns `True`
+
+#### Scenario: Refresh-time `invalid_grant` is classified as permanent
+
+- **WHEN** `classify_refresh_error("invalid_grant")` is evaluated
+- **THEN** it returns `True`
+
+#### Scenario: Refresh-time `token_expired` requires re-authentication
+
+- **WHEN** `AuthManager.refresh_account` receives a `RefreshError("token_expired", ..., is_permanent=True)` from `refresh_access_token`
+- **THEN** the account is transitioned to `REAUTH_REQUIRED`
+- **AND** the reason references the re-login requirement so the dashboard can surface it
+- **AND** the account is no longer selected by the load balancer until it is re-authenticated
+
+#### Scenario: Usage-refresh-time `token_expired` requires re-authentication
+
+- **WHEN** background usage refresh observes an upstream error whose code is `token_expired`
+- **THEN** the account is transitioned to `REAUTH_REQUIRED` immediately, without entering the ambiguous-401 cooldown loop
+
+### Requirement: Operators can probe an account to wake the upstream limiter
+
+The dashboard MUST expose an admin-only endpoint that sends a single minimal `responses.create` directly to upstream pinned to one account, bypassing load-balancer scoring, then immediately refreshes that account's `/wham/usage` snapshot. The endpoint MUST surface the before/after usage and account status so operators can verify whether the upstream limiter re-evaluated.
+
+#### Scenario: Probe wakes the upstream limiter and refreshes usage state
+- **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
+- **AND** the account is `active`, `rate_limited`, or `quota_exceeded`
+- **THEN** the service sends one `responses.create` request directly to `{upstream_base_url}/codex/responses` with `max_output_tokens=1`, `stream=true`, `store=false`
+- **AND** the service triggers an immediate `UsageUpdater.refresh_accounts` for that account
+- **AND** the response body carries `probe_status_code`, `primary_used_percent_before`, `primary_used_percent_after`, `secondary_used_percent_before`, `secondary_used_percent_after`, `account_status_before`, `account_status_after`
+
+#### Scenario: Probe rejects hard-blocked accounts
+- **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
+- **AND** the account `status` is `paused` or `deactivated`
+- **THEN** the endpoint responds `409` with code `account_not_probable`
+- **AND** no upstream request is sent
+
+#### Scenario: Dashboard exposes Force probe only for probeable statuses
+
+- **WHEN** the dashboard renders account actions for an account
+- **AND** the account `status` is `active`, `rate_limited`, or `quota_exceeded`
+- **THEN** the dashboard exposes a Force probe action for that account
+- **AND** invoking the action refreshes the account list, dashboard overview, projections, and that account's trends
+- **BUT WHEN** the account `status` is `paused` or `deactivated`
+- **THEN** the Force probe action is disabled or hidden
+
+#### Scenario: Probe returns 404 for unknown account
+- **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
+- **AND** no account with that id exists
+- **THEN** the endpoint responds `404` with code `account_not_found`
+
+### Requirement: Free-account quota normalizes to a monthly window
+
+When upstream usage or rate-limit payloads report a single free-account quota window as `primary_window.limit_window_seconds == 2592000` with no `secondary_window`, the system SHALL normalize that payload as a monthly-only quota window rather than as a primary 5h window or a secondary 7d window.
+
+#### Scenario: Monthly free-account payload becomes monthly-only
+- **WHEN** usage refresh or rate-limit payload mapping receives `primary_window.limit_window_seconds = 2592000`
+- **AND** `secondary_window` is `null`
+- **THEN** the system records and exposes the quota as a monthly-only window
+- **AND** it does not synthesize a 5h primary or 7d secondary window for that account
+
+### Requirement: Free-account quota capacity applies only to the monthly window
+
+The system SHALL treat the free-account monthly window as the only free-account quota capacity window for overview and summary calculations.
+
+#### Scenario: Free account contributes only monthly quota capacity
+- **WHEN** the system computes quota capacity for a free account with a normalized monthly-only window
+- **THEN** the free account contributes capacity to the 30d monthly window
+- **AND** the free account contributes zero 7d quota capacity
+
+### Requirement: Weekly semantics are not inferred from the primary slot alone
+
+The system SHALL NOT infer weekly secondary semantics solely because a primary-slot payload reports `limit_window_seconds == 604800`.
+
+#### Scenario: Primary-slot weekly duration does not trigger implicit secondary mapping
+- **WHEN** a payload includes a primary-slot window whose `limit_window_seconds` is `604800`
+- **THEN** downstream interpretation is determined by the normalization rules for that account shape
+- **AND** the system does not automatically treat that primary-slot payload as a secondary weekly window only because of that duration
+
+### Requirement: Zero-capacity non-5h primary usage does not keep free accounts rate-limited
+
+Account status derivation MUST ignore a zero-capacity primary usage row whose
+window is not the canonical 5-hour window when normalized quota state reports
+available monthly quota for a free-plan account.
+
+#### Scenario: Zero-capacity monthly primary does not keep free accounts rate-limited
+- **GIVEN** a free-plan account whose persisted status is `rate_limited`
+- **AND** its latest primary usage row is a zero-capacity non-5h window (for example a monthly upstream snapshot)
+- **AND** its normalized quota state reports available monthly quota
+- **WHEN** codex-lb derives account status for account summaries or proxy runtime state
+- **THEN** the non-5h primary row is ignored for rate-limit recovery
+- **AND** the account is treated as `active`
+- **AND** downstream account views keep the monthly-only quota presentation
+
+### Requirement: Proactive active account credential refresh
+
+Codex-LB SHALL periodically refresh active account credentials in the background when an active account's last refresh is older than a configured maximum age.
+
+#### Scenario: Idle active account becomes stale
+
+- **GIVEN** an account has status `active`
+- **AND** its `last_refresh` is older than the configured Auth Guardian max age
+- **WHEN** Auth Guardian runs on the elected leader
+- **THEN** Codex-LB force-refreshes that account without requiring request traffic to select it first
+
+### Requirement: Auth Guardian bounded and safe execution
+
+Auth Guardian SHALL bound each run by configured batch size and concurrency, add jitter/backoff, and avoid logging token material.
+
+#### Scenario: Refresh fails for one account
+
+- **GIVEN** Auth Guardian attempts to refresh an active account
+- **WHEN** refresh fails
+- **THEN** Auth Guardian records per-account backoff
+- **AND** later accounts in the batch are still eligible to run
+- **AND** logs do not contain token material
+
+### Requirement: Multi-replica leader guard
+
+Auth Guardian SHALL use the existing leader-election mechanism so only the elected replica performs proactive refresh work.
+
+#### Scenario: Replica is not leader
+
+- **GIVEN** leader election is enabled
+- **AND** the current replica does not acquire leadership
+- **WHEN** Auth Guardian wakes
+- **THEN** the scheduler skips refresh work for that pass
+
+### Requirement: Usage refresh is account-slot scoped
+
+Usage refresh MUST write usage and change account status only for the credential slot being refreshed. It MUST NOT apply a payload that proves a different workspace identity to the target account.
+
+#### Scenario: Mismatched workspace payload is ignored
+
+- **GIVEN** an account has stored workspace identity
+- **WHEN** usage refresh receives a payload for a different workspace
+- **THEN** no usage rows are written for the account
+- **AND** the account status, plan type, workspace metadata, and seat type are not changed
+
+#### Scenario: Unknown workspace plan mismatch is non-destructive
+
+- **GIVEN** an account has no stored workspace identity
+- **WHEN** usage refresh receives a payload whose plan type conflicts with the stored non-unknown plan
+- **THEN** no usage rows are written for the account
+- **AND** the account status and plan type are not changed
+
+### Requirement: Plan reconciliation for workspace-less accounts is opt-in
+
+Usage refresh MAY reconcile a stored plan type from an upstream payload only
+when plan reconciliation is explicitly enabled and the account has no stored
+workspace identity. Without that opt-in, plan mismatch remains non-destructive.
+An account with stored workspace identity MUST NOT be reconciled from a
+workspace-less or mismatched-workspace payload.
+
+#### Scenario: Unknown workspace plan mismatch is non-destructive by default
+
+- **GIVEN** an account has no stored workspace identity
+- **WHEN** usage refresh receives a payload whose plan type conflicts with the stored non-unknown plan
+- **AND** plan reconciliation is not enabled
+- **THEN** no usage rows are written for the account
+- **AND** the account status and plan type are not changed
+
+#### Scenario: Legacy account plan mismatch can be reconciled when enabled
+
+- **GIVEN** an account has no stored workspace identity
+- **WHEN** usage refresh receives a payload whose only identity mismatch is plan type
+- **AND** plan reconciliation is enabled
+- **THEN** usage refresh updates the account plan type from the payload
+- **AND** fresh usage rows are written for the account
+
+#### Scenario: CodexNeo rows show the reconciled Codex IB plan
+
+- **GIVEN** usage refresh has reconciled a legacy account plan type in Codex IB
+- **AND** the matching CodexNeo registry row still has the previous plan value
+- **WHEN** CodexNeo loads accounts with Codex IB usage
+- **THEN** the returned account row plan uses the current Codex IB plan type
+- **AND** the row still exposes the matched Codex IB account id and status fields
+
+#### Scenario: CodexNeo rows show exhausted reconciled quota
+
+- **GIVEN** a matched Codex IB account has an active stored status
+- **AND** its latest applicable usage window is exhausted
+- **WHEN** CodexNeo loads accounts with Codex IB usage
+- **THEN** the returned account row status fields reflect `quota_exceeded`
+- **AND** the visible availability and status labels say `Quota exceeded` instead of `Ready` or `Fresh`
+
+#### Scenario: Workspace account is not reconciled from a workspace-less payload
+
+- **GIVEN** an account has stored workspace identity
+- **WHEN** usage refresh receives a payload that omits workspace identity and conflicts on plan type
+- **AND** plan reconciliation is enabled
+- **THEN** no usage rows are written for the account
+- **AND** the account plan type and workspace metadata are not changed
+
+### Requirement: User-paused accounts survive auth sync
+
+The system SHALL preserve an operator-paused account state when an auth import, Codex Home sync, or startup discovery sync refreshes the same account's token material.
+
+#### Scenario: Auth sync updates tokens without unpausing
+
+- **GIVEN** an account is `paused` by an operator in the Accounts tab
+- **WHEN** the same upstream account is re-imported or refreshed from Codex Home auth material with an otherwise active auth snapshot
+- **THEN** the stored account remains `paused`
+- **AND** the account's token and refresh metadata MAY be updated
+- **AND** only an explicit Reactivate/Resume action SHALL clear the paused state
 
