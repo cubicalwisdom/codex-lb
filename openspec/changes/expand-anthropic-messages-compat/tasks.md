@@ -7,7 +7,8 @@
 ## 2. Messages expansion
 
 - [x] 2.1 Translate supported image content blocks and reject invalid attachment sources before upstream execution.
-- [ ] 2.2 Implement an end-to-end PDF/plain/CSV document path that completes through the ChatGPT-backed Responses transport; the current inline `input_file` shape fails live-provider acceptance.
+- [x] 2.2 Implement an end-to-end PDF/plain/CSV document path that completes through the ChatGPT-backed Responses transport; the rejected inline `input_file` shape is replaced by local extraction.
+- [x] 2.8 Replace inline document forwarding with bounded local UTF-8/CSV/PDF text extraction and explicit encrypted/scanned/URL failures.
 - [x] 2.3 Normalize cache controls into deterministic prompt-cache affinity and accurate response usage fields.
 - [x] 2.4 Validate context-management, enforce the provider-safe context budget, and reuse upstream compact artifacts internally.
 - [x] 2.5 Add bounded pre-stream capacity/upstream recovery and sanitized outcome telemetry.
@@ -28,5 +29,6 @@
 - [x] 4.4 Update handover and implementation tracking with the staged endpoint and remaining protocol exclusions.
 - [x] 4.5 Add regression coverage for Desktop automatic compaction, non-Desktop opt-in enforcement, uncompactionable single-turn input, and compact-transport failure.
 - [x] 4.6 Run live acceptance for images, cache affinity, batch success/cancel/delete/JSONL, validation errors, tool use, streaming, token counting, model isolation, and Sonnet fallback effort.
-- [ ] 4.7 Complete live PDF/plain/CSV acceptance after the document transport is replaced.
+- [x] 4.7 Complete live PDF/plain/CSV acceptance after the document transport is replaced.
+- [x] 4.9 Add local extraction regressions plus focused dependency, type, lint, and OpenSpec verification without restarting the active portable runtime.
 - [x] 4.8 Add RED/GREEN route coverage for the exact 1,048,576-character instruction boundary, mirror the portable runtime, restart CodexNeo, and retry the affected Desktop conversation.

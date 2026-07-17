@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -41,6 +42,36 @@ def _request(headers: dict[str, str]) -> Request:
             "server": ("testserver", 80),
         }
     )
+
+
+def _base64_pdf(text: str | None) -> str:
+    stream = b"" if text is None else f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode("ascii")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+        ),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, body in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{index} 0 obj\n".encode("ascii"))
+        pdf.extend(body)
+        pdf.extend(b"\nendobj\n")
+    xref_offset = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n").encode("ascii")
+    )
+    return base64.b64encode(pdf).decode("ascii")
 
 
 def test_messages_request_translates_system_tools_and_tool_results() -> None:
@@ -440,12 +471,13 @@ def _workspace_web_fetch_tool(*, defer_loading: bool = False) -> dict[str, JsonV
     return tool
 
 
-def test_claude_desktop_routes_eager_workspace_web_fetch_for_public_url() -> None:
+@pytest.mark.parametrize("defer_loading", [False, True])
+def test_claude_desktop_routes_workspace_web_fetch_for_public_url(defer_loading: bool) -> None:
     request = anthropic_messages.to_responses_request(
         {
             "model": "claude-opus-4-8",
             "max_tokens": 1024,
-            "tools": [_workspace_web_fetch_tool()],
+            "tools": [_workspace_web_fetch_tool(defer_loading=defer_loading)],
             "tool_choice": {"type": "tool", "name": "mcp__workspace__web_fetch"},
             "messages": [
                 {
@@ -463,7 +495,8 @@ def test_claude_desktop_routes_eager_workspace_web_fetch_for_public_url() -> Non
     assert payload["tool_choice"] == {"type": "web_search"}
 
 
-def test_claude_desktop_accepts_hosted_workspace_alias_in_tool_search_history() -> None:
+@pytest.mark.parametrize("defer_loading", [False, True])
+def test_claude_desktop_accepts_hosted_workspace_alias_in_tool_search_history(defer_loading: bool) -> None:
     request = anthropic_messages.to_responses_request(
         {
             "model": "claude-opus-4-8",
@@ -477,7 +510,7 @@ def test_claude_desktop_accepts_hosted_workspace_alias_in_tool_search_history() 
                         "properties": {"query": {"type": "string"}},
                     },
                 },
-                _workspace_web_fetch_tool(),
+                _workspace_web_fetch_tool(defer_loading=defer_loading),
             ],
             "tool_choice": {"type": "tool", "name": "mcp__workspace__web_fetch"},
             "messages": [
@@ -646,10 +679,10 @@ def test_claude_desktop_deduplicates_workspace_fetch_alias_with_official_control
         (False, "Fetch https://claude.com/docs.", False),
         (True, "Fetch http://127.0.0.1:8080/docs.", False),
         (True, "Fetch the documentation URL when one becomes available.", False),
-        (True, "Fetch https://claude.com/docs.", True),
+        (True, "Fetch http://127.0.0.1:8080/docs.", True),
     ],
 )
-def test_workspace_web_fetch_remains_client_tool_outside_public_eager_desktop_case(
+def test_workspace_web_fetch_remains_client_tool_outside_public_desktop_case(
     claude_desktop: bool,
     message: str,
     defer_loading: bool,
@@ -680,6 +713,39 @@ def test_workspace_web_fetch_remains_client_tool_outside_public_eager_desktop_ca
             },
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [
+            {"role": "user", "content": "Earlier, inspect https://example.com."},
+            {"role": "assistant", "content": "I can do that."},
+            {"role": "user", "content": "Now fetch http://127.0.0.1:8080/health instead."},
+        ],
+        [
+            {
+                "role": "user",
+                "content": "Compare https://example.com with http://127.0.0.1:8080/health.",
+            }
+        ],
+    ],
+)
+def test_workspace_web_fetch_keeps_client_tool_when_latest_targets_include_local_url(
+    messages: list[JsonValue],
+) -> None:
+    request = anthropic_messages.to_responses_request(
+        {
+            "model": "claude-opus-4-8",
+            "max_tokens": 1024,
+            "tools": [_workspace_web_fetch_tool(defer_loading=True)],
+            "messages": messages,
+        },
+        api_key=None,
+        claude_desktop=True,
+    )
+
+    assert request.responses.model_dump_for_forwarding()["tools"][0]["type"] == "function"
 
 
 @pytest.mark.parametrize("tool_name", ["web_search", "web_fetch"])
@@ -753,7 +819,7 @@ def test_messages_request_rejects_unsafe_web_server_tool(
     assert exc_info.value.param == param
 
 
-def test_messages_request_translates_base64_image_and_pdf_document() -> None:
+def test_messages_request_translates_base64_image_and_extracts_pdf_document() -> None:
     request = anthropic_messages.to_responses_request(
         {
             "model": "gpt-5.6-terra",
@@ -777,7 +843,7 @@ def test_messages_request_translates_base64_image_and_pdf_document() -> None:
                             "source": {
                                 "type": "base64",
                                 "media_type": "application/pdf",
-                                "data": "cGRmLWJ5dGVz",
+                                "data": _base64_pdf("Hello PDF"),
                             },
                         },
                     ],
@@ -794,13 +860,110 @@ def test_messages_request_translates_base64_image_and_pdf_document() -> None:
                 {"type": "input_text", "text": "Read these attachments."},
                 {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2UtYnl0ZXM="},
                 {
-                    "type": "input_file",
-                    "file_url": "data:application/pdf;base64,cGRmLWJ5dGVz",
-                    "filename": "notes.pdf",
+                    "type": "input_text",
+                    "text": (
+                        "[Document: notes.pdf; media_type=application/pdf]\n"
+                        "[Page 1]\nHello PDF\n"
+                        "[End document: notes.pdf]"
+                    ),
                 },
             ],
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("media_type", "title", "raw", "expected"),
+    [
+        ("text/plain", "notes.txt", "hello UTF-8 \u2713".encode(), "hello UTF-8 \u2713"),
+        ("text/csv", "rows.csv", b"name,value\na,1\n", "name,value\na,1\n"),
+    ],
+)
+def test_messages_request_extracts_utf8_text_documents(
+    media_type: str,
+    title: str,
+    raw: bytes,
+    expected: str,
+) -> None:
+    request = anthropic_messages.to_responses_request(
+        {
+            "model": "gpt-5.6-terra",
+            "max_tokens": 128,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "title": title,
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": base64.b64encode(raw).decode("ascii"),
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+        api_key=None,
+    )
+
+    content = request.responses.model_dump_for_forwarding()["input"][0]["content"]
+    assert content == [
+        {
+            "type": "input_text",
+            "text": f"[Document: {title}; media_type={media_type}]\n{expected}\n[End document: {title}]",
+        }
+    ]
+
+
+def test_messages_request_rejects_scanned_pdf_without_extractable_text() -> None:
+    with pytest.raises(ClientPayloadError, match="no extractable text"):
+        anthropic_messages.to_responses_request(
+            {
+                "model": "gpt-5.6-terra",
+                "max_tokens": 128,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": _base64_pdf(None),
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            api_key=None,
+        )
+
+
+def test_messages_request_rejects_document_url_before_upstream() -> None:
+    with pytest.raises(ClientPayloadError, match="provide a base64 document"):
+        anthropic_messages.to_responses_request(
+            {
+                "model": "gpt-5.6-terra",
+                "max_tokens": 128,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "document",
+                                "source": {"type": "url", "url": "https://example.com/file.pdf"},
+                            }
+                        ],
+                    }
+                ],
+            },
+            api_key=None,
+        )
 
 
 def test_messages_request_rejects_invalid_attachment_base64() -> None:
@@ -1056,7 +1219,7 @@ def test_completed_responses_payload_becomes_anthropic_message() -> None:
     }
 
 
-def test_completed_responses_payload_ignores_web_search_lifecycle_item() -> None:
+def test_completed_responses_payload_keeps_text_fallback_for_incomplete_web_search_data() -> None:
     message = anthropic_messages.message_from_responses(
         {
             "id": "resp_web",
@@ -1081,6 +1244,94 @@ def test_completed_responses_payload_ignores_web_search_lifecycle_item() -> None
     assert message["content"] == [{"type": "text", "text": "Python documentation is at python.org."}]
     assert message["stop_reason"] == "end_turn"
     assert message["usage"] == {"input_tokens": 8, "output_tokens": 5}
+
+
+def test_completed_responses_payload_translates_exact_web_results_and_citations() -> None:
+    message = anthropic_messages.message_from_responses(
+        {
+            "id": "resp_web_exact",
+            "status": "completed",
+            "usage": {"input_tokens": 8, "output_tokens": 5},
+            "output": [
+                {
+                    "id": "srvtoolu_web",
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "Python documentation"},
+                    "results": [
+                        {
+                            "type": "web_search_result",
+                            "url": "https://docs.python.org/3/",
+                            "title": "Python documentation",
+                            "encrypted_content": "enc_result_1",
+                            "page_age": "2026-07-01",
+                        }
+                    ],
+                },
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Use the Python documentation.",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://docs.python.org/3/",
+                                    "title": "Python documentation",
+                                    "encrypted_index": "enc_index_1",
+                                    "cited_text": "Python documentation",
+                                },
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://example.com/public-only",
+                                    "title": "Public only",
+                                    "start_index": 0,
+                                    "end_index": 3,
+                                },
+                            ],
+                        }
+                    ],
+                },
+            ],
+        },
+        client_model="claude-sonnet-5",
+    )
+
+    assert message["content"] == [
+        {
+            "type": "server_tool_use",
+            "id": "srvtoolu_web",
+            "name": "web_search",
+            "input": {"query": "Python documentation"},
+        },
+        {
+            "type": "web_search_tool_result",
+            "tool_use_id": "srvtoolu_web",
+            "content": [
+                {
+                    "type": "web_search_result",
+                    "url": "https://docs.python.org/3/",
+                    "title": "Python documentation",
+                    "encrypted_content": "enc_result_1",
+                    "page_age": "2026-07-01",
+                }
+            ],
+        },
+        {
+            "type": "text",
+            "text": "Use the Python documentation.",
+            "citations": [
+                {
+                    "type": "web_search_result_location",
+                    "url": "https://docs.python.org/3/",
+                    "title": "Python documentation",
+                    "encrypted_index": "enc_index_1",
+                    "cited_text": "Python documentation",
+                }
+            ],
+        },
+    ]
 
 
 def test_completed_responses_payload_reports_only_upstream_cache_usage() -> None:
@@ -1222,6 +1473,112 @@ async def test_web_search_stream_ignores_hosted_lifecycle_and_returns_text() -> 
     ]
     assert parsed[2]["delta"] == {"type": "text_delta", "text": "Python"}
     assert parsed[4]["usage"] == {"output_tokens": 2}
+
+
+@pytest.mark.asyncio
+async def test_web_search_stream_translates_exact_results_and_citations() -> None:
+    citation = {
+        "type": "url_citation",
+        "url": "https://docs.python.org/3/",
+        "title": "Python documentation",
+        "encrypted_index": "enc_index_stream",
+        "cited_text": "Python documentation",
+    }
+    blocks = [
+        _sse({"type": "response.created", "response": {"id": "resp_web_exact_stream"}}),
+        _sse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "srvtoolu_stream",
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "Python documentation"},
+                    "results": [
+                        {
+                            "url": "https://docs.python.org/3/",
+                            "title": "Python documentation",
+                            "encrypted_content": "enc_result_stream",
+                        }
+                    ],
+                },
+            }
+        ),
+        _sse(
+            {
+                "type": "response.content_part.added",
+                "output_index": 1,
+                "content_index": 0,
+                "item_id": "msg_web_exact_stream",
+                "part": {"type": "output_text", "text": ""},
+            }
+        ),
+        _sse(
+            {
+                "type": "response.output_text.delta",
+                "output_index": 1,
+                "content_index": 0,
+                "item_id": "msg_web_exact_stream",
+                "delta": "Python",
+            }
+        ),
+        _sse(
+            {
+                "type": "response.content_part.done",
+                "output_index": 1,
+                "content_index": 0,
+                "item_id": "msg_web_exact_stream",
+                "part": {"type": "output_text", "text": "Python", "annotations": [citation]},
+            }
+        ),
+        _sse(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_web_exact_stream",
+                    "usage": {"input_tokens": 4, "output_tokens": 2},
+                },
+            }
+        ),
+    ]
+
+    parsed = [
+        event
+        for event in [
+            parse_sse_data_json(event)
+            async for event in anthropic_messages.iter_messages_events(
+                _stream(*blocks),
+                client_model="claude-sonnet-5",
+            )
+        ]
+        if event is not None
+    ]
+    assert [event["type"] for event in parsed] == [
+        "message_start",
+        "content_block_start",
+        "content_block_stop",
+        "content_block_start",
+        "content_block_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]
+    assert parsed[1]["content_block"]["type"] == "server_tool_use"
+    assert parsed[3]["content_block"]["type"] == "web_search_tool_result"
+    assert parsed[7]["delta"] == {
+        "type": "citations_delta",
+        "citation": {
+            "type": "web_search_result_location",
+            "url": "https://docs.python.org/3/",
+            "title": "Python documentation",
+            "encrypted_index": "enc_index_stream",
+            "cited_text": "Python documentation",
+        },
+    }
 
 
 @pytest.mark.asyncio

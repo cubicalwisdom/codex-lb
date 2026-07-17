@@ -2,13 +2,25 @@
 
 ### Requirement: Messages accepts supported attachments without loss
 
-The Anthropic Messages facade MUST translate supported user image blocks using base64 or HTTPS sources into Responses image input items. It MUST translate supported base64 text/PDF document blocks into Responses file input items. Invalid media types, invalid base64 payloads, oversized inline payloads, and unsupported source types MUST return an Anthropic `invalid_request_error` before upstream execution. Existing text, tool-use, and tool-result ordering MUST remain unchanged.
+The Anthropic Messages facade MUST translate supported user image blocks using base64 or HTTPS sources into Responses image input items. It MUST decode supported base64 plain-text, CSV, and text-bearing PDF document blocks locally and insert bounded, labelled text in the same user-message position; it MUST NOT forward those documents through an upstream file shape that the mapped ChatGPT transport rejects. Invalid media types, invalid base64 payloads, encrypted PDFs, scanned/image-only PDFs without extractable text, oversized inline or extracted payloads, URL document sources, and unsupported source types MUST return an Anthropic `invalid_request_error` before upstream execution. Existing text, tool-use, and tool-result ordering MUST remain unchanged, and PDF page boundaries MUST remain visible in the extracted text.
 
 #### Scenario: A base64 image reaches the Responses input
 
 - **WHEN** a valid Anthropic user image block uses a base64 PNG source
 - **THEN** the forwarded Responses input contains an `input_image` data URL part in the same user message position
 - **AND** the Anthropic response retains the caller-visible model name
+
+#### Scenario: A text-bearing PDF is extracted locally
+
+- **WHEN** a valid base64 PDF document contains extractable text on one or more pages
+- **THEN** the forwarded Responses input contains labelled text with the document title and page boundaries in the same user-message position
+- **AND** it does not contain an `input_file` item
+
+#### Scenario: A scanned PDF fails explicitly
+
+- **WHEN** a base64 PDF contains no extractable text
+- **THEN** the facade returns an Anthropic `invalid_request_error` before upstream execution
+- **AND** it does not silently discard the document or invent OCR output
 
 ### Requirement: Cache-control preserves affinity without false billing
 

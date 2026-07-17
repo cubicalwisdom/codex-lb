@@ -4,7 +4,7 @@ The active Anthropic facade translates Messages requests into codex-lb Responses
 
 ## Goals
 
-- Support base64/URL images and base64 document/PDF blocks without silently discarding a user attachment.
+- Support base64/URL images and locally extract base64 document/PDF blocks without silently discarding a user attachment.
 - Treat Anthropic `cache_control` as an affinity hint, not as a claim that Anthropic cache billing semantics were reproduced.
 - Provide a durable local batch resource whose requests are independently validated and executed through the same non-streaming Messages path.
 - Preserve official compaction blocks and prevent an oversized message request from reaching a 272k upstream model window.
@@ -20,7 +20,7 @@ The active Anthropic facade translates Messages requests into codex-lb Responses
 
 ### Attachments
 
-Images are converted to Responses `input_image` parts with either a validated data URL or an HTTPS URL. Documents are converted to `input_file` parts with a validated data URL and filename. The existing Responses client owns remote image inlining and any file-account affinity. Unsupported document sources fail with an Anthropic `invalid_request_error` before upstream execution.
+Images are converted to Responses `input_image` parts with either a validated data URL or an HTTPS URL. UTF-8 text/CSV documents and text-bearing PDFs are decoded locally into bounded, labelled `input_text` parts so the private ChatGPT-backed transport never receives its rejected inline `input_file` shape. PDF extraction preserves page labels, rejects encrypted or image-only/scanned documents, and checks page count, page content-stream size, and total extracted character limits before forwarding. URL documents remain fail-closed because synchronous request normalization cannot fetch them without adding an SSRF-sensitive network client; callers must provide base64. The facade does not emulate OCR or document citations.
 
 ### Cache controls
 

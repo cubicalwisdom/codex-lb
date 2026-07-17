@@ -117,13 +117,19 @@ For `stream=false`, the route MUST translate completed Responses text and functi
 
 ### Requirement: Messages token count uses the local compatible estimator
 
-The system SHALL expose `POST /v1/messages/count_tokens`. It MUST accept the same supported input content and authentication conventions as `POST /v1/messages`, without requiring `max_tokens`, and MUST return an object containing a non-negative `input_tokens` integer. The route MUST validate and normalize the message payload before delegating to the existing local Responses token estimator, MUST return `x-codex-lb-token-count: local-compatible`, and MUST NOT create an upstream request. Unsupported or opaque input MUST return an Anthropic `invalid_request_error`.
+The system SHALL expose `POST /v1/messages/count_tokens`. It MUST accept the same supported input content and authentication conventions as `POST /v1/messages`, without requiring `max_tokens`, and MUST return an object containing a non-negative `input_tokens` integer. The route MUST validate and normalize the message payload before delegating to the existing local Responses token estimator, which MUST use the mapped model tokenizer when known and `o200k_base` otherwise rather than a byte- or character-ratio heuristic. The same tokenizer-compatible estimate MUST protect the mapped context budget. The route MUST return `x-codex-lb-token-count: local-compatible` and MUST NOT create an upstream request. Unsupported or opaque input MUST return an Anthropic `invalid_request_error`.
 
 #### Scenario: Claude Desktop performs a token-count preflight
 
 - **WHEN** the local `claudedesktop` profile posts a valid Messages payload to `/v1/messages/count_tokens`
 - **THEN** the response is HTTP 200 with a non-negative `input_tokens` value
 - **AND** it contains `x-codex-lb-token-count: local-compatible`
+
+#### Scenario: Tool schemas may define a property named type
+
+- **WHEN** a valid Messages token-count request includes a function tool whose JSON Schema `properties` object contains a property literally named `type`
+- **THEN** the local opaque-input scan treats that nested schema value as ordinary JSON metadata
+- **AND** the route returns HTTP 200 instead of raising an internal type error
 
 ### Requirement: Local Claude Desktop avoids recoverable startup and terminal stream failures
 

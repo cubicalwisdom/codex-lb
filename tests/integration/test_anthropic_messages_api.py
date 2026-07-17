@@ -5,9 +5,11 @@ import json
 from collections.abc import AsyncIterator
 
 import pytest
+import tiktoken
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import app.modules.proxy.api as proxy_api_module
+from app.core.openai.requests import ResponsesRequest
 from app.dependencies import ProxyContext, get_proxy_context
 from app.modules.anthropic_batches import service as anthropic_batches
 from app.modules.responses_lifecycle.service import ANONYMOUS_API_KEY_SCOPE
@@ -162,6 +164,7 @@ async def test_claude_desktop_route_uses_hosted_tool_for_public_workspace_web_fe
                 {
                     "name": "mcp__workspace__web_fetch",
                     "description": "Fetch a URL through the Cowork host workspace.",
+                    "defer_loading": True,
                     "input_schema": {
                         "type": "object",
                         "properties": {
@@ -231,6 +234,7 @@ async def test_claude_desktop_route_accepts_hosted_workspace_alias_in_tool_searc
                 {
                     "name": "mcp__workspace__web_fetch",
                     "description": "Fetch a page",
+                    "defer_loading": True,
                     "input_schema": {
                         "type": "object",
                         "properties": {"url": {"type": "string"}},
@@ -759,7 +763,7 @@ async def test_messages_context_management_compacts_near_limit_history(async_cli
             "max_tokens": 1024,
             "context_management": {"edits": [{"type": "clear_tool_uses_20250919"}]},
             "messages": [
-                {"role": "user", "content": "x" * 1_000_000},
+                {"role": "user", "content": "x " * 300_000},
                 {"role": "assistant", "content": "prior answer"},
                 {"role": "user", "content": "What should happen now?"},
             ],
@@ -1083,8 +1087,65 @@ async def test_claude_desktop_count_tokens_route_uses_local_messages_normalizati
     )
 
     assert response.status_code == 200
+    normalized = {
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Count these tokens."}]}],
+        "instructions": "Be concise.",
+        "tools": [],
+    }
+    serialized = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    expected = len(tiktoken.get_encoding("o200k_base").encode(serialized, disallowed_special=()))
+    assert response.json() == {"input_tokens": expected}
+    assert response.headers["x-codex-lb-token-count"] == "local-compatible"
+
+
+@pytest.mark.asyncio
+async def test_claude_desktop_count_tokens_accepts_tool_schema_property_named_type(async_client) -> None:
+    response = await async_client.post(
+        "/v1/messages/count_tokens?beta=true",
+        headers={"x-api-key": "claudedesktop"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "Count this tool schema."}],
+            "tools": [
+                {
+                    "name": "schema_probe",
+                    "description": "Exercise a normal JSON Schema property name.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string"},
+                            "file_id": {"type": "string"},
+                            "image_url": {"type": "string"},
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
     assert response.json()["input_tokens"] > 0
     assert response.headers["x-codex-lb-token-count"] == "local-compatible"
+
+
+def test_anthropic_context_guard_uses_o200k_tokenizer_fallback() -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "Unicode prompt: \u6570\u5b66 \ud83d\ude80",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "tools": [],
+        }
+    )
+    normalized = {
+        "instructions": payload.instructions,
+        "input": payload.input,
+        "tools": payload.tools,
+    }
+    serialized = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    expected = len(tiktoken.get_encoding("o200k_base").encode(serialized, disallowed_special=()))
+
+    assert proxy_api_module._anthropic_input_token_estimate(payload) == expected
 
 
 @pytest.mark.asyncio

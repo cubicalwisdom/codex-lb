@@ -32,12 +32,22 @@ async def count_input_tokens(payload: InputTokenCountRequest, api_key_scope: str
         )
 
     model = payload.model or "gpt-5"
+    countable = {key: value for key, value in data.items() if key not in {"model"}}
+    return count_json_tokens(countable, model=str(model))
+
+
+def count_json_tokens(value: JsonValue, *, model: str) -> int:
+    """Count a normalized JSON value with the mapped tokenizer.
+
+    Private Codex model aliases are not always registered by tiktoken, so the
+    Responses-compatible o200k encoding is the deterministic fallback.
+    """
+
     try:
         encoding = tiktoken.encoding_for_model(model)
     except KeyError:
         encoding = tiktoken.get_encoding("o200k_base")
-    countable = {key: value for key, value in data.items() if key not in {"model"}}
-    serialized = json.dumps(countable, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return len(encoding.encode(serialized, disallowed_special=()))
 
 
@@ -60,8 +70,8 @@ def _contains_opaque_input(value: JsonValue) -> bool:
         return False
     mapping = cast(dict[str, JsonValue], value)
     item_type = mapping.get("type")
-    if item_type in {"input_file", "input_image"}:
+    if isinstance(item_type, str) and item_type in {"input_file", "input_image"}:
         return True
-    if "file_id" in mapping or "image_url" in mapping:
+    if isinstance(mapping.get("file_id"), str) or isinstance(mapping.get("image_url"), str):
         return True
     return any(_contains_opaque_input(child) for child in mapping.values())

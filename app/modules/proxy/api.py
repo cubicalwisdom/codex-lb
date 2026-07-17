@@ -159,7 +159,11 @@ from app.modules.responses_lifecycle.schemas import (
     ConversationUpdateRequest,
     InputTokenCountRequest,
 )
-from app.modules.responses_lifecycle.token_count import OpaqueTokenCountInputError, count_input_tokens
+from app.modules.responses_lifecycle.token_count import (
+    OpaqueTokenCountInputError,
+    count_input_tokens,
+    count_json_tokens,
+)
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 
@@ -1815,14 +1819,10 @@ def _anthropic_recent_turn_start(input_items: list[JsonValue]) -> int:
 
 
 def _anthropic_input_token_estimate(payload: ResponsesRequest) -> int:
-    serialized = json.dumps(
+    return count_json_tokens(
         {"instructions": payload.instructions, "input": payload.input, "tools": payload.tools},
-        ensure_ascii=False,
-        separators=(",", ":"),
+        model=str(payload.model or "gpt-5"),
     )
-    # This is intentionally a conservative local guard, not an Anthropic token
-    # count. Exact counting remains available through /count_tokens for text.
-    return (len(serialized.encode("utf-8")) + 3) // 4
 
 
 def _anthropic_batch_create_items(

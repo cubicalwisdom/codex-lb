@@ -56,7 +56,7 @@ When an Anthropic request forces the supported `web_search` or `web_fetch` tool 
 
 ### Requirement: Web tool completion uses the existing Messages response lifecycle
 
-The facade MUST return final hosted-search answer text through the existing Anthropic non-streaming or streaming Messages lifecycle and MUST preserve terminal usage and errors. This compatibility slice MUST NOT fabricate Anthropic server-tool result blocks or citations when the upstream response does not supply sufficient equivalent data.
+The facade MUST return final hosted-search answer text through the existing Anthropic non-streaming or streaming Messages lifecycle and MUST preserve terminal usage and errors. When the upstream response supplies a completed web-search call plus result entries containing the exact Anthropic-compatible opaque result fields, the facade MUST translate them into ordered `server_tool_use` and `web_search_tool_result` blocks. It MUST attach citations to text only when the upstream annotation supplies the exact Anthropic-compatible citation fields. Public Responses URL annotations or lifecycle events that lack those opaque fields MUST retain the existing text-only fallback. The facade MUST NOT fabricate encrypted result content, encrypted citation indexes, cited text, server-tool results, or citations.
 
 #### Scenario: Hosted search completes during a stream
 
@@ -64,11 +64,24 @@ The facade MUST return final hosted-search answer text through the existing Anth
 - **THEN** the facade emits the existing ordered Anthropic text-block and terminal events
 - **AND** it does not expose raw Responses events to Claude Desktop
 
+#### Scenario: Exact hosted result data becomes Anthropic blocks
+
+- **WHEN** a completed upstream web-search item contains a query and result entries with URL, title, and upstream-supplied encrypted content
+- **THEN** the Messages response contains an ordered `server_tool_use` block followed by its `web_search_tool_result`
+- **AND** the facade preserves the upstream opaque fields verbatim
+
+#### Scenario: Public URL annotations remain a text fallback
+
+- **WHEN** the upstream supplies answer text with public `url_citation` annotations but no Anthropic-compatible encrypted citation index
+- **THEN** the facade returns the answer text without fabricated Anthropic citations
+
 ### Requirement: Claude Desktop public Workspace WebFetch avoids oversized client results
 
-For the authenticated loopback-only `claudedesktop` profile, the facade MUST replace an eager `mcp__workspace__web_fetch` client-tool definition with the Responses hosted `web_search` tool when the active conversation contains an explicit public HTTP(S) URL. It MUST deduplicate that alias with any supported Anthropic web server tool and MUST preserve the server tool's enforceable hosted controls. A forced choice of an alias replaced for that request MUST select the hosted web tool.
+For the authenticated loopback-only `claudedesktop` profile, the facade MUST replace an `mcp__workspace__web_fetch` client-tool definition with the Responses hosted `web_search` tool when the latest human user prompt contains one or more explicit HTTP(S) targets and every such target is public, whether Claude advertises that alias eagerly or with `defer_loading`. It MUST deduplicate that alias with any supported Anthropic web server tool and MUST preserve the server tool's enforceable hosted controls. A forced choice of an alias replaced for that request MUST select the hosted web tool.
 
-The facade MUST retain the ordinary client-function definition for non-Desktop callers, for conversations without an explicit public URL, for loopback/private/local URL targets, and when the Workspace tool is deferred for ToolSearch. It MUST NOT read a path named in an oversized tool-result marker or otherwise add host filesystem access while applying this compatibility rule.
+The facade MUST retain the ordinary client-function definition for non-Desktop callers, for conversations without an explicit public URL, and for loopback/private/local URL targets. It MUST NOT read a path named in an oversized tool-result marker or otherwise add host filesystem access while applying this compatibility rule.
+
+Claude Desktop can omit WebFetch from a dynamic ToolSearch result because of its own permission policy, then invoke `mcp__workspace__web_fetch` client-side without advertising that alias in the current Messages `tools` array. The facade cannot replace a tool definition that the client did not send. Such an invocation remains governed by Claude's permission mode: the current Desktop Auto classifier can reject it as a proxy for a denied WebFetch operation, while Manual mode can present or execute the client-side fetch. This client-policy boundary MUST NOT be described as an adapter HTTP or hosted-web failure.
 
 #### Scenario: Cowork fetches a public documentation URL
 
@@ -82,15 +95,34 @@ The facade MUST retain the ordinary client-function definition for non-Desktop c
 - **WHEN** the same client tool is used for a loopback, private, local, or non-explicit URL
 - **THEN** the forwarded tool remains an ordinary function with its original schema
 
-#### Scenario: Deferred Workspace tool remains replayable
+#### Scenario: Historical public URL does not override the current local target
+
+- **WHEN** an older user prompt contains a public URL
+- **AND** the latest human user prompt targets a loopback, private, or local URL
+- **THEN** the Workspace tool remains an ordinary client function
+
+#### Scenario: Mixed public and local targets remain client-executed
+
+- **WHEN** the latest human user prompt contains both public and loopback, private, or local URLs
+- **THEN** the Workspace tool remains an ordinary client function rather than losing local-network access
+
+#### Scenario: Deferred public Workspace fetch uses the hosted tool
 
 - **WHEN** `mcp__workspace__web_fetch` is marked `defer_loading: true`
-- **THEN** it remains a function definition suitable for ToolSearch reference replay
+- **AND** the active Claude Desktop conversation contains an explicit public HTTP(S) URL
+- **THEN** it is replaced by the hosted `web_search` tool
+- **AND** any historical ToolSearch reference to the alias remains resolvable through hosted-alias bookkeeping
+
+#### Scenario: Deferred private Workspace fetch remains client-executed
+
+- **WHEN** `mcp__workspace__web_fetch` is marked `defer_loading: true`
+- **AND** the active Claude Desktop conversation targets a loopback, private, or local URL
+- **THEN** it remains a function definition suitable for client execution
 
 #### Scenario: Historical ToolSearch selected the now-hosted alias
 
 - **WHEN** an authenticated Claude Desktop request contains a prior ToolSearch result whose `tool_reference` names `mcp__workspace__web_fetch`
-- **AND** the current eager definition is replaced by hosted `web_search` for an explicit public URL
+- **AND** the current definition is replaced by hosted `web_search` for an explicit public URL
 - **THEN** the original Workspace name is accepted as an available hosted alias
 - **AND** the historical ToolSearch call/output pair is omitted when it selected no ordinary client tools
 - **AND** the alias is not reintroduced as a client-executed function

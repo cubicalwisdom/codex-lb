@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import io
 import ipaddress
 import json
 import re
@@ -10,6 +11,9 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Final, cast
 from urllib.parse import urlparse
+
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.requests import ResponsesRequest
@@ -82,6 +86,9 @@ _CLAUDE_WORKSPACE_WEB_FETCH_NAME: Final = "mcp__workspace__web_fetch"
 _PUBLIC_HTTP_URL_RE: Final = re.compile(r"https?://[^\s<>()\"']+", re.IGNORECASE)
 _LOCAL_WEB_HOST_SUFFIXES: Final[tuple[str, ...]] = (".localhost", ".local", ".internal")
 _MAX_INLINE_ATTACHMENT_BYTES: Final = 10 * 1024 * 1024
+_MAX_PDF_PAGES: Final = 500
+_MAX_PDF_PAGE_CONTENT_BYTES: Final = 16 * 1024 * 1024
+_MAX_EXTRACTED_DOCUMENT_CHARS: Final = 1_000_000
 
 
 def anthropic_error(error_type: str, message: str) -> dict[str, JsonValue]:
@@ -148,7 +155,7 @@ def to_responses_request(
         converted_tools, hosted_web_aliases = _tools_to_responses(
             tools,
             claude_desktop=claude_desktop,
-            route_workspace_web_fetch=claude_desktop and _contains_public_web_url(messages),
+            route_workspace_web_fetch=claude_desktop and _latest_user_prompt_targets_public_web(messages),
         )
     else:
         converted_tools = []
@@ -244,6 +251,9 @@ def message_from_responses(response: Mapping[str, JsonValue], *, client_model: s
             if item is None:
                 continue
             item_type = item.get("type")
+            if item_type == "web_search_call":
+                content.extend(_anthropic_web_search_blocks(item))
+                continue
             if item_type == "function_call":
                 content.append(_tool_use_block(item))
                 saw_tool_use = True
@@ -259,7 +269,11 @@ def message_from_responses(response: Mapping[str, JsonValue], *, client_model: s
                     continue
                 text = _response_text(part)
                 if text is not None:
-                    content.append({"type": "text", "text": text})
+                    text_block: dict[str, JsonValue] = {"type": "text", "text": text}
+                    citations = _anthropic_text_citations(part)
+                    if citations:
+                        text_block["citations"] = citations
+                    content.append(text_block)
 
     response_id = response.get("id")
     usage_value = response.get("usage")
@@ -420,7 +434,15 @@ class _MessagesStreamState:
 
     def handle_content_part_done(self, payload: Mapping[str, JsonValue]) -> list[str]:
         block = self._block_for_text(payload)
-        return self._stop_block(block) if block is not None else []
+        if block is None:
+            return []
+        events: list[str] = []
+        part_value = payload.get("part")
+        part = part_value if is_json_mapping(part_value) else None
+        if part is not None:
+            events.extend(self._citation_events(block, part))
+        events.extend(self._stop_block(block))
+        return events
 
     def handle_function_arguments_delta(self, payload: Mapping[str, JsonValue]) -> list[str]:
         delta = payload.get("delta")
@@ -442,6 +464,12 @@ class _MessagesStreamState:
         item = item_value if is_json_mapping(item_value) else None
         if item is None:
             return []
+        if item.get("type") == "web_search_call":
+            blocks = _anthropic_web_search_blocks(item)
+            events: list[str] = []
+            for content_block in blocks:
+                events.extend(self._complete_content_block(content_block))
+            return events
         if item.get("type") == "function_call":
             block = self._tool_block(payload, item)
             events = self._start_tool_block(block)
@@ -469,7 +497,9 @@ class _MessagesStreamState:
         item_id = _optional_string(item.get("id"))
         for content_index, part_value in enumerate(content_value):
             part = part_value if is_json_mapping(part_value) else None
-            text = _response_text(part) if part is not None else None
+            if part is None:
+                continue
+            text = _response_text(part)
             if text is None:
                 continue
             fallback_payload = dict(payload)
@@ -487,6 +517,7 @@ class _MessagesStreamState:
                     "content_block_delta", {"index": block.index, "delta": {"type": "text_delta", "text": text}}
                 )
             )
+            events.extend(self._citation_events(block, part))
             events.extend(self._stop_block(block))
         return events
 
@@ -644,6 +675,35 @@ class _MessagesStreamState:
             )
         ]
 
+    def _complete_content_block(self, content_block: Mapping[str, JsonValue]) -> list[str]:
+        index = self.next_index
+        self.next_index += 1
+        return self.ensure_started(None) + [
+            _anthropic_event(
+                "content_block_start",
+                {"index": index, "content_block": dict(content_block)},
+            ),
+            _anthropic_event("content_block_stop", {"index": index}),
+        ]
+
+    def _citation_events(
+        self,
+        block: _ContentBlockState,
+        part: Mapping[str, JsonValue],
+    ) -> list[str]:
+        if block.closed:
+            return []
+        return [
+            _anthropic_event(
+                "content_block_delta",
+                {
+                    "index": block.index,
+                    "delta": {"type": "citations_delta", "citation": citation},
+                },
+            )
+            for citation in _anthropic_text_citations(part)
+        ]
+
     def _stop_block(self, block: _ContentBlockState) -> list[str]:
         if block.closed or not block.started:
             return []
@@ -653,6 +713,105 @@ class _MessagesStreamState:
 
 def _anthropic_event(event_type: str, values: Mapping[str, JsonValue]) -> str:
     return format_sse_event({"type": event_type, **values})
+
+
+def _anthropic_web_search_blocks(item: Mapping[str, JsonValue]) -> list[dict[str, JsonValue]]:
+    """Return server-tool blocks only for a complete, lossless result shape.
+
+    Public Responses web-search items expose lifecycle/action data but not the
+    opaque fields Claude requires for replay. Private upstreams may preserve
+    those fields; this adapter passes them through only when every result is
+    complete and otherwise retains the existing final-text fallback.
+    """
+
+    if item.get("status") != "completed":
+        return []
+    item_id = _optional_string(item.get("id"))
+    action_value = item.get("action")
+    action = action_value if is_json_mapping(action_value) else None
+    if (
+        item_id is None
+        or not item_id.startswith("srvtoolu_")
+        or action is None
+        or action.get("type") != "search"
+    ):
+        return []
+    query = _optional_string(action.get("query"))
+    if query is None:
+        queries_value = action.get("queries")
+        if is_json_list(queries_value) and len(queries_value) == 1:
+            query = _optional_string(queries_value[0])
+    if query is None:
+        return []
+    results_value = item.get("results")
+    if not is_json_list(results_value) or not results_value:
+        return []
+    results: list[JsonValue] = []
+    for result_value in results_value:
+        result = result_value if is_json_mapping(result_value) else None
+        if result is None:
+            return []
+        result_type = result.get("type")
+        if result_type is not None and result_type != "web_search_result":
+            return []
+        url = _optional_string(result.get("url"))
+        title = _optional_string(result.get("title"))
+        encrypted_content = _optional_string(result.get("encrypted_content"))
+        if url is None or title is None or encrypted_content is None:
+            return []
+        translated: dict[str, JsonValue] = {
+            "type": "web_search_result",
+            "url": url,
+            "title": title,
+            "encrypted_content": encrypted_content,
+        }
+        page_age = _optional_string(result.get("page_age"))
+        if page_age is not None:
+            translated["page_age"] = page_age
+        results.append(translated)
+    return [
+        {
+            "type": "server_tool_use",
+            "id": item_id,
+            "name": "web_search",
+            "input": {"query": query},
+        },
+        {
+            "type": "web_search_tool_result",
+            "tool_use_id": item_id,
+            "content": results,
+        },
+    ]
+
+
+def _anthropic_text_citations(part: Mapping[str, JsonValue]) -> list[JsonValue]:
+    annotations_value = part.get("annotations")
+    if not is_json_list(annotations_value):
+        return []
+    citations: list[JsonValue] = []
+    for annotation_value in annotations_value:
+        annotation = annotation_value if is_json_mapping(annotation_value) else None
+        if annotation is None or annotation.get("type") not in {
+            "url_citation",
+            "web_search_result_location",
+        }:
+            continue
+        url = _optional_string(annotation.get("url"))
+        title = _optional_string(annotation.get("title"))
+        encrypted_index = _optional_string(annotation.get("encrypted_index"))
+        cited_text = _optional_string(annotation.get("cited_text"))
+        if url is None or title is None or encrypted_index is None or cited_text is None:
+            continue
+        citations.append(
+            {
+                "type": "web_search_result_location",
+                "url": url,
+                "title": title,
+                "encrypted_index": encrypted_index,
+                "cited_text": cited_text,
+            }
+        )
+    return citations
 
 
 def _is_stream_incomplete_event(payload: Mapping[str, JsonValue]) -> bool:
@@ -1132,25 +1291,33 @@ def _image_input(block: Mapping[str, JsonValue], *, param: str) -> dict[str, Jso
 def _document_input(block: Mapping[str, JsonValue], *, param: str) -> dict[str, JsonValue]:
     source = _required_mapping(block.get("source"), f"{param}.source")
     source_type = _required_string(source, "type")
-    filename = _document_filename(block.get("title"), param=f"{param}.title")
     if source_type == "base64":
         media_type = _attachment_media_type(
             source,
             allowed=_SUPPORTED_DOCUMENT_MEDIA_TYPES,
             param=f"{param}.source.media_type",
         )
-        data = _validated_base64_attachment(source, param=f"{param}.source.data")
+        filename = _document_filename(
+            block.get("title"),
+            media_type=media_type,
+            param=f"{param}.title",
+        )
+        data = _decoded_base64_attachment(source, param=f"{param}.source.data")
+        extracted = _extract_document_text(
+            data,
+            media_type=media_type,
+            param=f"{param}.source.data",
+        )
         return {
-            "type": "input_file",
-            "file_url": f"data:{media_type};base64,{data}",
-            "filename": filename,
+            "type": "input_text",
+            "text": f"[Document: {filename}; media_type={media_type}]\n{extracted}\n[End document: {filename}]",
         }
     if source_type == "url":
-        return {
-            "type": "input_file",
-            "file_url": _safe_attachment_url(source.get("url"), param=f"{param}.source.url"),
-            "filename": filename,
-        }
+        _safe_attachment_url(source.get("url"), param=f"{param}.source.url")
+        raise ClientPayloadError(
+            "Document URL sources are not supported by this transport; provide a base64 document.",
+            param=f"{param}.source.type",
+        )
     raise ClientPayloadError(
         "Document source type must be 'base64' or 'url'.",
         param=f"{param}.source.type",
@@ -1171,6 +1338,13 @@ def _attachment_media_type(
 
 
 def _validated_base64_attachment(source: Mapping[str, JsonValue], *, param: str) -> str:
+    _decoded_base64_attachment(source, param=param)
+    data = source.get("data")
+    assert isinstance(data, str)
+    return data
+
+
+def _decoded_base64_attachment(source: Mapping[str, JsonValue], *, param: str) -> bytes:
     data = source.get("data")
     if not isinstance(data, str) or not data:
         raise ClientPayloadError("Attachment source requires non-empty base64 'data'.", param=param)
@@ -1185,7 +1359,82 @@ def _validated_base64_attachment(source: Mapping[str, JsonValue], *, param: str)
             f"Inline attachments must not exceed {_MAX_INLINE_ATTACHMENT_BYTES // (1024 * 1024)} MiB.",
             param=param,
         )
-    return data
+    return decoded
+
+
+def _extract_document_text(data: bytes, *, media_type: str, param: str) -> str:
+    if media_type in {"text/plain", "text/csv"}:
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ClientPayloadError(
+                "Plain-text and CSV documents must use UTF-8 encoding.",
+                param=param,
+            ) from exc
+        return _bounded_document_text(text, param=param)
+    if media_type != "application/pdf":
+        raise ClientPayloadError("Unsupported document media type.", param=param)
+    return _extract_pdf_text(data, param=param)
+
+
+def _extract_pdf_text(data: bytes, *, param: str) -> str:
+    try:
+        reader = PdfReader(io.BytesIO(data), strict=False)
+        if reader.is_encrypted:
+            raise ClientPayloadError(
+                "Encrypted PDF documents are not supported.",
+                param=param,
+            )
+        page_count = len(reader.pages)
+        if page_count > _MAX_PDF_PAGES:
+            raise ClientPayloadError(
+                f"PDF documents may contain at most {_MAX_PDF_PAGES} pages.",
+                param=param,
+            )
+        page_text: list[str] = []
+        extracted_any = False
+        extracted_chars = 0
+        for page_number, page in enumerate(reader.pages, start=1):
+            contents = page.get_contents()
+            if contents is not None and len(contents.get_data()) > _MAX_PDF_PAGE_CONTENT_BYTES:
+                raise ClientPayloadError(
+                    f"PDF page {page_number} exceeds the safe content-stream limit.",
+                    param=param,
+                )
+            text = page.extract_text() or ""
+            stripped = text.strip()
+            if stripped:
+                extracted_any = True
+                extracted_chars += len(stripped)
+                if extracted_chars > _MAX_EXTRACTED_DOCUMENT_CHARS:
+                    raise ClientPayloadError(
+                        f"Extracted document text must not exceed {_MAX_EXTRACTED_DOCUMENT_CHARS} characters.",
+                        param=param,
+                    )
+                page_text.append(f"[Page {page_number}]\n{stripped}")
+            else:
+                page_text.append(f"[Page {page_number}]\n[No extractable text]")
+    except ClientPayloadError:
+        raise
+    except (PdfReadError, OSError, TypeError, ValueError) as exc:
+        raise ClientPayloadError("PDF document could not be read safely.", param=param) from exc
+    if not extracted_any:
+        raise ClientPayloadError(
+            "PDF document contains no extractable text; scanned or image-only PDFs require OCR before upload.",
+            param=param,
+        )
+    return "\n\n".join(page_text)
+
+
+def _bounded_document_text(text: str, *, param: str) -> str:
+    if not text.strip():
+        raise ClientPayloadError("Document contains no text.", param=param)
+    if len(text) > _MAX_EXTRACTED_DOCUMENT_CHARS:
+        raise ClientPayloadError(
+            f"Extracted document text must not exceed {_MAX_EXTRACTED_DOCUMENT_CHARS} characters.",
+            param=param,
+        )
+    return text
 
 
 def _safe_attachment_url(value: JsonValue, *, param: str) -> str:
@@ -1198,9 +1447,10 @@ def _safe_attachment_url(value: JsonValue, *, param: str) -> str:
     return url
 
 
-def _document_filename(value: JsonValue, *, param: str) -> str:
+def _document_filename(value: JsonValue, *, media_type: str, param: str) -> str:
     if value is None:
-        return "document.pdf"
+        extension = {"application/pdf": "pdf", "text/csv": "csv"}.get(media_type, "txt")
+        return f"document.{extension}"
     if not isinstance(value, str) or not value.strip():
         raise ClientPayloadError("Document title must be a non-empty string.", param=param)
     return value.strip()[:255]
@@ -1344,7 +1594,6 @@ def _tools_to_responses(
             claude_desktop
             and route_workspace_web_fetch
             and tool.get("name") == _CLAUDE_WORKSPACE_WEB_FETCH_NAME
-            and tool.get("defer_loading") is not True
         )
         if workspace_alias:
             input_schema = tool.get("input_schema")
@@ -1389,22 +1638,37 @@ def _tools_to_responses(
     return converted, frozenset(hosted_web_aliases)
 
 
-def _contains_public_web_url(value: JsonValue, *, depth: int = 0) -> bool:
-    if depth > 12:
-        return False
-    if isinstance(value, str):
-        for match in _PUBLIC_HTTP_URL_RE.finditer(value):
-            candidate = match.group(0).rstrip(".,;:!?)]}")
-            if _is_public_http_url(candidate):
-                return True
-        return False
-    if is_json_list(value):
-        return any(_contains_public_web_url(item, depth=depth + 1) for item in value)
-    if is_json_mapping(value):
-        return any(
-            key != "data" and _contains_public_web_url(item, depth=depth + 1)
-            for key, item in value.items()
-        )
+def _latest_user_prompt_targets_public_web(messages: list[JsonValue]) -> bool:
+    """Route only when the latest human prompt names public-only targets.
+
+    Anthropic represents client tool results as ``role=user`` messages too.
+    Those result-only messages are skipped so the originating human prompt
+    still controls the route, while an actual later human prompt overrides
+    every URL in older conversation history.
+    """
+
+    for message_value in reversed(messages):
+        if not is_json_mapping(message_value) or message_value.get("role") != "user":
+            continue
+        content = message_value.get("content")
+        prompt_text: list[str] = []
+        if isinstance(content, str):
+            prompt_text.append(content)
+        elif is_json_list(content):
+            for block_value in content:
+                if not is_json_mapping(block_value) or block_value.get("type") != "text":
+                    continue
+                text = block_value.get("text")
+                if isinstance(text, str):
+                    prompt_text.append(text)
+        if not prompt_text:
+            continue
+        targets = [
+            match.group(0).rstrip(".,;:!?)]}")
+            for text in prompt_text
+            for match in _PUBLIC_HTTP_URL_RE.finditer(text)
+        ]
+        return bool(targets) and all(_is_public_http_url(target) for target in targets)
     return False
 
 

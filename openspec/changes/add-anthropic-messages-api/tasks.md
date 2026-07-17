@@ -30,3 +30,4 @@
 - [x] 4.9 Add focused backend, API, and CodexNeo UI regressions; verify the portable backend and packaged frontend without restarting Codex Desktop.
 - [x] 4.10 Add the Claude Messages token-count route and narrow Desktop startup/terminal-stream resilience coverage.
 - [x] 4.11 Add the explicit CodexNeo **Restart Claude** dashboard action with package-scoped restart coverage.
+- [x] 4.12 Accept nested JSON Schema properties named `type`, `file_id`, or `image_url` during local token counting, with exact route regression coverage and live verification.

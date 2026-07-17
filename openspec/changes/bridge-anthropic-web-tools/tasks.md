@@ -42,3 +42,16 @@
 - [x] 6.3 Resolve ToolSearch references through the same hosted-alias registry as forced choice, omit hosted aliases from client tool-search output, and suppress empty hosted-only bookkeeping pairs.
 - [x] 6.4 Run focused/full Anthropic verification, Ruff, scoped ty, strict OpenSpec validation, portable hash/compile checks, and the app-owned minimal-downtime restart.
 - [x] 6.5 Retest the exact historical ToolSearch plus public WebFetch request live, then update implementation tracking and handover with the reference-project comparison and final evidence.
+
+## 7. Trustworthy hosted-result translation
+
+- [x] 7.1 Add RED non-streaming and streaming regressions for exact opaque web results, citation preservation, and insufficient-data text fallback.
+- [x] 7.2 Translate only complete upstream server-result/citation shapes and preserve the existing text lifecycle otherwise.
+- [x] 7.3 Run focused/full Anthropic verification, Ruff, scoped ty, strict OpenSpec validation, and portable source hash/compile checks without restarting the active runtime.
+
+## 8. Deferred Workspace WebFetch egress follow-up
+
+- [x] 8.1 Reproduce Claude Desktop retaining `mcp__workspace__web_fetch` as a deferred client tool for a public URL, which leaves execution subject to Cowork's local egress allowlist.
+- [x] 8.2 Route both eager and deferred public Workspace WebFetch aliases through the hosted Responses web tool while preserving client execution for loopback/private/local targets.
+- [x] 8.3 Add unit and route-level regressions for deferred public routing, historical ToolSearch replay, deferred private/local preservation, historical-public/current-local precedence, and mixed public/local targets.
+- [x] 8.4 Run the full verification ladder, mirror the portable runtime, restart CodexNeo, and complete fresh Claude Desktop WebFetch/WebSearch/ToolSearch acceptance without restarting Claude automatically. Record the separate Claude Auto-mode policy boundary when Cowork omits WebFetch from ToolSearch and executes the Workspace alias client-side.
